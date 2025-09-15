@@ -18,6 +18,7 @@ bitflags = "^2.6"
 rayon = "^1.10"
 psm = "^0.1"
 stacker = "^0.1"
+mmtk = { version = "^0.31", default-features = false }
 
 # DISABLED: Benchmarks are too aggressive and can crash VMs
 # [[bench]]
@@ -29,7 +30,7 @@ stacker = "^0.1"
 # harness = false
 
 [dev-dependencies]
-criterion = "0.7.0"
+criterion = "^0.7.0"
 
 [features]
 # Enable lightweight smoke tests that validate high-level GC semantics

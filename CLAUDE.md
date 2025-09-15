@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is a Rust implementation of a concurrent, non-moving garbage collector inspired by Epic Games' FUGC (Fil's Unbelievable Garbage Collector) from the Verse programming language. The project aims to bring innovative GC features like free singleton redirection and advanced weak reference handling to Rust while maintaining compatibility with the borrow checker.
+This is a Rust implementation of a concurrent, non-moving garbage collector inspired by Epic Games' FUGC (Fil's Unbelievable Garbage Collector) from the Verse programming language. The project aims to bring innovative GC features to Rust, with potential integration paths for MMTk (Memory Management Toolkit) or pure-Rust implementations.
 
 ## Build & Development Commands
 
@@ -12,8 +12,11 @@ This is a Rust implementation of a concurrent, non-moving garbage collector insp
 # Build the project
 cargo build
 
-# Run tests
+# Run all tests
 cargo test
+
+# Run tests with smoke feature (lightweight GC semantics validation)
+cargo test --features smoke
 
 # Run a single test
 cargo test test_name
@@ -30,42 +33,140 @@ cargo clippy
 
 ## Architecture
 
-The garbage collector consists of several key components:
+The project implements a FUGC-inspired garbage collector for a Rust VM using MMTk as the foundation.
 
-- **Core Smart Pointers**: `Gc<T>` for managed objects, with atomic redirection to `FREE_SINGLETON` for dead objects
-- **Memory Management**: `SegmentedHeap` provides thread-local allocation with fixed-size segments
-- **Collection Phases**: Concurrent marking, censusing (weak references), reviving (finalizers), and sweeping
-- **Thread Coordination**: `CollectorState` manages GC phases and worker threads, `MutatorState` for thread-local operations
-- **Object Classification**: Different object types (`Default`, `Destructor`, `Census`, `Finalizer`) allocated in distinct heaps
+### MMTk Integration Strategy
 
-Key implementation details:
+**MMTk Plan Composition:**
 
-- Non-moving design ensures pointer stability for FFI compatibility
-- Free singleton redirection prevents use-after-free by atomically redirecting dead object pointers
-- Handshake mechanism for soft synchronization without full stop-the-world pauses
-- Fork() safety through GC suspension mechanisms
+```rust
+// Custom plan combining FUGC concepts with MMTk infrastructure
+pub struct RustVMPlan<VM: VMBinding> {
+    common: CommonPlan<VM>,
+    mark_compact: MarkCompact<VM>, // Non-moving as per FUGC design
+    barrier: DijkstraBarrier<VM>,
+    // FUGC-style generational if needed later
+}
+```
 
-## Module Structure
+**VM Binding Layer Design:**
 
-Current modules in `src/`:
+- **Object Model**: Define how VM objects map to MMTk's expectations
+- **Root Scanning**: Integrate with thread registry for stack/global roots
+- **Allocation Sites**: Hook MMTk allocators into VM allocation points
 
-- `segmented_heap.rs` - Low-level memory management
-- `collector_phase.rs` - GC phase state machine
-- `gc_allocator.rs` - Allocation interface
-- `collector_state.rs` - Central GC coordination
-- `type_info.rs` - Type metadata and vtables
-- `free_singleton.rs` - Dead object redirection
-- `object_class.rs` - Object categorization
-- `weak.rs` - Weak reference implementation
-- `finalizable.rs` - Finalizer support
-- `sweeping_phase.rs` - Memory reclamation
-- `suspend_for_fork.rs` - Fork safety mechanisms
+### Hybrid Memory Management
 
-## Implementation Notes
+**MMTk + jemalloc Strategy:**
+- MMTk handles GC heap (managed objects)
+- jemalloc for VM infrastructure (bytecode, JIT code, metadata)
+- Simpler FFI boundary than libpas
 
-The project is in early development stages - the main lib.rs currently contains only placeholder code. The actual GC implementation will need to:
+**Alternative libpas Integration** (for advanced workloads):
+- MMTk delegates to libpas for large object spaces
+- Better for mixed workloads with varying allocation patterns
 
-1. Implement the `GcTrace` trait (likely via derive macro) for tracing object graphs
-2. Provide RAII guards (`GcRef<T>`, `GcRefMut<T>`) for borrow checker compliance
-3. Ensure thread-safety through atomic operations and proper synchronization
-4. Handle root registration for global/static GC pointers
+### Safepoint Integration
+
+```rust
+// At bytecode dispatch/loop headers
+fn execute_bytecode() {
+    loop {
+        if unlikely(safepoint_requested()) {
+            vm_safepoint(); // Includes GC poll
+        }
+        // Execute instruction
+    }
+}
+
+// At allocation sites (handled by MMTk)
+fn allocate<T>() -> Gc<T> {
+    // MMTk handles safepoint polling internally
+    mmtk_alloc(size_of::<T>())
+}
+```
+
+### Gc<T> API Design for VM
+
+```rust
+// VM-specific wrapper over MMTk's ObjectReference
+pub struct Gc<T> {
+    ptr: ObjectReference, // MMTk's object reference
+    _phantom: PhantomData<T>,
+}
+
+// Barrier integration (MMTk handles the heavy lifting)
+impl<T> Gc<T> {
+    pub fn write(&self, field: &mut Gc<U>, value: Gc<U>) {
+        // MMTk's write barrier
+        mmtk::memory_manager::object_reference_write(
+            self.ptr, field as *mut _ as Address, value.ptr
+        );
+    }
+}
+```
+
+### FUGC-Specific Adaptations
+
+**Incremental Stack Scanning:**
+- Use MMTk's concurrent marking with custom stack scanning
+- Implement soft handshakes in VM's thread management
+
+**Parallel Marking:**
+- MMTk provides parallel GC workers out of the box
+- Configure work-stealing for object graph traversal
+
+## Testing Strategy
+
+The test suite uses feature flags to organize different test categories:
+
+- **smoke**: Lightweight tests for validating high-level GC semantics and infrastructure
+- **segment_scan_linux**: Linux-specific segment scanning tests
+- **legacy_tests**: Backward compatibility tests
+
+Tests demonstrate key FUGC properties including handshake mechanisms, safepoint infrastructure, and concurrent collection phases.
+
+## Implementation Roadmap
+
+### Architecture Recommendations
+
+1. **Start with MMTk's existing concurrent plan** as base
+2. **Customize the write barrier** for FUGC-style incremental marking
+3. **Use jemalloc for non-GC allocations** (simpler than libpas integration initially)
+4. **Design VM's object layout** to work well with MMTk's tracing
+
+### Key Integration Points
+
+- **Object Headers**: Align with MMTk's metadata requirements
+- **Thread Management**: Thread registry feeds MMTk's root scanning
+- **JIT Integration**: If present, coordinate with MMTk's code space management
+
+### Development Phases
+
+1. **Phase 1**: MMTk VM binding implementation
+   - Define object model and layout
+   - Implement root scanning hooks
+   - Basic allocation integration
+
+2. **Phase 2**: FUGC-specific features
+   - Concurrent marking with custom barriers
+   - Soft handshakes for incremental stack scanning
+   - Parallel marking optimization
+
+3. **Phase 3**: Performance tuning
+   - Inline barrier fast paths
+   - Work-stealing configuration
+   - Benchmark against pure-Rust alternatives
+
+4. **Phase 4**: Advanced features
+   - FUGC-style generational collection
+   - Advanced weak reference handling
+   - Free singleton redirection
+
+## Key Dependencies
+
+- `crossbeam`: Lock-free data structures for concurrent collection
+- `parking_lot`: Efficient synchronization primitives
+- `rayon`: Parallel iteration for marking phase
+- `psm` & `stacker`: Stack manipulation for root scanning
+- `thread_local`: Thread-local storage for mutator state
