@@ -1,5 +1,5 @@
 use fugrip::{
-    core::{Gc, ObjectFlags, LayoutId},
+    core::{Gc, LayoutId, ObjectFlags},
     weak::{WeakRef, WeakRefHeader, WeakRefRegistry},
 };
 

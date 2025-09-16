@@ -27,7 +27,7 @@ fn write_barrier_integration_test() {
     barrier.activate();
 
     let mut slot = obj1;
-    barrier.write_barrier(&mut slot as *mut ObjectReference, obj2);
+    unsafe { barrier.write_barrier(&mut slot as *mut ObjectReference, obj2) };
 
     // Verify write barrier shaded the old value
     assert_eq!(marking.get_color(obj1), ObjectColor::Grey);

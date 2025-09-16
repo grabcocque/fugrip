@@ -2,8 +2,8 @@ use fugrip::{
     allocator::{AllocatorInterface, MMTkAllocator},
     binding::RustVM,
     core::ObjectHeader,
-    thread::MutatorThread,
     error::GcResult,
+    thread::MutatorThread,
 };
 
 #[test]
@@ -48,7 +48,7 @@ fn allocator_interface_can_be_implemented() {
 
 #[test]
 fn object_header_creation() {
-    use fugrip::core::{ObjectFlags, LayoutId};
+    use fugrip::core::{LayoutId, ObjectFlags};
 
     let header = ObjectHeader {
         flags: ObjectFlags::MARKED | ObjectFlags::HAS_WEAK_REFS,

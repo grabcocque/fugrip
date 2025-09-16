@@ -1,0 +1,41 @@
+repos:
+  # Standard sanitation hooks
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+        exclude: ^grammars/tree-sitter-q/src/
+      - id: mixed-line-ending
+        args: ["--fix=auto"]
+      - id: check-yaml
+      - id: check-toml
+      - id: check-json
+      - id: check-added-large-files
+      - id: detect-private-key
+
+  # Python lint + format (Ruff)
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.12.12
+    hooks:
+      - id: ruff
+        args: ["--fix", "--exit-non-zero-on-fix"]
+      - id: ruff-format
+
+  # Rust format, fix and lint (Cargo)
+  - repo: https://github.com/doublify/pre-commit-rust
+    rev: v1.0
+    hooks:
+      - id: fmt
+      - id: clippy
+      - id: cargo-check
+
+  # Local hook for cargo fix (not provided by doublify repo)
+  - repo: local
+    hooks:
+      - id: cargo-fix
+        name: cargo-fix
+        entry: cargo fix --allow-dirty --allow-staged
+        language: system
+        pass_filenames: false
+        types: [rust]

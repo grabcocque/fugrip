@@ -1,10 +1,10 @@
 //! Integration tests for concurrent marking infrastructure
 
 use fugrip::concurrent::{
-    WriteBarrier, BlackAllocator, TricolorMarking,
-    ParallelMarkingCoordinator, ConcurrentMarkingCoordinator, ObjectColor,
+    BlackAllocator, ConcurrentMarkingCoordinator, ObjectColor, ParallelMarkingCoordinator,
+    TricolorMarking, WriteBarrier,
 };
-use mmtk::util::{ObjectReference, Address};
+use mmtk::util::{Address, ObjectReference};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -18,20 +18,16 @@ fn concurrent_marking_full_workflow() {
     let thread_registry = std::sync::Arc::new(fugrip::thread::ThreadRegistry::new());
     let global_roots = std::sync::Arc::new(fugrip::roots::GlobalRoots::default());
 
-    let mut coordinator = ConcurrentMarkingCoordinator::new(
-        heap_base,
-        heap_size,
-        2,
-        thread_registry,
-        global_roots,
-    );
+    let mut coordinator =
+        ConcurrentMarkingCoordinator::new(heap_base, heap_size, 2, thread_registry, global_roots);
 
     // Create a realistic object graph
     let root1 = unsafe { ObjectReference::from_raw_address_unchecked(heap_base + 0x1000usize) };
     let root2 = unsafe { ObjectReference::from_raw_address_unchecked(heap_base + 0x2000usize) };
     let child1 = unsafe { ObjectReference::from_raw_address_unchecked(heap_base + 0x3000usize) };
     let child2 = unsafe { ObjectReference::from_raw_address_unchecked(heap_base + 0x4000usize) };
-    let grandchild = unsafe { ObjectReference::from_raw_address_unchecked(heap_base + 0x5000usize) };
+    let grandchild =
+        unsafe { ObjectReference::from_raw_address_unchecked(heap_base + 0x5000usize) };
 
     // Start concurrent marking
     coordinator.start_marking(vec![root1, root2]);
@@ -54,8 +50,13 @@ fn concurrent_marking_full_workflow() {
     tricolor.set_color(grandchild, ObjectColor::White);
 
     // Perform write barrier operations (should shade old values)
-    barrier.write_barrier(&mut slot1 as *mut ObjectReference, grandchild);
-    barrier.write_barrier(&mut slot2 as *mut ObjectReference, ObjectReference::from_raw_address(Address::ZERO).unwrap_or(root1));
+    unsafe {
+        barrier.write_barrier(&mut slot1 as *mut ObjectReference, grandchild);
+        barrier.write_barrier(
+            &mut slot2 as *mut ObjectReference,
+            ObjectReference::from_raw_address(Address::ZERO).unwrap_or(root1),
+        );
+    }
 
     // Verify write barrier shaded the old values
     assert_eq!(tricolor.get_color(child1), ObjectColor::Grey);
@@ -99,15 +100,18 @@ fn write_barrier_concurrent_stress_test() {
             thread::spawn(move || {
                 for i in 0..operations_per_thread {
                     let offset = (thread_id * operations_per_thread + i) * 0x100usize;
-                    let old_obj = unsafe { ObjectReference::from_raw_address_unchecked(heap_base + offset) };
-                    let new_obj = unsafe { ObjectReference::from_raw_address_unchecked(heap_base + offset + 0x50usize) };
+                    let old_obj =
+                        unsafe { ObjectReference::from_raw_address_unchecked(heap_base + offset) };
+                    let new_obj = unsafe {
+                        ObjectReference::from_raw_address_unchecked(heap_base + offset + 0x50usize)
+                    };
 
                     // Set old object to white
                     marking.set_color(old_obj, ObjectColor::White);
 
                     // Create a slot and perform write barrier
                     let mut slot = old_obj;
-                    barrier.write_barrier(&mut slot as *mut ObjectReference, new_obj);
+                    unsafe { barrier.write_barrier(&mut slot as *mut ObjectReference, new_obj) };
 
                     // Verify the write barrier worked
                     assert_eq!(slot, new_obj);
@@ -145,12 +149,16 @@ fn black_allocator_concurrent_stress_test() {
             thread::spawn(move || {
                 for i in 0..allocations_per_thread {
                     let offset = (thread_id * allocations_per_thread + i) * 0x100usize;
-                    let obj = unsafe { ObjectReference::from_raw_address_unchecked(heap_base + offset) };
+                    let obj =
+                        unsafe { ObjectReference::from_raw_address_unchecked(heap_base + offset) };
 
                     allocator.allocate_black(obj);
 
                     // Verify the object was marked black
-                    assert_eq!(allocator.tricolor_marking.get_color(obj), ObjectColor::Black);
+                    assert_eq!(
+                        allocator.tricolor_marking.get_color(obj),
+                        ObjectColor::Black
+                    );
                 }
             })
         })
@@ -183,24 +191,28 @@ fn tricolor_marking_atomic_operations() {
             thread::spawn(move || {
                 for i in 0..objects_per_thread {
                     let offset = (thread_id * objects_per_thread + i) * 0x100usize;
-                    let obj = unsafe { ObjectReference::from_raw_address_unchecked(heap_base + offset) };
+                    let obj =
+                        unsafe { ObjectReference::from_raw_address_unchecked(heap_base + offset) };
 
                     // Test atomic color transitions
                     marking.set_color(obj, ObjectColor::White);
                     assert_eq!(marking.get_color(obj), ObjectColor::White);
 
                     // Transition to grey
-                    let success = marking.transition_color(obj, ObjectColor::White, ObjectColor::Grey);
+                    let success =
+                        marking.transition_color(obj, ObjectColor::White, ObjectColor::Grey);
                     assert!(success);
                     assert_eq!(marking.get_color(obj), ObjectColor::Grey);
 
                     // Transition to black
-                    let success = marking.transition_color(obj, ObjectColor::Grey, ObjectColor::Black);
+                    let success =
+                        marking.transition_color(obj, ObjectColor::Grey, ObjectColor::Black);
                     assert!(success);
                     assert_eq!(marking.get_color(obj), ObjectColor::Black);
 
                     // Invalid transition should fail
-                    let success = marking.transition_color(obj, ObjectColor::White, ObjectColor::Black);
+                    let success =
+                        marking.transition_color(obj, ObjectColor::White, ObjectColor::Black);
                     assert!(!success);
                     assert_eq!(marking.get_color(obj), ObjectColor::Black); // Should remain black
                 }
@@ -245,7 +257,7 @@ fn parallel_marking_work_stealing_simulation() {
 
                         // Share some work back if we got a lot
                         if stolen.len() > 5 {
-                            let to_share = stolen[stolen.len()/2..].to_vec();
+                            let to_share = stolen[stolen.len() / 2..].to_vec();
                             coordinator.share_work(to_share);
                         }
                     }
@@ -268,7 +280,10 @@ fn parallel_marking_work_stealing_simulation() {
     let (stolen_count, shared_count) = coordinator.get_stats();
     assert!(stolen_count > 0);
     assert!(shared_count > 0);
-    println!("Work stealing events: {}, sharing events: {}", stolen_count, shared_count);
+    println!(
+        "Work stealing events: {}, sharing events: {}",
+        stolen_count, shared_count
+    );
 }
 
 #[test]
@@ -288,7 +303,8 @@ fn write_barrier_bulk_operations_performance() {
 
     // Initialize slots first
     for i in 0..num_updates {
-        let old_obj = unsafe { ObjectReference::from_raw_address_unchecked(heap_base + i * 0x100usize) };
+        let old_obj =
+            unsafe { ObjectReference::from_raw_address_unchecked(heap_base + i * 0x100usize) };
         marking.set_color(old_obj, ObjectColor::White);
         slots.push(old_obj);
         objects.push(old_obj);
@@ -296,7 +312,9 @@ fn write_barrier_bulk_operations_performance() {
 
     // Create updates array after slots is fully populated
     for i in 0..num_updates {
-        let new_obj = unsafe { ObjectReference::from_raw_address_unchecked(heap_base + i * 0x100usize + 0x50usize) };
+        let new_obj = unsafe {
+            ObjectReference::from_raw_address_unchecked(heap_base + i * 0x100usize + 0x50usize)
+        };
         updates.push((
             unsafe { slots.as_mut_ptr().add(i) } as *mut ObjectReference,
             new_obj,
@@ -308,7 +326,10 @@ fn write_barrier_bulk_operations_performance() {
     barrier.write_barrier_bulk(&updates);
     let duration = start.elapsed();
 
-    println!("Bulk write barrier for {} updates took: {:?}", num_updates, duration);
+    println!(
+        "Bulk write barrier for {} updates took: {:?}",
+        num_updates, duration
+    );
 
     // Verify all old objects were shaded
     for (i, &old_obj) in objects.iter().enumerate() {
@@ -332,13 +353,8 @@ fn concurrent_marking_termination_detection() {
     let thread_registry = std::sync::Arc::new(fugrip::thread::ThreadRegistry::new());
     let global_roots = std::sync::Arc::new(fugrip::roots::GlobalRoots::default());
 
-    let mut coordinator = ConcurrentMarkingCoordinator::new(
-        heap_base,
-        0x100000,
-        2,
-        thread_registry,
-        global_roots,
-    );
+    let mut coordinator =
+        ConcurrentMarkingCoordinator::new(heap_base, 0x100000, 2, thread_registry, global_roots);
 
     // Start with minimal work to ensure quick termination
     let root = unsafe { ObjectReference::from_raw_address_unchecked(heap_base + 0x1000usize) };
@@ -362,8 +378,6 @@ fn concurrent_marking_termination_detection() {
     assert!(!coordinator.black_allocator().is_active());
 }
 
-
-
 #[test]
 fn write_barrier_array_operations() {
     let heap_base = unsafe { Address::from_usize(0x900000) };
@@ -386,19 +400,24 @@ fn write_barrier_array_operations() {
 
     // Update array elements using array write barrier
     for i in 0..array_size {
-        let new_obj = unsafe { ObjectReference::from_raw_address_unchecked(heap_base + (i + array_size) * 0x100usize) };
+        let new_obj = unsafe {
+            ObjectReference::from_raw_address_unchecked(heap_base + (i + array_size) * 0x100usize)
+        };
 
-        barrier.array_write_barrier(
-            object_array.as_mut_ptr() as *mut u8,
-            i,
-            std::mem::size_of::<ObjectReference>(),
-            new_obj,
-        );
+        unsafe {
+            barrier.array_write_barrier(
+                object_array.as_mut_ptr() as *mut u8,
+                i,
+                std::mem::size_of::<ObjectReference>(),
+                new_obj,
+            );
+        }
     }
 
     // Verify all original objects were shaded
     for i in 0..array_size {
-        let original_obj = unsafe { ObjectReference::from_raw_address_unchecked(heap_base + i * 0x100usize) };
+        let original_obj =
+            unsafe { ObjectReference::from_raw_address_unchecked(heap_base + i * 0x100usize) };
         let color = barrier.tricolor_marking.get_color(original_obj);
         assert!(
             color == ObjectColor::Grey || color == ObjectColor::Black,

@@ -270,7 +270,7 @@ pub struct TricolorMarking {
 impl TricolorMarking {
     pub fn new(heap_base: Address, address_space_size: usize) -> Self {
         let objects_per_word = std::mem::size_of::<usize>() * 8 / 2; // 2 bits per object
-        let num_words = (address_space_size / 8 + objects_per_word - 1) / objects_per_word;
+        let num_words = (address_space_size / 8).div_ceil(objects_per_word);
 
         Self {
             color_bits: (0..num_words).map(|_| AtomicUsize::new(0)).collect(),
@@ -452,7 +452,13 @@ impl WriteBarrier {
     /// Dijkstra write barrier: shade the old value when overwriting a reference
     /// This prevents the concurrent marker from missing objects that become unreachable
     /// during marking due to pointer updates by the mutator
-    pub fn write_barrier(&self, slot: *mut ObjectReference, new_value: ObjectReference) {
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that `slot` is a valid, aligned pointer to an `ObjectReference`
+    /// and that it is safe to read from and write to this location. The write barrier must
+    /// only be called during garbage collection phases where it is safe to access the heap.
+    pub unsafe fn write_barrier(&self, slot: *mut ObjectReference, new_value: ObjectReference) {
         if !self.is_active() {
             // Write barrier is not active, just perform the store
             unsafe { *slot = new_value };
@@ -524,7 +530,14 @@ impl WriteBarrier {
     }
 
     /// Write barrier for array element updates
-    pub fn array_write_barrier(
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that `array_base` points to a valid array, `index` is within bounds,
+    /// `element_size` matches the actual element size, and it is safe to access the array element.
+    /// The write barrier must only be called during garbage collection phases where it is safe
+    /// to access the heap.
+    pub unsafe fn array_write_barrier(
         &self,
         array_base: *mut u8,
         index: usize,
@@ -537,7 +550,7 @@ impl WriteBarrier {
                 .cast::<ObjectReference>()
         };
 
-        self.write_barrier(slot_ptr, new_value);
+        unsafe { self.write_barrier(slot_ptr, new_value) };
     }
 
     /// Reset write barrier state for a new marking phase
@@ -969,13 +982,13 @@ impl ObjectClassifier {
     /// Promote a young object to old (after surviving collections)
     pub fn promote_to_old(&self, object: ObjectReference) -> bool {
         let mut classifications = self.classifications.lock().unwrap();
-        if let Some(class) = classifications.get_mut(&object) {
-            if matches!(class.age, ObjectAge::Young) {
-                class.age = ObjectAge::Old;
-                self.young_objects.fetch_sub(1, Ordering::Relaxed);
-                self.old_objects.fetch_add(1, Ordering::Relaxed);
-                return true;
-            }
+        if let Some(class) = classifications.get_mut(&object)
+            && matches!(class.age, ObjectAge::Young)
+        {
+            class.age = ObjectAge::Old;
+            self.young_objects.fetch_sub(1, Ordering::Relaxed);
+            self.old_objects.fetch_add(1, Ordering::Relaxed);
+            return true;
         }
         false
     }
@@ -1037,6 +1050,12 @@ impl ObjectClassifier {
         self.old_objects.store(0, Ordering::Relaxed);
         self.immutable_objects.store(0, Ordering::Relaxed);
         self.mutable_objects.store(0, Ordering::Relaxed);
+    }
+}
+
+impl Default for ObjectClassifier {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -1159,7 +1178,7 @@ mod tests {
         barrier.activate();
 
         // Perform write barrier operation (overwrite obj1 with obj2)
-        barrier.write_barrier(slot_ptr, obj2);
+        unsafe { barrier.write_barrier(slot_ptr, obj2) };
 
         // Check that obj1 was shaded to grey (Dijkstra write barrier)
         assert_eq!(marking.get_color(obj1), ObjectColor::Grey);
@@ -1284,12 +1303,14 @@ mod tests {
         barrier.activate();
 
         // Update array element through write barrier
-        barrier.array_write_barrier(
-            array.as_mut_ptr() as *mut u8,
-            0,
-            std::mem::size_of::<ObjectReference>(),
-            new_obj,
-        );
+        unsafe {
+            barrier.array_write_barrier(
+                array.as_mut_ptr() as *mut u8,
+                0,
+                std::mem::size_of::<ObjectReference>(),
+                new_obj,
+            );
+        }
 
         // Old object should be shaded
         assert_eq!(marking.get_color(old_obj), ObjectColor::Grey);

@@ -1,11 +1,11 @@
 //! Integration tests that combine multiple GC components
 
 use fugrip::{
-    core::{Gc, ObjectHeader, ObjectFlags, LayoutId},
-    weak::WeakRef,
+    allocator::{AllocatorInterface, StubAllocator},
+    core::{Gc, LayoutId, ObjectFlags, ObjectHeader},
+    roots::{GlobalRoots, StackRoots},
     thread::{MutatorThread, ThreadRegistry},
-    roots::{StackRoots, GlobalRoots},
-    allocator::{StubAllocator, AllocatorInterface},
+    weak::WeakRef,
 };
 
 #[test]
@@ -114,11 +114,11 @@ fn memory_management_workflow() {
     weak_refs[3].clear(); // Object 3 is "collected"
 
     // 5. Verify state
-    assert!(weak_refs[0].is_alive());  // Still alive
+    assert!(weak_refs[0].is_alive()); // Still alive
     assert!(!weak_refs[1].is_alive()); // Cleared
-    assert!(weak_refs[2].is_alive());  // Still alive
+    assert!(weak_refs[2].is_alive()); // Still alive
     assert!(!weak_refs[3].is_alive()); // Cleared
-    assert!(weak_refs[4].is_alive());  // Still alive
+    assert!(weak_refs[4].is_alive()); // Still alive
 
     // 6. Test safepoint coordination
     allocator.poll_safepoint(&mutator);

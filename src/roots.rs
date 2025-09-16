@@ -5,9 +5,9 @@ use mmtk::{
     vm::{RootsWorkFactory, Scanning, SlotVisitor, VMBinding},
 };
 
-use crate::thread::{MutatorThread, ThreadRegistry};
-use crate::core::{ObjectModel, RustObjectModel};
 use crate::binding::RustVM;
+use crate::core::{ObjectModel, RustObjectModel};
+use crate::thread::{MutatorThread, ThreadRegistry};
 
 #[derive(Default)]
 pub struct StackRoots {
@@ -43,6 +43,7 @@ impl GlobalRoots {
     }
 }
 
+#[derive(Default)]
 pub struct RootSet {
     pub stacks: StackRoots,
     pub globals: GlobalRoots,
@@ -94,7 +95,8 @@ impl Scanning<RustVM> for RustScanning {
         let header = RustObjectModel::header(object_ptr);
 
         // Calculate the start of the object body (after the header)
-        let body_start = unsafe { object_ptr.add(std::mem::size_of::<crate::core::ObjectHeader>()) };
+        let body_start =
+            unsafe { object_ptr.add(std::mem::size_of::<crate::core::ObjectHeader>()) };
 
         // For proper field tracing, we would use the vtable to get type information
         // and only visit actual reference fields. For now, we'll scan conservatively.
@@ -110,7 +112,9 @@ impl Scanning<RustVM> for RustScanning {
                 let slot_address = mmtk::util::Address::from_ptr(potential_ref);
                 if ObjectReference::from_raw_address(slot_address).is_some() {
                     // This looks like a valid object reference, create a slot for it
-                    let vm_slot = mmtk::vm::slot::SimpleSlot::from_address(mmtk::util::Address::from_mut_ptr(slot_ptr));
+                    let vm_slot = mmtk::vm::slot::SimpleSlot::from_address(
+                        mmtk::util::Address::from_mut_ptr(slot_ptr),
+                    );
                     slot_visitor.visit_slot(vm_slot);
                 }
             }
@@ -138,7 +142,9 @@ impl Scanning<RustVM> for RustScanning {
             for &frame_addr in &roots.frames {
                 let frame_ptr = frame_addr as *mut u8;
                 if !frame_ptr.is_null() {
-                    let slot = mmtk::vm::slot::SimpleSlot::from_address(mmtk::util::Address::from_mut_ptr(frame_ptr));
+                    let slot = mmtk::vm::slot::SimpleSlot::from_address(
+                        mmtk::util::Address::from_mut_ptr(frame_ptr),
+                    );
                     slots.push(slot);
                 }
             }
@@ -149,7 +155,10 @@ impl Scanning<RustVM> for RustScanning {
         });
     }
 
-    fn scan_vm_specific_roots(_tls: VMWorkerThread, mut factory: impl RootsWorkFactory<<RustVM as VMBinding>::VMSlot>) {
+    fn scan_vm_specific_roots(
+        _tls: VMWorkerThread,
+        mut factory: impl RootsWorkFactory<<RustVM as VMBinding>::VMSlot>,
+    ) {
         // Use a thread-safe global roots registry
         use std::sync::Mutex;
         static GLOBAL_ROOTS: std::sync::OnceLock<Mutex<GlobalRoots>> = std::sync::OnceLock::new();
@@ -161,7 +170,9 @@ impl Scanning<RustVM> for RustScanning {
         let slots: Vec<mmtk::vm::slot::SimpleSlot> = roots
             .iter()
             .filter(|&ptr| !ptr.is_null())
-            .map(|ptr| mmtk::vm::slot::SimpleSlot::from_address(mmtk::util::Address::from_mut_ptr(ptr)))
+            .map(|ptr| {
+                mmtk::vm::slot::SimpleSlot::from_address(mmtk::util::Address::from_mut_ptr(ptr))
+            })
             .collect();
 
         if !slots.is_empty() {

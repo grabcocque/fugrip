@@ -1,12 +1,12 @@
 //! Tests for MMTk integration functionality
 
 use fugrip::{
-    binding::{RustVM, RustActivePlan, RustReferenceGlue},
-    core::{ObjectHeader, ObjectModel, RustObjectModel, ObjectFlags, LayoutId},
-    roots::{RustScanning, StackRoots, GlobalRoots},
+    allocator::{AllocatorInterface, MMTkAllocator},
+    binding::{RustActivePlan, RustReferenceGlue, RustVM},
+    core::{LayoutId, ObjectFlags, ObjectHeader, ObjectModel, RustObjectModel},
+    roots::{GlobalRoots, RustScanning, StackRoots},
     thread::{MutatorThread, ThreadRegistry},
     weak::{WeakRef, WeakRefHeader, WeakRefRegistry},
-    allocator::{AllocatorInterface, MMTkAllocator},
 };
 
 use mmtk::{
@@ -25,7 +25,8 @@ fn vm_binding_traits_implemented() {
 fn active_plan_mutator_registry() {
     // Test mutator registration and lookup
     let thread_id = 42usize;
-    let vm_thread = unsafe { std::mem::transmute::<usize, mmtk::util::opaque_pointer::VMThread>(thread_id) };
+    let vm_thread =
+        unsafe { std::mem::transmute::<usize, mmtk::util::opaque_pointer::VMThread>(thread_id) };
 
     // Initially no mutator should be registered
     assert!(!RustActivePlan::is_mutator(vm_thread));
@@ -90,7 +91,12 @@ fn weak_ref_header_operations() {
     let weak_header = WeakRefHeader::new(LayoutId(456), 32);
 
     // Test initial state
-    assert!(weak_header.header.flags.contains(ObjectFlags::HAS_WEAK_REFS));
+    assert!(
+        weak_header
+            .header
+            .flags
+            .contains(ObjectFlags::HAS_WEAK_REFS)
+    );
     assert_eq!(weak_header.header.layout_id, LayoutId(456));
     assert_eq!(weak_header.header.body_size, 32);
     assert!(weak_header.get_target().is_null());
@@ -120,11 +126,18 @@ fn weak_ref_registry_operations() {
 
     // Test processing with alive target
     registry.process_weak_refs(|ptr| ptr == target_obj);
-    assert_eq!(target_slot.load(std::sync::atomic::Ordering::SeqCst), target_obj);
+    assert_eq!(
+        target_slot.load(std::sync::atomic::Ordering::SeqCst),
+        target_obj
+    );
 
     // Test processing with dead target
     registry.process_weak_refs(|_| false);
-    assert!(target_slot.load(std::sync::atomic::Ordering::SeqCst).is_null());
+    assert!(
+        target_slot
+            .load(std::sync::atomic::Ordering::SeqCst)
+            .is_null()
+    );
 }
 
 #[test]
@@ -134,22 +147,23 @@ fn reference_glue_operations() {
     // Create a test object with weak reference header
     let weak_header = WeakRefHeader::new(LayoutId(789), 16);
     let object_ptr = Box::leak(Box::new(weak_header)) as *mut WeakRefHeader as *mut u8;
-    let object_ref = unsafe {
-        ObjectReference::from_raw_address_unchecked(Address::from_mut_ptr(object_ptr))
-    };
+    let object_ref =
+        unsafe { ObjectReference::from_raw_address_unchecked(Address::from_mut_ptr(object_ptr)) };
 
     // Test referent operations
     assert!(RustReferenceGlue::get_referent(object_ref).is_none());
 
     let target_obj = Box::leak(Box::new([0u8; 16])).as_mut_ptr();
-    let target_ref = unsafe {
-        ObjectReference::from_raw_address_unchecked(Address::from_mut_ptr(target_obj))
-    };
+    let target_ref =
+        unsafe { ObjectReference::from_raw_address_unchecked(Address::from_mut_ptr(target_obj)) };
 
     RustReferenceGlue::set_referent(object_ref, target_ref);
     let retrieved = RustReferenceGlue::get_referent(object_ref);
     assert!(retrieved.is_some());
-    assert_eq!(retrieved.unwrap().to_raw_address(), target_ref.to_raw_address());
+    assert_eq!(
+        retrieved.unwrap().to_raw_address(),
+        target_ref.to_raw_address()
+    );
 
     // Test clearing
     RustReferenceGlue::clear_referent(object_ref);
@@ -267,6 +281,7 @@ fn object_model_copy_operations() {
     let align = <RustObjectModel as MMTkObjectModel<RustVM>>::get_align_when_copied(src_ref);
     assert_eq!(align, 8);
 
-    let align_offset = <RustObjectModel as MMTkObjectModel<RustVM>>::get_align_offset_when_copied(src_ref);
+    let align_offset =
+        <RustObjectModel as MMTkObjectModel<RustVM>>::get_align_offset_when_copied(src_ref);
     assert_eq!(align_offset, 0);
 }

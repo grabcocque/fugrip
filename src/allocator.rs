@@ -26,6 +26,12 @@ impl MMTkAllocator {
     }
 }
 
+impl Default for MMTkAllocator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AllocatorInterface for MMTkAllocator {
     fn allocate(
         &self,
@@ -50,6 +56,12 @@ pub struct StubAllocator;
 impl StubAllocator {
     pub const fn new() -> Self {
         Self
+    }
+}
+
+impl Default for StubAllocator {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
