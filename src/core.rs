@@ -1,4 +1,25 @@
 //! Object model definitions for Fugrip VM objects.
+//!
+//! This module provides the core object model for the FUGC garbage collector,
+//! including object headers, garbage collected pointers, and tracing infrastructure.
+//!
+//! # Examples
+//!
+//! ```
+//! use fugrip::core::{ObjectHeader, Gc, ObjectFlags, LayoutId};
+//!
+//! // Create an object header
+//! let header = ObjectHeader {
+//!     flags: ObjectFlags::MARKED,
+//!     layout_id: LayoutId(1),
+//!     body_size: 64,
+//!     vtable: std::ptr::null(),
+//! };
+//!
+//! // Create a null Gc pointer
+//! let gc_ptr: Gc<u32> = Gc::new();
+//! assert!(gc_ptr.is_null());
+//! ```
 
 use std::{marker::PhantomData, mem::size_of};
 
@@ -17,6 +38,25 @@ use crate::binding::RustVM;
 /// Basic header shared by every managed object.  The layout intentionally keeps
 /// frequently accessed metadata in the first word to simplify barrier
 /// implementations.
+///
+/// # Examples
+///
+/// ```
+/// use fugrip::core::{ObjectHeader, ObjectFlags, LayoutId};
+///
+/// // Create a basic object header
+/// let header = ObjectHeader {
+///     flags: ObjectFlags::MARKED | ObjectFlags::PINNED,
+///     layout_id: LayoutId(42),
+///     body_size: 128,
+///     vtable: std::ptr::null(),
+/// };
+///
+/// assert!(header.flags.contains(ObjectFlags::MARKED));
+/// assert!(header.flags.contains(ObjectFlags::PINNED));
+/// assert!(!header.flags.contains(ObjectFlags::HAS_WEAK_REFS));
+/// assert_eq!(header.body_size, 128);
+/// ```
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct ObjectHeader {
@@ -38,6 +78,25 @@ impl Default for ObjectHeader {
 }
 
 bitflags! {
+    /// Object flags for tracking various object states in the garbage collector.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use fugrip::core::ObjectFlags;
+    ///
+    /// // Create flags for a marked, pinned object with weak references
+    /// let flags = ObjectFlags::MARKED | ObjectFlags::PINNED | ObjectFlags::HAS_WEAK_REFS;
+    ///
+    /// assert!(flags.contains(ObjectFlags::MARKED));
+    /// assert!(flags.contains(ObjectFlags::PINNED));
+    /// assert!(flags.contains(ObjectFlags::HAS_WEAK_REFS));
+    ///
+    /// // Remove the pinned flag
+    /// let unpinned = flags & !ObjectFlags::PINNED;
+    /// assert!(!unpinned.contains(ObjectFlags::PINNED));
+    /// assert!(unpinned.contains(ObjectFlags::MARKED));
+    /// ```
     #[derive(Default, Debug, Clone, Copy)]
     pub struct ObjectFlags: u16 {
         const MARKED = 0b0001;
@@ -47,10 +106,49 @@ bitflags! {
 }
 
 /// Identifier pointing into the VM's layout/descriptor table.
+///
+/// # Examples
+///
+/// ```
+/// use fugrip::core::LayoutId;
+///
+/// // Create layout IDs for different object types
+/// let string_layout = LayoutId(1);
+/// let array_layout = LayoutId(2);
+/// let default_layout = LayoutId::default();
+///
+/// assert_eq!(string_layout.0, 1);
+/// assert_eq!(array_layout.0, 2);
+/// assert_eq!(default_layout.0, 0);
+/// assert_ne!(string_layout, array_layout);
+/// ```
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash, Default)]
 pub struct LayoutId(pub u16);
 
 /// `Gc<T>` is a typed wrapper around MMTk's `ObjectReference`.
+///
+/// # Examples
+///
+/// ```
+/// use fugrip::core::Gc;
+/// use mmtk::util::Address;
+///
+/// // Create a null Gc pointer
+/// let null_ptr: Gc<i32> = Gc::new();
+/// assert!(null_ptr.is_null());
+///
+/// // Create from aligned address (simulating heap allocation)
+/// let aligned_addr = 0x10000000usize; // Word-aligned address
+/// let raw_ptr = aligned_addr as *mut i32;
+/// let gc_ptr = Gc::from_raw(raw_ptr);
+/// assert!(!gc_ptr.is_null());
+/// assert_eq!(gc_ptr.as_ptr(), raw_ptr);
+///
+/// // Convert to ObjectReference (with proper alignment)
+/// let obj_ref = gc_ptr.to_object_reference();
+/// // ObjectReference created from aligned pointer
+/// assert_eq!(obj_ref.to_raw_address(), unsafe { Address::from_usize(aligned_addr) });
+/// ```
 pub struct Gc<T> {
     ptr: *mut u8,
     _marker: PhantomData<T>,

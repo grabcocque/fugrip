@@ -1,4 +1,26 @@
 //! Thread registry and mutator state used by the runtime.
+//!
+//! This module provides thread management infrastructure for the FUGC garbage collector,
+//! including mutator thread tracking and safepoint coordination.
+//!
+//! # Examples
+//!
+//! ```
+//! use fugrip::thread::{MutatorThread, ThreadRegistry};
+//!
+//! // Create and register a mutator thread
+//! let thread = MutatorThread::new(1);
+//! let registry = ThreadRegistry::new();
+//! registry.register(thread.clone());
+//!
+//! // Poll for safepoint
+//! thread.poll_safepoint();
+//!
+//! // Get all registered threads
+//! let threads = registry.iter();
+//! assert_eq!(threads.len(), 1);
+//! assert_eq!(threads[0].id(), 1);
+//! ```
 
 use std::{
     fmt,
@@ -45,6 +67,24 @@ impl MutatorInner {
     }
 }
 
+/// Represents a mutator thread in the FUGC garbage collector.
+///
+/// # Examples
+///
+/// ```
+/// use fugrip::thread::MutatorThread;
+///
+/// // Create a new mutator thread
+/// let thread = MutatorThread::new(42);
+/// assert_eq!(thread.id(), 42);
+///
+/// // Test safepoint polling
+/// thread.poll_safepoint();
+///
+/// // Clone for sharing across contexts
+/// let thread_clone = thread.clone();
+/// assert_eq!(thread_clone.id(), 42);
+/// ```
 pub struct MutatorThread {
     inner: Arc<MutatorInner>,
 }
@@ -108,6 +148,29 @@ impl fmt::Debug for MutatorThread {
     }
 }
 
+/// Registry for tracking all mutator threads in the FUGC garbage collector.
+///
+/// # Examples
+///
+/// ```
+/// use fugrip::thread::{ThreadRegistry, MutatorThread};
+///
+/// // Create a registry and threads
+/// let registry = ThreadRegistry::new();
+/// let thread1 = MutatorThread::new(1);
+/// let thread2 = MutatorThread::new(2);
+///
+/// // Register threads
+/// registry.register(thread1);
+/// registry.register(thread2);
+///
+/// // Iterate over registered threads
+/// let threads = registry.iter();
+/// assert_eq!(threads.len(), 2);
+///
+/// // Access global registry
+/// let global_registry = ThreadRegistry::global();
+/// ```
 #[derive(Clone, Default, Debug)]
 pub struct ThreadRegistry {
     mutators: Arc<Mutex<Vec<Arc<MutatorInner>>>>,

@@ -1,4 +1,25 @@
 //! Weak reference infrastructure hooks.
+//!
+//! This module provides weak reference support for the FUGC garbage collector,
+//! allowing objects to reference other objects without keeping them alive.
+//!
+//! # Examples
+//!
+//! ```
+//! use fugrip::weak::{WeakRef, WeakRefRegistry, WeakRefHeader};
+//! use fugrip::core::{Gc, LayoutId};
+//!
+//! // Create a weak reference header
+//! let weak_header = WeakRefHeader::new(LayoutId(1), 64);
+//! assert!(weak_header.header.flags.contains(fugrip::core::ObjectFlags::HAS_WEAK_REFS));
+//!
+//! // Create and use weak references
+//! let weak_ref: WeakRef<i32> = WeakRef::default();
+//! assert!(!weak_ref.is_alive());
+//!
+//! // Create a registry for managing weak references
+//! let registry = WeakRefRegistry::new();
+//! ```
 
 use crate::core::{Gc, ObjectFlags, ObjectHeader};
 use mmtk::util::ObjectReference;
@@ -6,6 +27,28 @@ use mmtk::vm::Finalizable;
 use std::sync::atomic::{AtomicPtr, Ordering};
 
 /// Header for objects that contain weak references
+///
+/// # Examples
+///
+/// ```
+/// use fugrip::weak::WeakRefHeader;
+/// use fugrip::core::{LayoutId, ObjectFlags};
+///
+/// // Create a weak reference header
+/// let weak_header = WeakRefHeader::new(LayoutId(42), 128);
+/// assert!(weak_header.header.flags.contains(ObjectFlags::HAS_WEAK_REFS));
+/// assert_eq!(weak_header.header.body_size, 128);
+/// assert!(weak_header.get_target().is_null());
+///
+/// // Set and get target
+/// let target_ptr = 0x12345678 as *mut u8;
+/// weak_header.set_target(target_ptr);
+/// assert_eq!(weak_header.get_target(), target_ptr);
+///
+/// // Clear target
+/// weak_header.clear_target();
+/// assert!(weak_header.get_target().is_null());
+/// ```
 #[derive(Default, Debug)]
 pub struct WeakRefHeader {
     pub header: ObjectHeader,
@@ -43,6 +86,30 @@ impl WeakRefHeader {
 }
 
 /// Weak reference to a GC-managed object
+///
+/// # Examples
+///
+/// ```
+/// use fugrip::weak::WeakRef;
+/// use fugrip::core::Gc;
+///
+/// // Create a default weak reference
+/// let weak_ref: WeakRef<i32> = WeakRef::default();
+/// assert!(!weak_ref.is_alive());
+/// assert!(weak_ref.upgrade().is_none());
+///
+/// // Create from a Gc pointer (demonstration only)
+/// let gc_ptr: Gc<i32> = Gc::new();
+/// let weak_from_gc = WeakRef::new(gc_ptr);
+///
+/// // Clone weak references
+/// let weak_clone = weak_ref.clone();
+/// assert_eq!(weak_ref.is_alive(), weak_clone.is_alive());
+///
+/// // Clear weak reference
+/// weak_ref.clear();
+/// assert!(!weak_ref.is_alive());
+/// ```
 pub struct WeakRef<T> {
     target: AtomicPtr<u8>,
     _marker: std::marker::PhantomData<T>,
@@ -99,6 +166,32 @@ impl<T> Clone for WeakRef<T> {
 }
 
 /// Weak reference registry for managing weak references during GC
+///
+/// # Examples
+///
+/// ```
+/// use fugrip::weak::WeakRefRegistry;
+/// use std::sync::atomic::AtomicPtr;
+///
+/// // Create a registry
+/// let registry = WeakRefRegistry::new();
+/// let default_registry = WeakRefRegistry::default();
+///
+/// // Register weak references (demonstration with dummy pointers)
+/// let weak_ref_obj = 0x1000 as *mut u8;
+/// let target_slot = Box::into_raw(Box::new(AtomicPtr::new(0x2000 as *mut u8)));
+///
+/// registry.register_weak_ref(weak_ref_obj, target_slot);
+///
+/// // Process weak references during GC
+/// registry.process_weak_refs(|ptr| {
+///     // Mock liveness check - always return false to clear all weak refs
+///     false
+/// });
+///
+/// // Clean up
+/// unsafe { drop(Box::from_raw(target_slot)); }
+/// ```
 pub struct WeakRefRegistry {
     weak_refs: std::sync::Mutex<Vec<(*mut u8, *mut AtomicPtr<u8>)>>,
 }

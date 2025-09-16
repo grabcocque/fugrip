@@ -1,0 +1,9 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 2c6303f34fca909b6fcdc98d3329bb0d10cc90659240b987253e63aa2ede0e05 # shrinks to object_sizes = [32, 32, 32, 32, 32, 32, 32, 32, 32, 32]
+cc 4627d326998c6c3e87159a06c450a501561f7ab8ed639295806e881050e6b632 # shrinks to obj_count = 20, edge_count = 14
+cc 0b774b49c0656ecbda8f143546548bb42c109a3b887a4a2fae989a79ffd6be17 # shrinks to objects = [0x10000000, 0x10000000, 0x10000000, 0x10000000, 0x10000000, 0x10000000, 0x10000000, 0x10000000, 0x10000000, 0x10000000, 0x10000000, 0x10000000, 0x10000000, 0x10000000, 0x10000000, 0x10000000, 0x10000000, 0x10000000, 0x10000000, 0x10000000, 0x10000000, 0x10000000, 0x10000000, 0x10000000, 0x10000000, 0x10000000, 0x10000000, 0x10000000, 0x10000000, 0x1a2f4d40, 0x1fe056c0, 0x12784fc0, 0x1fd875c0, 0x17e0fb80, 0x1ddd4840, 0x1b824700, 0x189d2f80, 0x147a1240, 0x13e80d00, 0x12773980, 0x103a6a40, 0x19bdc680, 0x17eaba40, 0x1042d7c0, 0x1c355480, 0x1825d440, 0x100a8340, 0x1208b540, 0x12ebca40, 0x19457d40]

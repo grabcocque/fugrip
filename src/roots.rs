@@ -9,6 +9,31 @@ use crate::binding::RustVM;
 use crate::core::{ObjectModel, RustObjectModel};
 use crate::thread::{MutatorThread, ThreadRegistry};
 
+/// Stack-based root references for garbage collection
+///
+/// # Examples
+///
+/// ```
+/// use fugrip::roots::StackRoots;
+///
+/// let mut stack_roots = StackRoots::default();
+///
+/// // Register stack roots (simulated pointers)
+/// let ptr1 = 0x1000 as *mut u8;
+/// let ptr2 = 0x2000 as *mut u8;
+/// stack_roots.push(ptr1);
+/// stack_roots.push(ptr2);
+///
+/// // Iterate over stack roots
+/// let roots: Vec<*mut u8> = stack_roots.iter().collect();
+/// assert_eq!(roots.len(), 2);
+/// assert_eq!(roots[0], ptr1);
+/// assert_eq!(roots[1], ptr2);
+///
+/// // Clear all stack roots
+/// stack_roots.clear();
+/// assert_eq!(stack_roots.iter().count(), 0);
+/// ```
 #[derive(Default)]
 pub struct StackRoots {
     frames: Vec<usize>, // Store addresses as usize for thread safety
@@ -28,6 +53,27 @@ impl StackRoots {
     }
 }
 
+/// Global root references for garbage collection
+///
+/// # Examples
+///
+/// ```
+/// use fugrip::roots::GlobalRoots;
+///
+/// let mut global_roots = GlobalRoots::default();
+///
+/// // Register global roots (simulated pointers)
+/// let global_ptr1 = 0x10000 as *mut u8;
+/// let global_ptr2 = 0x20000 as *mut u8;
+/// global_roots.register(global_ptr1);
+/// global_roots.register(global_ptr2);
+///
+/// // Iterate over global roots
+/// let roots: Vec<*mut u8> = global_roots.iter().collect();
+/// assert_eq!(roots.len(), 2);
+/// assert_eq!(roots[0], global_ptr1);
+/// assert_eq!(roots[1], global_ptr2);
+/// ```
 #[derive(Default)]
 pub struct GlobalRoots {
     handles: Vec<usize>, // Store addresses as usize for thread safety

@@ -8,6 +8,7 @@
 
 pub mod allocator;
 pub mod binding;
+pub mod cache_optimization;
 pub mod collector_phases;
 pub mod concurrent;
 pub mod core;
@@ -20,6 +21,6 @@ pub mod weak;
 pub use allocator::{AllocatorInterface, MMTkAllocator};
 pub use binding::RustVM;
 pub use error::{GcError, GcResult};
-pub use plan::RustVMPlan;
+pub use plan::FugcPlanManager;
 pub use roots::{GlobalRoots, StackRoots};
 pub use weak::{WeakRef, WeakRefHeader, WeakRefRegistry};

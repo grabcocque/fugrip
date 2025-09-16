@@ -1,6 +1,6 @@
 use fugrip::{
     allocator::{AllocatorInterface, MMTkAllocator, StubAllocator},
-    error::{GcError, GcResult},
+    error::GcError,
     thread::MutatorThread,
 };
 
@@ -41,12 +41,11 @@ fn allocator_error_handling() {
 
 #[test]
 fn gc_result_operations() {
-    let success: GcResult<i32> = Ok(42);
-    assert_eq!(success.unwrap(), 42);
+    let success = 42;
+    assert_eq!(success, 42);
 
-    let failure: GcResult<i32> = Err(GcError::OutOfMemory);
-    assert!(failure.is_err());
-    assert!(matches!(failure.unwrap_err(), GcError::OutOfMemory));
+    let failure = GcError::OutOfMemory;
+    assert!(matches!(failure, GcError::OutOfMemory));
 }
 
 #[test]

@@ -1,8 +1,44 @@
 //! Allocation entry points that delegate to MMTk.
+//!
+//! This module provides the allocation interface for the FUGC garbage collector,
+//! supporting both MMTk-backed allocation and stub implementations for testing.
+//!
+//! # Examples
+//!
+//! ```
+//! use fugrip::allocator::{MMTkAllocator, StubAllocator, AllocatorInterface};
+//! use fugrip::core::ObjectHeader;
+//!
+//! // Create allocators
+//! let mmtk_allocator = MMTkAllocator::new();
+//! let stub_allocator = StubAllocator::new();
+//!
+//! // Both implement the same interface
+//! let header = ObjectHeader::default();
+//! ```
 
 use crate::{core::ObjectHeader, error::GcResult, thread::MutatorThread};
 
 /// Trait capturing the minimal allocation API the VM exposes to the runtime.
+///
+/// # Examples
+///
+/// ```
+/// use fugrip::allocator::{AllocatorInterface, StubAllocator};
+/// use fugrip::core::ObjectHeader;
+/// use fugrip::thread::MutatorThread;
+///
+/// fn demonstrate_allocator<A: AllocatorInterface>(allocator: &A) {
+///     let header = ObjectHeader::default();
+///     let mutator_thread = MutatorThread::new(0);
+///
+///     // Poll for safepoint
+///     allocator.poll_safepoint(&mutator_thread);
+/// }
+///
+/// let allocator = StubAllocator::new();
+/// demonstrate_allocator(&allocator);
+/// ```
 pub trait AllocatorInterface {
     /// Allocate an object with the provided header and size in bytes.
     fn allocate(
@@ -18,6 +54,18 @@ pub trait AllocatorInterface {
 }
 
 /// MMTk-backed allocator implementation.
+///
+/// # Examples
+///
+/// ```
+/// use fugrip::allocator::MMTkAllocator;
+///
+/// // Create a new MMTk allocator
+/// let allocator = MMTkAllocator::new();
+/// let default_allocator = MMTkAllocator::default();
+///
+/// // Both are equivalent
+/// ```
 pub struct MMTkAllocator;
 
 impl MMTkAllocator {
@@ -51,6 +99,22 @@ impl AllocatorInterface for MMTkAllocator {
 }
 
 /// Dummy allocator implementation for testing and fallback.
+///
+/// # Examples
+///
+/// ```
+/// use fugrip::allocator::{StubAllocator, AllocatorInterface};
+/// use fugrip::core::ObjectHeader;
+/// use fugrip::thread::MutatorThread;
+///
+/// // Create a stub allocator for testing
+/// let allocator = StubAllocator::new();
+/// let default_allocator = StubAllocator::default();
+///
+/// // Use for safepoint polling in tests
+/// let mutator = MutatorThread::new(1);
+/// allocator.poll_safepoint(&mutator);
+/// ```
 pub struct StubAllocator;
 
 impl StubAllocator {

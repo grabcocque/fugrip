@@ -1,0 +1,73 @@
+[package]
+name = "fugrip-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.fugrip]
+path = ".."
+
+[dependencies.mmtk]
+version = "0.31.0"
+
+[[bin]]
+name = "write_barrier"
+path = "fuzz_targets/write_barrier.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tricolor_marking"
+path = "fuzz_targets/tricolor_marking.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cache_optimization"
+path = "fuzz_targets/cache_optimization.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "parallel_marking"
+path = "fuzz_targets/parallel_marking.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "black_allocator"
+path = "fuzz_targets/black_allocator.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "root_scanning"
+path = "fuzz_targets/root_scanning.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "concurrent_stress"
+path = "fuzz_targets/concurrent_stress.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "object_tracing"
+path = "fuzz_targets/object_tracing.rs"
+test = false
+doc = false
+bench = false

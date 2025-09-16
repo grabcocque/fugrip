@@ -213,10 +213,7 @@ fn write_barrier_bulk_operations() {
         let new_obj = unsafe {
             ObjectReference::from_raw_address_unchecked(heap_base + i * 0x100usize + 0x50usize)
         };
-        updates.push((
-            unsafe { slots.as_mut_ptr().add(i) } as *mut ObjectReference,
-            new_obj,
-        ));
+        updates.push((unsafe { slots.as_mut_ptr().add(i) }, new_obj));
     }
 
     // Perform bulk operation

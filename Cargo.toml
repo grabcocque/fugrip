@@ -22,9 +22,13 @@ mmtk = { version = "^0.31", default-features = false }
 lazy_static = "1.5.0"
 
 # DISABLED: Benchmarks are too aggressive and can crash VMs
-# [[bench]]
-# name = "gc_benchmarks"
-# harness = false
+[[bench]]
+name = "gc_benchmarks"
+harness = false
+
+[[bench]]
+name = "cache_benchmarks"
+harness = false
 
 # [[bench]]
 # name = "regression_tests"
@@ -33,8 +37,14 @@ lazy_static = "1.5.0"
 [dev-dependencies]
 criterion = "^0.7.0"
 mmtk = "0.31"
+fastrand = "2.0"
+proptest = "1.0"
+quickcheck = "1.0"
+arbitrary = "1.0"
 
 [features]
 # Enable lightweight smoke tests that validate high-level GC semantics
 smoke = []
 segment_scan_linux = []
+# Enable cache profiling and hardware performance counter integration
+cache_profiling = []

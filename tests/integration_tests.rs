@@ -147,7 +147,7 @@ fn concurrent_thread_simulation() {
             registry_clone.register(mutator.clone());
 
             // Create some thread-local objects
-            let obj_data = vec![thread_id as u8; 8];
+            let obj_data = [thread_id as u8; 8];
             let gc_handle = Gc::<u8>::from_raw(obj_data.as_ptr() as *mut u8);
             let weak_ref = WeakRef::new(gc_handle);
 

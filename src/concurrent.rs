@@ -10,7 +10,47 @@ use std::{
 
 use mmtk::util::{Address, ObjectReference};
 
-/// Color states for tricolor marking algorithm
+/// Branch prediction hints for performance-critical code paths
+#[inline(always)]
+fn likely(b: bool) -> bool {
+    #[cold]
+    fn cold() {}
+    if !b {
+        cold()
+    }
+    b
+}
+
+#[inline(always)]
+fn unlikely(b: bool) -> bool {
+    #[cold]
+    fn cold() {}
+    if b {
+        cold()
+    }
+    b
+}
+
+/// Color states for tricolor marking algorithm used in concurrent garbage collection.
+/// This implements Dijkstra's tricolor invariant for safe concurrent marking.
+///
+/// # Examples
+///
+/// ```
+/// use fugrip::concurrent::ObjectColor;
+///
+/// // Objects start as white (unmarked)
+/// let initial_color = ObjectColor::White;
+/// assert_eq!(initial_color, ObjectColor::White);
+///
+/// // During marking, objects become grey (marked but not scanned)
+/// let marked_color = ObjectColor::Grey;
+/// assert_ne!(marked_color, ObjectColor::White);
+///
+/// // After scanning children, objects become black (fully processed)
+/// let scanned_color = ObjectColor::Black;
+/// assert_ne!(scanned_color, ObjectColor::Grey);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ObjectColor {
     /// White objects are unmarked and candidates for collection
@@ -22,6 +62,28 @@ pub enum ObjectColor {
 }
 
 /// Thread-local grey stack for parallel marking
+///
+/// # Examples
+///
+/// ```
+/// use fugrip::concurrent::GreyStack;
+/// use mmtk::util::{Address, ObjectReference};
+///
+/// let mut stack = GreyStack::new(0, 100); // Worker 0, capacity 100
+/// assert!(stack.is_empty());
+/// assert_eq!(stack.len(), 0);
+///
+/// // Add objects to the stack
+/// let obj = ObjectReference::from_raw_address(unsafe { Address::from_usize(0x1000) }).unwrap();
+/// stack.push(obj);
+/// assert!(!stack.is_empty());
+/// assert_eq!(stack.len(), 1);
+///
+/// // Retrieve objects from the stack
+/// let popped = stack.pop().unwrap();
+/// assert_eq!(popped, obj);
+/// assert!(stack.is_empty());
+/// ```
 pub struct GreyStack {
     /// Local grey object queue for this worker
     local_stack: VecDeque<ObjectReference>,
@@ -88,6 +150,31 @@ impl GreyStack {
 }
 
 /// Global work-stealing coordinator for parallel marking
+///
+/// # Examples
+///
+/// ```
+/// use fugrip::concurrent::ParallelMarkingCoordinator;
+/// use mmtk::util::{Address, ObjectReference};
+///
+/// let coordinator = ParallelMarkingCoordinator::new(4); // 4 workers
+/// assert!(!coordinator.has_work());
+///
+/// // Add work to the global pool
+/// let obj = ObjectReference::from_raw_address(unsafe { Address::from_usize(0x1000) }).unwrap();
+/// coordinator.share_work(vec![obj]);
+/// assert!(coordinator.has_work());
+///
+/// // Steal work from the pool
+/// let stolen = coordinator.steal_work(1);
+/// assert_eq!(stolen.len(), 1);
+/// assert_eq!(stolen[0], obj);
+///
+/// // Get work stealing statistics
+/// let (stolen_count, shared_count) = coordinator.get_stats();
+/// assert_eq!(stolen_count, 1);
+/// assert_eq!(shared_count, 1);
+/// ```
 pub struct ParallelMarkingCoordinator {
     /// Shared work pool for work stealing
     shared_work_pool: Mutex<VecDeque<ObjectReference>>,
@@ -254,7 +341,34 @@ impl MarkingWorker {
     }
 }
 
-/// Tricolor marking state manager
+/// Tricolor marking state manager that tracks object colors for concurrent garbage collection.
+/// Uses a compact bit vector representation with atomic operations for thread safety.
+///
+/// # Examples
+///
+/// ```
+/// use fugrip::concurrent::{TricolorMarking, ObjectColor};
+/// use mmtk::util::{Address, ObjectReference};
+/// use std::sync::Arc;
+///
+/// let heap_base = unsafe { Address::from_usize(0x10000000) };
+/// let marking = Arc::new(TricolorMarking::new(heap_base, 1024 * 1024));
+///
+/// // Create an object reference
+/// let obj = ObjectReference::from_raw_address(heap_base).unwrap();
+///
+/// // Objects start as white
+/// assert_eq!(marking.get_color(obj), ObjectColor::White);
+///
+/// // Mark object as grey
+/// marking.set_color(obj, ObjectColor::Grey);
+/// assert_eq!(marking.get_color(obj), ObjectColor::Grey);
+///
+/// // Atomically transition from grey to black
+/// let success = marking.transition_color(obj, ObjectColor::Grey, ObjectColor::Black);
+/// assert!(success);
+/// assert_eq!(marking.get_color(obj), ObjectColor::Black);
+/// ```
 pub struct TricolorMarking {
     /// Bit vector for object colors (2 bits per object)
     /// 00 = White, 01 = Grey, 10 = Black, 11 = Reserved
@@ -268,6 +382,23 @@ pub struct TricolorMarking {
 }
 
 impl TricolorMarking {
+    /// Create a new tricolor marking state manager for the given address space.
+    ///
+    /// # Arguments
+    /// * `heap_base` - Base address of the heap region
+    /// * `address_space_size` - Size of the address space to track
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use fugrip::concurrent::TricolorMarking;
+    /// use mmtk::util::Address;
+    ///
+    /// let heap_base = unsafe { Address::from_usize(0x10000000) };
+    /// let marking = TricolorMarking::new(heap_base, 64 * 1024 * 1024); // 64MB
+    ///
+    /// // Ready to track object colors in the 64MB address space
+    /// ```
     pub fn new(heap_base: Address, address_space_size: usize) -> Self {
         let objects_per_word = std::mem::size_of::<usize>() * 8 / 2; // 2 bits per object
         let num_words = (address_space_size / 8).div_ceil(objects_per_word);
@@ -280,7 +411,27 @@ impl TricolorMarking {
         }
     }
 
-    /// Get the color of an object
+    /// Get the current color of an object.
+    ///
+    /// # Arguments
+    /// * `object` - Object reference to query
+    ///
+    /// # Returns
+    /// Current [`ObjectColor`] of the object
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use fugrip::concurrent::{TricolorMarking, ObjectColor};
+    /// use mmtk::util::{Address, ObjectReference};
+    ///
+    /// let heap_base = unsafe { Address::from_usize(0x10000000) };
+    /// let marking = TricolorMarking::new(heap_base, 1024 * 1024);
+    /// let obj = ObjectReference::from_raw_address(heap_base).unwrap();
+    ///
+    /// // New objects are white by default
+    /// assert_eq!(marking.get_color(obj), ObjectColor::White);
+    /// ```
     pub fn get_color(&self, object: ObjectReference) -> ObjectColor {
         let index = self.object_to_index(object);
         let word_index = index / (std::mem::size_of::<usize>() * 8 / self.bits_per_object);
@@ -302,7 +453,30 @@ impl TricolorMarking {
         }
     }
 
-    /// Set the color of an object
+    /// Set the color of an object atomically.
+    ///
+    /// # Arguments
+    /// * `object` - Object reference to modify
+    /// * `color` - New color to assign
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use fugrip::concurrent::{TricolorMarking, ObjectColor};
+    /// use mmtk::util::{Address, ObjectReference};
+    ///
+    /// let heap_base = unsafe { Address::from_usize(0x10000000) };
+    /// let marking = TricolorMarking::new(heap_base, 1024 * 1024);
+    /// let obj = ObjectReference::from_raw_address(heap_base).unwrap();
+    ///
+    /// // Set object to grey (marked but not scanned)
+    /// marking.set_color(obj, ObjectColor::Grey);
+    /// assert_eq!(marking.get_color(obj), ObjectColor::Grey);
+    ///
+    /// // Set object to black (fully processed)
+    /// marking.set_color(obj, ObjectColor::Black);
+    /// assert_eq!(marking.get_color(obj), ObjectColor::Black);
+    /// ```
     pub fn set_color(&self, object: ObjectReference, color: ObjectColor) {
         let index = self.object_to_index(object);
         let word_index = index / (std::mem::size_of::<usize>() * 8 / self.bits_per_object);
@@ -339,7 +513,43 @@ impl TricolorMarking {
         }
     }
 
-    /// Atomically transition an object from one color to another
+    /// Atomically transition an object from one color to another.
+    /// This operation is thread-safe and will only succeed if the object
+    /// is currently in the expected `from` color.
+    ///
+    /// # Arguments
+    /// * `object` - Object reference to modify
+    /// * `from` - Expected current color
+    /// * `to` - Desired new color
+    ///
+    /// # Returns
+    /// `true` if the transition succeeded, `false` if the object was not in the expected color
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use fugrip::concurrent::{TricolorMarking, ObjectColor};
+    /// use mmtk::util::{Address, ObjectReference};
+    ///
+    /// let heap_base = unsafe { Address::from_usize(0x10000000) };
+    /// let marking = TricolorMarking::new(heap_base, 1024 * 1024);
+    /// let obj = ObjectReference::from_raw_address(heap_base).unwrap();
+    ///
+    /// // Transition from white to grey (should succeed)
+    /// let success = marking.transition_color(obj, ObjectColor::White, ObjectColor::Grey);
+    /// assert!(success);
+    /// assert_eq!(marking.get_color(obj), ObjectColor::Grey);
+    ///
+    /// // Try to transition from white to black (should fail - object is grey)
+    /// let failed = marking.transition_color(obj, ObjectColor::White, ObjectColor::Black);
+    /// assert!(!failed);
+    /// assert_eq!(marking.get_color(obj), ObjectColor::Grey); // Unchanged
+    ///
+    /// // Transition from grey to black (should succeed)
+    /// let success2 = marking.transition_color(obj, ObjectColor::Grey, ObjectColor::Black);
+    /// assert!(success2);
+    /// assert_eq!(marking.get_color(obj), ObjectColor::Black);
+    /// ```
     pub fn transition_color(
         &self,
         object: ObjectReference,
@@ -413,6 +623,30 @@ impl TricolorMarking {
 }
 
 /// Dijkstra write barrier for concurrent marking
+///
+/// # Examples
+///
+/// ```
+/// use fugrip::concurrent::{WriteBarrier, TricolorMarking, ParallelMarkingCoordinator, ObjectColor};
+/// use mmtk::util::{Address, ObjectReference};
+/// use std::sync::Arc;
+///
+/// let heap_base = unsafe { Address::from_usize(0x10000000) };
+/// let marking = Arc::new(TricolorMarking::new(heap_base, 1024 * 1024));
+/// let coordinator = Arc::new(ParallelMarkingCoordinator::new(1));
+/// let barrier = WriteBarrier::new(marking, coordinator);
+///
+/// // Write barrier starts inactive
+/// assert!(!barrier.is_active());
+///
+/// // Activate for concurrent marking
+/// barrier.activate();
+/// assert!(barrier.is_active());
+///
+/// // Deactivate after marking
+/// barrier.deactivate();
+/// assert!(!barrier.is_active());
+/// ```
 pub struct WriteBarrier {
     /// Tricolor marking state
     pub tricolor_marking: Arc<TricolorMarking>,
@@ -458,13 +692,140 @@ impl WriteBarrier {
     /// The caller must ensure that `slot` is a valid, aligned pointer to an `ObjectReference`
     /// and that it is safe to read from and write to this location. The write barrier must
     /// only be called during garbage collection phases where it is safe to access the heap.
-    pub unsafe fn write_barrier(&self, slot: *mut ObjectReference, new_value: ObjectReference) {
-        if !self.is_active() {
-            // Write barrier is not active, just perform the store
+    /// Ultra-fast inline write barrier optimized for the common case where
+    /// the barrier is inactive. This is the primary write barrier for hot paths.
+    ///
+    /// Performance characteristics:
+    /// - Fast path: 1 relaxed load + 1 conditional branch + 1 store (3-4 instructions)
+    /// - Branch prediction friendly (barrier inactive is the common case)
+    /// - Minimal register pressure
+    /// - Optimal for inlining at allocation sites
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that `slot` is a valid, aligned pointer to an `ObjectReference`
+    /// and that it is safe to read from and write to this location. The write barrier must
+    /// only be called during garbage collection phases where it is safe to access the heap.
+    #[inline(always)]
+    pub unsafe fn write_barrier_fast(
+        &self,
+        slot: *mut ObjectReference,
+        new_value: ObjectReference,
+    ) {
+        // Fast path: barrier inactive (99% of cases in production workloads)
+        // Use relaxed ordering for minimal overhead - exactness not critical for fast path
+        if likely(!self.marking_active.load(Ordering::Relaxed)) {
+            // Direct store without barrier overhead
             unsafe { *slot = new_value };
             return;
         }
 
+        // Slow path: barrier is active, delegate to full barrier implementation
+        self.write_barrier_slow_path(slot, new_value);
+    }
+
+    /// Specialized inline write barrier for array element updates.
+    /// Optimized for bulk array operations where multiple elements are updated.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that `array_base` points to a valid array, `index` is within bounds,
+    /// and `element_size` matches the actual element size.
+    #[inline(always)]
+    pub unsafe fn write_barrier_array_fast(
+        &self,
+        array_base: *mut u8,
+        index: usize,
+        element_size: usize,
+        new_value: ObjectReference,
+    ) {
+        // Fast path: barrier inactive
+        if likely(!self.marking_active.load(Ordering::Relaxed)) {
+            let slot_ptr = unsafe {
+                array_base
+                    .add(index * element_size)
+                    .cast::<ObjectReference>()
+            };
+            unsafe { *slot_ptr = new_value };
+            return;
+        }
+
+        // Slow path: delegate to array barrier implementation
+        self.array_write_barrier_slow_path(array_base, index, element_size, new_value);
+    }
+
+    /// Optimized write barrier for bulk pointer updates in contiguous memory.
+    /// This is more efficient than calling write_barrier_fast in a loop for large updates.
+    ///
+    /// # Safety
+    ///
+    /// All slot pointers must be valid and aligned ObjectReference pointers.
+    #[inline]
+    pub unsafe fn write_barrier_bulk_fast(
+        &self,
+        updates: &[(*mut ObjectReference, ObjectReference)],
+    ) {
+        // Fast path: barrier inactive
+        if likely(!self.marking_active.load(Ordering::Relaxed)) {
+            // Unroll small update batches for better performance
+            match updates.len() {
+                0 => return,
+                1 => {
+                    let (slot, value) = updates[0];
+                    unsafe { *slot = value };
+                }
+                2 => {
+                    let (slot1, value1) = updates[0];
+                    let (slot2, value2) = updates[1];
+                    unsafe {
+                        *slot1 = value1;
+                        *slot2 = value2;
+                    }
+                }
+                3 => {
+                    let (slot1, value1) = updates[0];
+                    let (slot2, value2) = updates[1];
+                    let (slot3, value3) = updates[2];
+                    unsafe {
+                        *slot1 = value1;
+                        *slot2 = value2;
+                        *slot3 = value3;
+                    }
+                }
+                _ => {
+                    // For larger batches, use simple loop
+                    for &(slot, value) in updates {
+                        unsafe { *slot = value };
+                    }
+                }
+            }
+            return;
+        }
+
+        // Slow path: delegate to full bulk barrier
+        self.write_barrier_bulk_slow_path(updates);
+    }
+
+    /// Standard write barrier interface that delegates to the fast path.
+    /// This maintains API compatibility while providing optimal performance.
+    ///
+    /// # Safety
+    ///
+    /// Same safety requirements as `write_barrier_fast`.
+    pub unsafe fn write_barrier(&self, slot: *mut ObjectReference, new_value: ObjectReference) {
+        // Use the optimized fast path for best performance
+        unsafe { self.write_barrier_fast(slot, new_value) };
+    }
+
+    /// Cold slow path implementation of the write barrier.
+    /// Separated for better inlining and branch prediction of the fast path.
+    ///
+    /// # Safety
+    ///
+    /// Same safety requirements as `write_barrier`.
+    #[cold]
+    #[inline(never)]
+    fn write_barrier_slow_path(&self, slot: *mut ObjectReference, new_value: ObjectReference) {
         // Read the old value before overwriting
         let old_value = unsafe { *slot };
 
@@ -488,16 +849,36 @@ impl WriteBarrier {
         }
     }
 
-    /// Optimized write barrier for bulk operations
-    pub fn write_barrier_bulk(&self, updates: &[(*mut ObjectReference, ObjectReference)]) {
-        if !self.is_active() {
-            // Write barrier is not active, just perform the stores
-            for &(slot, new_value) in updates {
-                unsafe { *slot = new_value };
-            }
-            return;
-        }
+    /// Cold slow path for array write barriers.
+    ///
+    /// # Safety
+    ///
+    /// Same safety requirements as `array_write_barrier`.
+    #[cold]
+    #[inline(never)]
+    fn array_write_barrier_slow_path(
+        &self,
+        array_base: *mut u8,
+        index: usize,
+        element_size: usize,
+        new_value: ObjectReference,
+    ) {
+        let slot_ptr = unsafe {
+            array_base
+                .add(index * element_size)
+                .cast::<ObjectReference>()
+        };
+        self.write_barrier_slow_path(slot_ptr, new_value);
+    }
 
+    /// Cold slow path for bulk write barriers.
+    ///
+    /// # Safety
+    ///
+    /// All slot pointers must be valid and aligned ObjectReference pointers.
+    #[cold]
+    #[inline(never)]
+    fn write_barrier_bulk_slow_path(&self, updates: &[(*mut ObjectReference, ObjectReference)]) {
         let mut grey_objects = Vec::new();
 
         for &(slot, new_value) in updates {
@@ -529,7 +910,18 @@ impl WriteBarrier {
         }
     }
 
-    /// Write barrier for array element updates
+    /// Legacy bulk write barrier interface for compatibility.
+    /// Delegates to the optimized bulk fast path implementation.
+    ///
+    /// # Safety
+    ///
+    /// All slot pointers must be valid and aligned ObjectReference pointers.
+    pub fn write_barrier_bulk(&self, updates: &[(*mut ObjectReference, ObjectReference)]) {
+        unsafe { self.write_barrier_bulk_fast(updates) };
+    }
+
+    /// Legacy array write barrier interface for compatibility.
+    /// Delegates to the optimized array fast path implementation.
     ///
     /// # Safety
     ///
@@ -544,13 +936,7 @@ impl WriteBarrier {
         element_size: usize,
         new_value: ObjectReference,
     ) {
-        let slot_ptr = unsafe {
-            array_base
-                .add(index * element_size)
-                .cast::<ObjectReference>()
-        };
-
-        unsafe { self.write_barrier(slot_ptr, new_value) };
+        unsafe { self.write_barrier_array_fast(array_base, index, element_size, new_value) };
     }
 
     /// Reset write barrier state for a new marking phase
@@ -642,6 +1028,8 @@ pub struct ConcurrentMarkingCoordinator {
     pub tricolor_marking: Arc<TricolorMarking>,
     /// Concurrent root scanner
     root_scanner: ConcurrentRootScanner,
+    /// Cache-optimized marking for better locality
+    cache_optimized_marking: Option<crate::cache_optimization::CacheOptimizedMarking>,
     /// Object classifier for FUGC-style classification
     object_classifier: ObjectClassifier,
     /// Marking worker threads
@@ -672,12 +1060,17 @@ impl ConcurrentMarkingCoordinator {
         );
         let object_classifier = ObjectClassifier::new();
 
+        let cache_optimized_marking = Some(crate::cache_optimization::CacheOptimizedMarking::new(
+            Arc::clone(&tricolor_marking),
+        ));
+
         Self {
             write_barrier,
             black_allocator,
             parallel_coordinator,
             tricolor_marking,
             root_scanner,
+            cache_optimized_marking,
             object_classifier,
             workers: Vec::new(),
             shutdown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -739,6 +1132,25 @@ impl ConcurrentMarkingCoordinator {
 
     pub fn black_allocator(&self) -> &BlackAllocator {
         &self.black_allocator
+    }
+
+    /// Mark objects using cache-optimized strategies
+    pub fn mark_objects_cache_optimized(&self, objects: &[ObjectReference]) {
+        if let Some(ref cache_marking) = self.cache_optimized_marking {
+            cache_marking.mark_objects_batch(objects);
+        } else {
+            // Fallback to basic marking
+            for obj in objects {
+                self.tricolor_marking.set_color(*obj, ObjectColor::Grey);
+            }
+        }
+    }
+
+    /// Get cache optimization statistics
+    pub fn get_cache_stats(&self) -> Option<crate::cache_optimization::CacheStats> {
+        self.cache_optimized_marking
+            .as_ref()
+            .map(|cache_marking| cache_marking.get_cache_stats())
     }
 
     fn start_worker_threads(&mut self) {
