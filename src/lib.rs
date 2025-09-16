@@ -13,14 +13,25 @@ pub mod collector_phases;
 pub mod concurrent;
 pub mod core;
 pub mod error;
+pub mod fugc_coordinator;
+pub mod memory_management;
 pub mod plan;
+pub mod pollcheck_macros;
 pub mod roots;
+pub mod safepoint;
+pub mod simd_sweep;
 pub mod thread;
 pub mod weak;
 
 pub use allocator::{AllocatorInterface, MMTkAllocator};
 pub use binding::RustVM;
 pub use error::{GcError, GcResult};
+pub use fugc_coordinator::{AllocationColor, FugcCoordinator, FugcCycleStats, FugcPhase};
+pub use memory_management::{
+    MemoryManager, WeakReference, WeakMap, FinalizerQueue, FreeObjectManager,
+    MemoryManagerStats, WeakMapStats, FinalizerQueueStats
+};
 pub use plan::FugcPlanManager;
 pub use roots::{GlobalRoots, StackRoots};
+pub use safepoint::{pollcheck, safepoint_enter, safepoint_exit, SafepointManager, SafepointStats, GcSafepointPhase, ThreadExecutionState};
 pub use weak::{WeakRef, WeakRefHeader, WeakRefRegistry};

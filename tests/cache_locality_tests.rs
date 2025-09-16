@@ -3,7 +3,7 @@
 //! These tests measure and validate cache-friendly optimizations
 //! in realistic garbage collection scenarios.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use fugrip::cache_optimization::*;
@@ -100,7 +100,7 @@ fn cache_optimized_marking_vs_standard() {
     let tricolor = Arc::new(TricolorMarking::new(heap_base, 64 * 1024 * 1024));
 
     // Test cache-optimized marking
-    let cache_marking = CacheOptimizedMarking::new(Arc::clone(&tricolor));
+    let cache_marking = CacheOptimizedMarking::with_tricolor(Arc::clone(&tricolor));
     let start = Instant::now();
     cache_marking.mark_objects_batch(&objects);
     let cache_optimized_time = start.elapsed();
@@ -216,7 +216,7 @@ fn concurrent_marking_cache_integration() {
     let heap_base = unsafe { Address::from_usize(0x10000000) };
 
     let thread_registry = Arc::new(fugrip::thread::ThreadRegistry::new());
-    let global_roots = Arc::new(fugrip::roots::GlobalRoots::default());
+    let global_roots = Arc::new(Mutex::new(fugrip::roots::GlobalRoots::default()));
 
     let coordinator = ConcurrentMarkingCoordinator::new(
         heap_base,
@@ -264,7 +264,7 @@ fn end_to_end_cache_performance() {
 
     // 2. Cache-optimized marking
     let tricolor = Arc::new(TricolorMarking::new(base_addr, heap_size));
-    let cache_marking = CacheOptimizedMarking::new(Arc::clone(&tricolor));
+    let cache_marking = CacheOptimizedMarking::with_tricolor(Arc::clone(&tricolor));
     cache_marking.mark_objects_batch(&objects);
 
     // 3. Locality-aware work processing

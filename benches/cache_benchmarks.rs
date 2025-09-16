@@ -6,7 +6,7 @@
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use mmtk::util::{Address, ObjectReference};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use fugrip::cache_optimization::*;
 use fugrip::concurrent::{ConcurrentMarkingCoordinator, TricolorMarking};
@@ -297,7 +297,8 @@ fn bench_concurrent_marking_scalability(c: &mut Criterion) {
                     b.iter(|| {
                         let heap_base = unsafe { Address::from_usize(0x10000000) };
                         let thread_registry = Arc::new(fugrip::thread::ThreadRegistry::new());
-                        let global_roots = Arc::new(fugrip::roots::GlobalRoots::default());
+                        let global_roots =
+                            Arc::new(Mutex::new(fugrip::roots::GlobalRoots::default()));
 
                         let coordinator = ConcurrentMarkingCoordinator::new(
                             heap_base,

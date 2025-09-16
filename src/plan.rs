@@ -1,14 +1,15 @@
 //! FUGC plan implementation that integrates with MMTk's MarkSweep plan and provides
 //! FUGC-specific concurrent marking and optimized write barriers.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use mmtk::MMTK;
 use mmtk::util::ObjectReference;
 
 use crate::binding::RustVM;
-use crate::concurrent::{ConcurrentMarkingCoordinator, WriteBarrier};
+use crate::concurrent::WriteBarrier;
+use crate::fugc_coordinator::FugcCoordinator;
 
 /// FUGC plan manager that coordinates MMTk MarkSweep plan with FUGC concurrent features.
 /// This follows MMTk's architecture by using the public API and integrating at the VM binding level.
@@ -37,8 +38,8 @@ pub struct FugcPlanManager {
     /// The MMTk instance configured with MarkSweep plan
     mmtk: Option<&'static MMTK<RustVM>>,
 
-    /// Concurrent marking coordinator with optimized barriers
-    concurrent_coordinator: Arc<ConcurrentMarkingCoordinator>,
+    /// FUGC 8-step protocol coordinator (primary coordinator)
+    fugc_coordinator: Arc<FugcCoordinator>,
 
     /// Flag to enable/disable concurrent collection features
     concurrent_collection_enabled: AtomicBool,
@@ -59,16 +60,16 @@ impl FugcPlanManager {
     /// // Will panic if mmtk() is called before initialize()
     /// ```
     pub fn new() -> Self {
-        // Initialize concurrent marking coordinator with basic configuration
+        // Initialize FUGC coordinator with basic configuration
         let thread_registry = Arc::new(crate::thread::ThreadRegistry::new());
-        let global_roots = Arc::new(crate::roots::GlobalRoots::default());
+        let global_roots = Arc::new(Mutex::new(crate::roots::GlobalRoots::default()));
 
         // Use reasonable defaults for heap configuration
         let heap_base = unsafe { mmtk::util::Address::from_usize(0x10000000) }; // 256MB base
         let heap_size = 128 * 1024 * 1024; // 128MB heap
         let num_workers = 4; // 4 GC workers
 
-        let concurrent_coordinator = Arc::new(ConcurrentMarkingCoordinator::new(
+        let fugc_coordinator = Arc::new(FugcCoordinator::new(
             heap_base,
             heap_size,
             num_workers,
@@ -78,7 +79,7 @@ impl FugcPlanManager {
 
         Self {
             mmtk: None,
-            concurrent_coordinator,
+            fugc_coordinator,
             concurrent_collection_enabled: AtomicBool::new(true),
         }
     }
@@ -108,7 +109,7 @@ impl FugcPlanManager {
     /// assert!(!write_barrier.is_active()); // Initially inactive
     /// ```
     pub fn get_write_barrier(&self) -> &WriteBarrier {
-        self.concurrent_coordinator.write_barrier()
+        self.fugc_coordinator.write_barrier()
     }
 
     /// Enable or disable concurrent collection features
@@ -122,25 +123,27 @@ impl FugcPlanManager {
         self.concurrent_collection_enabled.load(Ordering::Relaxed)
     }
 
-    /// Get the concurrent marking coordinator for advanced operations
-    pub fn get_concurrent_coordinator(&self) -> &Arc<ConcurrentMarkingCoordinator> {
-        &self.concurrent_coordinator
+    /// Get the FUGC coordinator for advanced operations
+    pub fn get_fugc_coordinator(&self) -> &Arc<FugcCoordinator> {
+        &self.fugc_coordinator
     }
 
     /// Start concurrent marking with given roots
     pub fn start_concurrent_marking(&self, roots: Vec<ObjectReference>) {
         if self.is_concurrent_collection_enabled() {
-            // Note: In a real implementation, we would need interior mutability for concurrent operations
-            // For now, this is a placeholder that shows the interface
-            let _ = roots; // Avoid unused parameter warning
+            // Use FUGC coordinator for concurrent marking
+            self.fugc_coordinator.trigger_gc();
+            let _ = roots; // FUGC uses global roots internally
         }
     }
 
     /// Finish concurrent marking and wait for completion
     pub fn finish_concurrent_marking(&self) {
         if self.is_concurrent_collection_enabled() {
-            // Note: In a real implementation, we would need interior mutability for concurrent operations
-            // For now, this is a placeholder that shows the interface
+            // Wait for FUGC collection to complete
+            use std::time::Duration;
+            self.fugc_coordinator
+                .wait_until_idle(Duration::from_millis(5000));
         }
     }
 
@@ -170,9 +173,7 @@ impl FugcPlanManager {
 
         // Additional FUGC-specific post-allocation processing
         if self.is_concurrent_collection_enabled() {
-            self.concurrent_coordinator
-                .black_allocator()
-                .allocate_black(obj);
+            self.fugc_coordinator.black_allocator().allocate_black(obj);
         }
     }
 
@@ -217,7 +218,9 @@ impl FugcPlanManager {
     /// assert_eq!(stats.objects_allocated_black, 0); // No black allocations yet
     /// ```
     pub fn get_fugc_stats(&self) -> FugcStats {
-        let concurrent_stats = self.concurrent_coordinator.get_stats();
+        // Get stats from FUGC coordinator components
+        let black_allocator_stats = self.fugc_coordinator.black_allocator().get_stats();
+        let cycle_stats = self.fugc_coordinator.get_cycle_stats();
 
         // Note: In a real implementation, we would get actual MMTk stats
         let (total_bytes, used_bytes) = if let Some(mmtk) = self.mmtk {
@@ -232,34 +235,151 @@ impl FugcPlanManager {
 
         FugcStats {
             concurrent_collection_enabled: self.is_concurrent_collection_enabled(),
-            work_stolen: concurrent_stats.work_stolen,
-            work_shared: concurrent_stats.work_shared,
-            objects_allocated_black: concurrent_stats.objects_allocated_black,
+            work_stolen: 0, // FUGC uses different work coordination
+            work_shared: cycle_stats.handshakes_performed, // Use handshakes as work sharing metric
+            objects_allocated_black: black_allocator_stats,
             total_bytes,
             used_bytes,
         }
     }
 
-    /// Trigger garbage collection with FUGC optimizations
+    /// Trigger garbage collection with FUGC optimizations.
+    ///
+    /// Initiates the complete FUGC 8-step protocol through the integrated coordinator.
+    /// This method only triggers collection if MMTk has been initialized.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use fugrip::plan::FugcPlanManager;
+    /// use std::time::Duration;
+    ///
+    /// let plan_manager = FugcPlanManager::new();
+    ///
+    /// // Initially not collecting
+    /// assert!(!plan_manager.is_fugc_collecting());
+    ///
+    /// // Trigger collection (uses coordinator directly since MMTk not initialized)
+    /// plan_manager.gc();
+    ///
+    /// // Monitor collection progress
+    /// let coordinator = plan_manager.get_fugc_coordinator();
+    /// coordinator.wait_until_idle(Duration::from_millis(500));
+    /// ```
     pub fn gc(&self) {
         if let Some(_mmtk) = self.mmtk {
-            // Start concurrent marking if enabled
-            if self.is_concurrent_collection_enabled() {
-                // Get roots from MMTk and start concurrent marking
-                // Note: In a real implementation, roots would come from the VM
-                let roots = Vec::new(); // Placeholder - roots should come from VM scanning
-                self.start_concurrent_marking(roots);
-            }
+            // Always use FUGC 8-step protocol collection
+            self.fugc_coordinator.trigger_gc();
 
-            // Trigger MMTk collection
-            // Note: In a real implementation, this would be called via the proper MMTk API
-            // For now, this is a placeholder showing the integration point
-
-            // Finish concurrent marking
-            if self.is_concurrent_collection_enabled() {
-                self.finish_concurrent_marking();
-            }
+            // Note: In a real implementation, this would coordinate with MMTk's collection API
+            // MMTk handles the actual sweeping and memory reclamation
         }
+    }
+
+    /// Get access to the FUGC coordinator for advanced operations.
+    ///
+    /// Provides direct access to the underlying FUGC coordinator for fine-grained
+    /// control over collection phases, handshakes, and component access.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use fugrip::plan::FugcPlanManager;
+    ///
+    /// let plan_manager = FugcPlanManager::new();
+    /// let coordinator = plan_manager.fugc_coordinator();
+    ///
+    /// // Access coordinator components directly
+    /// let write_barrier = coordinator.write_barrier();
+    /// let tricolor_marking = coordinator.tricolor_marking();
+    /// let black_allocator = coordinator.black_allocator();
+    ///
+    /// // Check current state
+    /// assert_eq!(coordinator.current_phase(), fugrip::FugcPhase::Idle);
+    /// ```
+    pub fn fugc_coordinator(&self) -> &Arc<FugcCoordinator> {
+        &self.fugc_coordinator
+    }
+
+    /// Check the current phase of FUGC collection.
+    ///
+    /// Returns the current step in the FUGC 8-step protocol, providing
+    /// visibility into collection progress.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use fugrip::plan::FugcPlanManager;
+    ///
+    /// let plan_manager = FugcPlanManager::new();
+    ///
+    /// // Initially idle
+    /// assert_eq!(plan_manager.fugc_phase(), fugrip::FugcPhase::Idle);
+    ///
+    /// // After triggering collection, phase will advance
+    /// plan_manager.get_fugc_coordinator().trigger_gc();
+    /// // Phase will be one of the active collection phases
+    /// ```
+    pub fn fugc_phase(&self) -> crate::fugc_coordinator::FugcPhase {
+        self.fugc_coordinator.current_phase()
+    }
+
+    /// Check if FUGC collection is currently in progress.
+    ///
+    /// Returns true if the FUGC 8-step protocol is actively running,
+    /// false if the coordinator is idle.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use fugrip::plan::FugcPlanManager;
+    /// use std::time::Duration;
+    ///
+    /// let plan_manager = FugcPlanManager::new();
+    ///
+    /// // Initially not collecting
+    /// assert!(!plan_manager.is_fugc_collecting());
+    ///
+    /// // After triggering collection
+    /// plan_manager.get_fugc_coordinator().trigger_gc();
+    /// assert!(plan_manager.is_fugc_collecting());
+    ///
+    /// // Wait for completion
+    /// plan_manager.get_fugc_coordinator().wait_until_idle(Duration::from_millis(500));
+    /// assert!(!plan_manager.is_fugc_collecting());
+    /// ```
+    pub fn is_fugc_collecting(&self) -> bool {
+        self.fugc_coordinator.is_collecting()
+    }
+
+    /// Get FUGC cycle statistics.
+    ///
+    /// Returns detailed performance metrics from the FUGC coordinator,
+    /// including cycle counts, timing information, and handshake statistics.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use fugrip::plan::FugcPlanManager;
+    /// use std::time::Duration;
+    ///
+    /// let plan_manager = FugcPlanManager::new();
+    ///
+    /// // Initial stats
+    /// let initial_stats = plan_manager.get_fugc_cycle_stats();
+    /// assert_eq!(initial_stats.cycles_completed, 0);
+    ///
+    /// // Trigger and complete a collection
+    /// let coordinator = plan_manager.get_fugc_coordinator();
+    /// coordinator.trigger_gc();
+    /// coordinator.wait_until_idle(Duration::from_millis(500));
+    ///
+    /// // Updated stats
+    /// let final_stats = plan_manager.get_fugc_cycle_stats();
+    /// assert!(final_stats.cycles_completed >= 1);
+    /// ```
+    pub fn get_fugc_cycle_stats(&self) -> crate::fugc_coordinator::FugcCycleStats {
+        self.fugc_coordinator.get_cycle_stats()
     }
 }
 

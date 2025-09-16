@@ -8,6 +8,7 @@ use mmtk::{
 use crate::binding::RustVM;
 use crate::core::{ObjectModel, RustObjectModel};
 use crate::thread::{MutatorThread, ThreadRegistry};
+use std::sync::Arc;
 
 /// Stack-based root references for garbage collection
 ///
@@ -226,8 +227,18 @@ impl Scanning<RustVM> for RustScanning {
         }
     }
 
-    fn notify_initial_thread_scan_complete(_partial_scan: bool, _tls: VMWorkerThread) {
-        // No-op stub
+    fn notify_initial_thread_scan_complete(partial_scan: bool, _tls: VMWorkerThread) {
+        let coordinator = {
+            let manager = crate::binding::FUGC_PLAN_MANAGER.lock().unwrap();
+            Arc::clone(manager.get_fugc_coordinator())
+        };
+
+        // FUGC coordinator handles root scanning through its 8-step protocol
+        if partial_scan {
+            coordinator.trigger_gc();
+        } else {
+            coordinator.trigger_gc();
+        }
     }
 
     fn supports_return_barrier() -> bool {
@@ -235,6 +246,12 @@ impl Scanning<RustVM> for RustScanning {
     }
 
     fn prepare_for_roots_re_scanning() {
-        // No-op stub
+        let coordinator = {
+            let manager = crate::binding::FUGC_PLAN_MANAGER.lock().unwrap();
+            Arc::clone(manager.get_fugc_coordinator())
+        };
+        // FUGC coordinator resets are handled internally during collection cycles
+        // No explicit reset needed here
+        let _ = coordinator; // Avoid unused variable warning
     }
 }

@@ -9,6 +9,11 @@ use std::{
 };
 
 use mmtk::util::{Address, ObjectReference};
+use rayon::prelude::*;
+use crossbeam::{
+    channel::{self, Receiver, Sender},
+    select,
+};
 
 /// Branch prediction hints for performance-critical code paths
 #[inline(always)]
@@ -589,6 +594,26 @@ impl TricolorMarking {
                 return false; // Color transition not valid
             }
 
+            // ADVANCING WAVEFRONT INVARIANT: Enforce once-marked-always-marked property
+            // Objects can only transition forward: White → Grey → Black
+            // Backwards transitions violate the advancing wavefront property
+            match (from, to) {
+                // Valid forward transitions
+                (ObjectColor::White, ObjectColor::Grey) => {}, // Discovery: white → grey
+                (ObjectColor::Grey, ObjectColor::Black) => {}, // Processing: grey → black
+                (ObjectColor::White, ObjectColor::Black) => {}, // Direct marking: white → black
+
+                // Self-transitions are allowed (idempotent)
+                (ObjectColor::White, ObjectColor::White) => {},
+                (ObjectColor::Grey, ObjectColor::Grey) => {},
+                (ObjectColor::Black, ObjectColor::Black) => {},
+
+                // INVALID backwards transitions - violate advancing wavefront
+                (ObjectColor::Black, ObjectColor::White) => return false,  // Never allow black → white
+                (ObjectColor::Black, ObjectColor::Grey) => return false,   // Never allow black → grey
+                (ObjectColor::Grey, ObjectColor::White) => return false,   // Never allow grey → white
+            }
+
             let updated = (current & !mask) | new_bits;
 
             match self.color_bits[word_index].compare_exchange_weak(
@@ -603,7 +628,80 @@ impl TricolorMarking {
         }
     }
 
+    /// Get all objects that are currently marked as black (fully processed)
+    ///
+    /// This is used during sweep to build the SIMD bitvector of live objects.
+    ///
+    /// # Returns
+    /// Vector of all ObjectReferences that are currently black
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use fugrip::concurrent::{TricolorMarking, ObjectColor};
+    /// use mmtk::util::{Address, ObjectReference};
+    ///
+    /// let heap_base = unsafe { Address::from_usize(0x10000000) };
+    /// let marking = TricolorMarking::new(heap_base, 1024 * 1024);
+    /// let obj = ObjectReference::from_raw_address(heap_base).unwrap();
+    ///
+    /// // Mark object as black
+    /// marking.set_color(obj, ObjectColor::Black);
+    ///
+    /// // Retrieve all black objects
+    /// let black_objects = marking.get_black_objects();
+    /// assert!(black_objects.contains(&obj));
+    /// ```
+    pub fn get_black_objects(&self) -> Vec<ObjectReference> {
+        let mut black_objects = Vec::new();
+        let objects_per_word = std::mem::size_of::<usize>() * 8 / self.bits_per_object;
+
+        for (word_index, word) in self.color_bits.iter().enumerate() {
+            let word_value = word.load(Ordering::Acquire);
+            if word_value == 0 {
+                continue; // No colors set in this word
+            }
+
+            for bit_index in 0..objects_per_word {
+                let bit_offset = bit_index * self.bits_per_object;
+                let color_bits = (word_value >> bit_offset) & 0b11;
+
+                if color_bits == 0b10 { // Black
+                    let object_index = word_index * objects_per_word + bit_index;
+                    let addr = self.heap_base + (object_index * 8); // 8-byte alignment
+
+                    if let Some(obj_ref) = ObjectReference::from_raw_address(addr) {
+                        black_objects.push(obj_ref);
+                    }
+                }
+            }
+        }
+
+        black_objects
+    }
+
     /// Clear all color markings (set everything to white)
+    ///
+    /// This resets all objects to white state, preparing for the next collection cycle.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use fugrip::concurrent::{TricolorMarking, ObjectColor};
+    /// use mmtk::util::{Address, ObjectReference};
+    ///
+    /// let heap_base = unsafe { Address::from_usize(0x10000000) };
+    /// let marking = TricolorMarking::new(heap_base, 1024 * 1024);
+    /// let obj = ObjectReference::from_raw_address(heap_base).unwrap();
+    ///
+    /// // Mark object as black
+    /// marking.set_color(obj, ObjectColor::Black);
+    /// assert_eq!(marking.get_color(obj), ObjectColor::Black);
+    ///
+    /// // Clear all markings
+    /// marking.clear();
+    /// assert_eq!(marking.get_color(obj), ObjectColor::White);
+    /// ```
     pub fn clear(&self) {
         for word in &self.color_bits {
             word.store(0, Ordering::Release);
@@ -1009,11 +1107,23 @@ pub struct ConcurrentRootScanner {
     /// Thread registry for accessing mutator threads
     thread_registry: Arc<crate::thread::ThreadRegistry>,
     /// Global roots manager
-    global_roots: Arc<crate::roots::GlobalRoots>,
+    global_roots: Arc<Mutex<crate::roots::GlobalRoots>>,
+    /// Shared tricolor marking state to update root colors
+    marking: Arc<TricolorMarking>,
     /// Number of worker threads for root scanning
     num_workers: usize,
     /// Statistics
     roots_scanned: AtomicUsize,
+}
+
+/// Worker coordination channels
+struct WorkerChannels {
+    /// Channel for sending work to this specific worker
+    work_sender: Sender<Vec<ObjectReference>>,
+    /// Channel for receiving completion signals from this worker
+    completion_receiver: Receiver<usize>,
+    /// Channel for sending shutdown signal to this worker
+    shutdown_sender: Sender<()>,
 }
 
 /// Concurrent marking coordinator that orchestrates the entire marking process
@@ -1033,9 +1143,9 @@ pub struct ConcurrentMarkingCoordinator {
     /// Object classifier for FUGC-style classification
     object_classifier: ObjectClassifier,
     /// Marking worker threads
-    workers: Vec<std::thread::JoinHandle<()>>,
-    /// Shutdown signal for workers
-    shutdown: Arc<std::sync::atomic::AtomicBool>,
+    workers: Mutex<Vec<std::thread::JoinHandle<()>>>,
+    /// Per-worker communication channels
+    worker_channels: Mutex<Vec<WorkerChannels>>,
 }
 
 impl ConcurrentMarkingCoordinator {
@@ -1044,7 +1154,7 @@ impl ConcurrentMarkingCoordinator {
         heap_size: usize,
         num_workers: usize,
         thread_registry: Arc<crate::thread::ThreadRegistry>,
-        global_roots: Arc<crate::roots::GlobalRoots>,
+        global_roots: Arc<Mutex<crate::roots::GlobalRoots>>,
     ) -> Self {
         let tricolor_marking = Arc::new(TricolorMarking::new(heap_base, heap_size));
         let parallel_coordinator = Arc::new(ParallelMarkingCoordinator::new(num_workers));
@@ -1056,13 +1166,16 @@ impl ConcurrentMarkingCoordinator {
         let root_scanner = ConcurrentRootScanner::new(
             Arc::clone(&thread_registry),
             Arc::clone(&global_roots),
+            Arc::clone(&tricolor_marking),
             num_workers,
         );
         let object_classifier = ObjectClassifier::new();
 
-        let cache_optimized_marking = Some(crate::cache_optimization::CacheOptimizedMarking::new(
-            Arc::clone(&tricolor_marking),
-        ));
+        let cache_optimized_marking = Some(
+            crate::cache_optimization::CacheOptimizedMarking::with_tricolor(
+                tricolor_marking.clone(),
+            ),
+        );
 
         Self {
             write_barrier,
@@ -1072,13 +1185,13 @@ impl ConcurrentMarkingCoordinator {
             root_scanner,
             cache_optimized_marking,
             object_classifier,
-            workers: Vec::new(),
-            shutdown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            workers: Mutex::new(Vec::new()),
+            worker_channels: Mutex::new(Vec::new()),
         }
     }
 
     /// Start concurrent marking with the given root set
-    pub fn start_marking(&mut self, roots: Vec<ObjectReference>) {
+    pub fn start_marking(&self, roots: Vec<ObjectReference>) {
         // Reset all components
         self.tricolor_marking.clear();
         self.parallel_coordinator.reset();
@@ -1096,23 +1209,33 @@ impl ConcurrentMarkingCoordinator {
         self.parallel_coordinator.share_work(roots);
 
         // Start worker threads if not already running
-        if self.workers.is_empty() {
-            self.shutdown.store(false, Ordering::SeqCst);
+        let should_spawn = { self.workers.lock().unwrap().is_empty() };
+        if should_spawn {
             self.start_worker_threads();
         }
     }
 
     /// Stop concurrent marking and wait for completion
-    pub fn stop_marking(&mut self) {
+    pub fn stop_marking(&self) {
         // Deactivate concurrent mechanisms
         self.write_barrier.deactivate();
         self.black_allocator.deactivate();
 
+        // Send shutdown signals to all workers
+        {
+            let worker_channels = self.worker_channels.lock().unwrap();
+            for channel in worker_channels.iter() {
+                let _ = channel.shutdown_sender.send(());
+            }
+        }
+
         // Wait for workers to complete
-        self.shutdown.store(true, Ordering::SeqCst);
-        for worker in self.workers.drain(..) {
+        for worker in self.workers.lock().unwrap().drain(..) {
             worker.join().unwrap();
         }
+
+        // Clear the channels for next run
+        self.worker_channels.lock().unwrap().clear();
     }
 
     /// Get marking statistics
@@ -1134,10 +1257,16 @@ impl ConcurrentMarkingCoordinator {
         &self.black_allocator
     }
 
+    pub fn root_scanner(&self) -> &ConcurrentRootScanner {
+        &self.root_scanner
+    }
+
     /// Mark objects using cache-optimized strategies
     pub fn mark_objects_cache_optimized(&self, objects: &[ObjectReference]) {
         if let Some(ref cache_marking) = self.cache_optimized_marking {
-            cache_marking.mark_objects_batch(objects);
+            for obj in objects {
+                cache_marking.mark_object(*obj);
+            }
         } else {
             // Fallback to basic marking
             for obj in objects {
@@ -1150,65 +1279,90 @@ impl ConcurrentMarkingCoordinator {
     pub fn get_cache_stats(&self) -> Option<crate::cache_optimization::CacheStats> {
         self.cache_optimized_marking
             .as_ref()
-            .map(|cache_marking| cache_marking.get_cache_stats())
+            .map(|cache_marking| cache_marking.get_stats())
     }
 
-    fn start_worker_threads(&mut self) {
+    fn start_worker_threads(&self) {
         let num_workers = self.parallel_coordinator.total_workers;
+        let mut worker_channels = self.worker_channels.lock().unwrap();
+        worker_channels.clear(); // Clear any existing channels
 
         for worker_id in 0..num_workers {
+            // Create channels for this worker
+            let (work_sender, work_receiver) = channel::unbounded();
+            let (completion_sender, completion_receiver) = channel::unbounded();
+            let (shutdown_sender, shutdown_receiver) = channel::unbounded();
+
+            // Store channels for coordinator to use
+            worker_channels.push(WorkerChannels {
+                work_sender,
+                completion_receiver,
+                shutdown_sender,
+            });
+
             let coordinator = Arc::clone(&self.parallel_coordinator);
             let tricolor_marking = Arc::clone(&self.tricolor_marking);
-            let shutdown = Arc::clone(&self.shutdown);
 
             let worker = std::thread::spawn(move || {
                 let mut marking_worker = MarkingWorker::new(worker_id, coordinator, 256);
+                let mut objects_processed = 0usize;
 
                 loop {
-                    // Check shutdown signal first
-                    if shutdown.load(Ordering::Relaxed) {
-                        break;
-                    }
-
-                    // Check for work
-                    if marking_worker.grey_stack.is_empty() {
-                        let stolen_work = marking_worker.coordinator.steal_work(64);
-                        if stolen_work.is_empty() {
-                            // No work available, check if we should terminate
-                            if shutdown.load(Ordering::Relaxed) {
+                    select! {
+                        // Handle shutdown signal
+                        recv(shutdown_receiver) -> msg => {
+                            if msg.is_ok() {
+                                // Send completion count and exit
+                                let _ = completion_sender.send(objects_processed);
                                 break;
                             }
-                            // Brief pause before checking again
-                            std::thread::sleep(std::time::Duration::from_millis(1));
-                            continue;
-                        }
-                        marking_worker.grey_stack.add_shared_work(stolen_work);
-                    }
+                        },
 
-                    // Process available work with shutdown checks
-                    let mut processed_any = false;
-                    for _ in 0..10 {
-                        // Limit iterations to allow shutdown checks
-                        if shutdown.load(Ordering::Relaxed) {
-                            return; // Exit immediately on shutdown
-                        }
+                        // Handle work from channels
+                        recv(work_receiver) -> work_batch => {
+                            if let Ok(work) = work_batch {
+                                marking_worker.grey_stack.add_shared_work(work);
+                            }
+                        },
 
-                        if let Some(obj) = marking_worker.grey_stack.pop() {
-                            tricolor_marking.set_color(obj, ObjectColor::Black);
-                            marking_worker.objects_marked += 1;
-                            processed_any = true;
-                        } else {
-                            break;
+                        // Try to steal work from global pool (with timeout)
+                        default(std::time::Duration::from_millis(1)) => {
+                            // Only try stealing if local stack is empty
+                            if marking_worker.grey_stack.is_empty() {
+                                let stolen_work = marking_worker.coordinator.steal_work(64);
+                                if !stolen_work.is_empty() {
+                                    marking_worker.grey_stack.add_shared_work(stolen_work);
+                                }
+                            }
                         }
                     }
 
-                    if !processed_any {
-                        std::thread::sleep(std::time::Duration::from_millis(1));
+                    // Process available work efficiently
+                    let mut work_processed_this_round = 0;
+                    while let Some(obj) = marking_worker.grey_stack.pop() {
+                        tricolor_marking.set_color(obj, ObjectColor::Black);
+                        marking_worker.objects_marked += 1;
+                        objects_processed += 1;
+                        work_processed_this_round += 1;
+
+                        // Periodically check for shutdown to maintain responsiveness
+                        if work_processed_this_round % 100 == 0 {
+                            if let Ok(_) = shutdown_receiver.try_recv() {
+                                let _ = completion_sender.send(objects_processed);
+                                return;
+                            }
+                        }
+                    }
+
+                    // Share work if we have too much
+                    if marking_worker.grey_stack.should_share_work() {
+                        let shared_work = marking_worker.grey_stack.extract_work();
+                        marking_worker.coordinator.share_work(shared_work);
                     }
                 }
             });
 
-            self.workers.push(worker);
+            self.workers.lock().unwrap().push(worker);
         }
     }
 }
@@ -1216,12 +1370,14 @@ impl ConcurrentMarkingCoordinator {
 impl ConcurrentRootScanner {
     pub fn new(
         thread_registry: Arc<crate::thread::ThreadRegistry>,
-        global_roots: Arc<crate::roots::GlobalRoots>,
+        global_roots: Arc<Mutex<crate::roots::GlobalRoots>>,
+        marking: Arc<TricolorMarking>,
         num_workers: usize,
     ) -> Self {
         Self {
             thread_registry,
             global_roots,
+            marking,
             num_workers,
             roots_scanned: AtomicUsize::new(0),
         }
@@ -1229,7 +1385,42 @@ impl ConcurrentRootScanner {
 
     /// Scan roots concurrently using the registered mutator threads
     pub fn scan_roots(&self) {
-        // TODO: Implement concurrent root scanning logic
+        self.roots_scanned.store(0, Ordering::Relaxed);
+
+        let mut roots: Vec<*mut u8> = Vec::new();
+
+        for mutator in self.thread_registry.iter() {
+            roots.extend(mutator.stack_roots());
+        }
+
+        if let Ok(global_roots) = self.global_roots.lock() {
+            roots.extend(global_roots.iter());
+        }
+
+        if roots.is_empty() {
+            return;
+        }
+
+        let chunk_size = std::cmp::max(roots.len() / std::cmp::max(self.num_workers, 1), 1);
+        let scanned = &self.roots_scanned;
+        let marking = Arc::clone(&self.marking);
+
+        // Convert to usize addresses for parallel processing (raw pointers aren't Sync)
+        let root_addresses: Vec<usize> = roots.iter().map(|&ptr| ptr as usize).collect();
+
+        root_addresses.par_chunks(chunk_size).for_each(|chunk| {
+            for &root_addr in chunk {
+                if root_addr == 0 {
+                    continue;
+                }
+
+                let address = unsafe { mmtk::util::Address::from_usize(root_addr) };
+                if let Some(reference) = mmtk::util::ObjectReference::from_raw_address(address) {
+                    marking.set_color(reference, ObjectColor::Grey);
+                    scanned.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        });
     }
 
     /// Get the number of roots scanned
@@ -1659,7 +1850,7 @@ mod tests {
     fn concurrent_marking_coordinator_lifecycle() {
         let heap_base = unsafe { Address::from_usize(0x10000) };
         let thread_registry = Arc::new(crate::thread::ThreadRegistry::new());
-        let global_roots = Arc::new(crate::roots::GlobalRoots::default());
+        let global_roots = Arc::new(Mutex::new(crate::roots::GlobalRoots::default()));
         let coordinator = ConcurrentMarkingCoordinator::new(
             heap_base,
             0x10000,
@@ -1733,7 +1924,7 @@ mod tests {
     fn concurrent_marking_stats() {
         let heap_base = unsafe { Address::from_usize(0x10000) };
         let thread_registry = Arc::new(crate::thread::ThreadRegistry::new());
-        let global_roots = Arc::new(crate::roots::GlobalRoots::default());
+        let global_roots = Arc::new(Mutex::new(crate::roots::GlobalRoots::default()));
         let mut coordinator =
             ConcurrentMarkingCoordinator::new(heap_base, 0x10000, 2, thread_registry, global_roots);
 

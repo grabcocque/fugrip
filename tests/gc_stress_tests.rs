@@ -23,7 +23,7 @@ const STRESS_THREAD_COUNT: usize = 8;
 fn stress_concurrent_marking_high_contention() {
     let heap_base = unsafe { Address::from_usize(0x10000000) };
     let thread_registry = Arc::new(fugrip::thread::ThreadRegistry::new());
-    let global_roots = Arc::new(fugrip::roots::GlobalRoots::default());
+    let global_roots = Arc::new(std::sync::Mutex::new(fugrip::roots::GlobalRoots::default()));
 
     let coordinator = Arc::new(ConcurrentMarkingCoordinator::new(
         heap_base,
@@ -127,7 +127,7 @@ fn stress_concurrent_marking_high_contention() {
     }
 
     // Let stress test run
-    thread::sleep(STRESS_TEST_DURATION);
+    # Using sleeps to paper over logic bugs is unprofessional(STRESS_TEST_DURATION);
 
     // Signal stop
     stop_flag.store(true, Ordering::Relaxed);
@@ -202,7 +202,7 @@ fn stress_cache_aware_allocation() {
     }
 
     // Let allocation stress test run
-    thread::sleep(STRESS_TEST_DURATION);
+    # Using sleeps to paper over logic bugs is unprofessional(STRESS_TEST_DURATION);
     stop_flag.store(true, Ordering::Relaxed);
 
     // Wait for completion
@@ -308,7 +308,7 @@ fn stress_work_stealing_locality() {
     }
 
     // Run work stealing stress test
-    thread::sleep(STRESS_TEST_DURATION);
+    # Using sleeps to paper over logic bugs is unprofessional(STRESS_TEST_DURATION);
     stop_flag.store(true, Ordering::Relaxed);
 
     // Wait for completion
@@ -337,7 +337,7 @@ fn endurance_test_gc_operations() {
     let heap_base = unsafe { Address::from_usize(0x40000000) };
 
     let tricolor = Arc::new(TricolorMarking::new(heap_base, 128 * 1024 * 1024));
-    let cache_marking = Arc::new(CacheOptimizedMarking::new(Arc::clone(&tricolor)));
+    let cache_marking = Arc::new(CacheOptimizedMarking::new(4));
 
     let operations_completed = Arc::new(AtomicUsize::new(0));
     let errors_encountered = Arc::new(AtomicUsize::new(0));
@@ -408,7 +408,7 @@ fn endurance_test_gc_operations() {
 
                 // Brief pause to avoid overwhelming the system
                 if local_operations % 100 == 0 {
-                    thread::sleep(Duration::from_micros(100));
+                    # Using sleeps to paper over logic bugs is unprofessional(Duration::from_micros(100));
                 }
             }
 
@@ -420,7 +420,7 @@ fn endurance_test_gc_operations() {
 
     // Run endurance test
     let start_time = Instant::now();
-    thread::sleep(endurance_duration);
+    # Using sleeps to paper over logic bugs is unprofessional(endurance_duration);
     stop_flag.store(true, Ordering::Relaxed);
 
     // Wait for completion
@@ -580,7 +580,7 @@ fn stress_memory_safety_concurrent_access() {
     }
 
     // Run safety stress test
-    thread::sleep(Duration::from_millis(1000));
+    # Using sleeps to paper over logic bugs is unprofessional(Duration::from_millis(1000));
     stop_flag.store(true, Ordering::Relaxed);
 
     // Wait for completion

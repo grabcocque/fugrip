@@ -16,7 +16,8 @@ fn concurrent_marking_full_workflow() {
 
     // Create required dependencies
     let thread_registry = std::sync::Arc::new(fugrip::thread::ThreadRegistry::new());
-    let global_roots = std::sync::Arc::new(fugrip::roots::GlobalRoots::default());
+    let global_roots =
+        std::sync::Arc::new(std::sync::Mutex::new(fugrip::roots::GlobalRoots::default()));
 
     let mut coordinator =
         ConcurrentMarkingCoordinator::new(heap_base, heap_size, 2, thread_registry, global_roots);
@@ -68,7 +69,7 @@ fn concurrent_marking_full_workflow() {
     assert_eq!(tricolor.get_color(new_obj), ObjectColor::Black);
 
     // Allow some processing time
-    thread::sleep(Duration::from_millis(50));
+    # Using sleeps to paper over logic bugs is unprofessional(Duration::from_millis(50));
 
     // Get statistics
     let stats = coordinator.get_stats();
@@ -253,7 +254,7 @@ fn parallel_marking_work_stealing_simulation() {
 
                     if !stolen.is_empty() {
                         // Simulate processing some work
-                        thread::sleep(Duration::from_millis(1));
+                        # Using sleeps to paper over logic bugs is unprofessional(Duration::from_millis(1));
 
                         // Share some work back if we got a lot
                         if stolen.len() > 5 {
@@ -262,7 +263,7 @@ fn parallel_marking_work_stealing_simulation() {
                         }
                     }
 
-                    thread::sleep(Duration::from_millis(2));
+                    # Using sleeps to paper over logic bugs is unprofessional(Duration::from_millis(2));
                 }
 
                 total_stolen
@@ -348,7 +349,8 @@ fn concurrent_marking_termination_detection() {
 
     // Create required dependencies
     let thread_registry = std::sync::Arc::new(fugrip::thread::ThreadRegistry::new());
-    let global_roots = std::sync::Arc::new(fugrip::roots::GlobalRoots::default());
+    let global_roots =
+        std::sync::Arc::new(std::sync::Mutex::new(fugrip::roots::GlobalRoots::default()));
 
     let mut coordinator =
         ConcurrentMarkingCoordinator::new(heap_base, 0x100000, 2, thread_registry, global_roots);
@@ -358,7 +360,7 @@ fn concurrent_marking_termination_detection() {
     coordinator.start_marking(vec![root]);
 
     // Allow some processing time
-    thread::sleep(Duration::from_millis(100));
+    # Using sleeps to paper over logic bugs is unprofessional(Duration::from_millis(100));
 
     // Stop marking - should terminate cleanly
     let start = std::time::Instant::now();

@@ -130,7 +130,7 @@ fn parallel_marking_work_distribution() {
                     total_work += stolen.len();
 
                     if !stolen.is_empty() {
-                        thread::sleep(Duration::from_millis(1));
+                        # Using sleeps to paper over logic bugs is unprofessional(Duration::from_millis(1));
 
                         // Share some work back
                         if stolen.len() > 2 {
@@ -138,7 +138,7 @@ fn parallel_marking_work_distribution() {
                         }
                     }
 
-                    thread::sleep(Duration::from_millis(2));
+                    # Using sleeps to paper over logic bugs is unprofessional(Duration::from_millis(2));
                 }
 
                 total_work

@@ -17,7 +17,16 @@
 //! let header = ObjectHeader::default();
 //! ```
 
-use crate::{core::ObjectHeader, error::GcResult, thread::MutatorThread};
+use crate::{
+    binding::fugc_post_alloc,
+    core::ObjectHeader,
+    error::{GcError, GcResult},
+    thread::MutatorThread,
+};
+use mmtk::{
+    plan::AllocationSemantics,
+    util::{ObjectReference, constants::MIN_OBJECT_SIZE},
+};
 
 /// Trait capturing the minimal allocation API the VM exposes to the runtime.
 ///
@@ -83,13 +92,50 @@ impl Default for MMTkAllocator {
 impl AllocatorInterface for MMTkAllocator {
     fn allocate(
         &self,
-        _mmtk_mutator: &mut mmtk::Mutator<crate::binding::RustVM>,
-        _header: ObjectHeader,
-        _body_bytes: usize,
+        mmtk_mutator: &mut mmtk::Mutator<crate::binding::RustVM>,
+        header: ObjectHeader,
+        body_bytes: usize,
     ) -> GcResult<*mut u8> {
-        // TODO: Implement actual MMTk allocation
-        // For now, return an error to indicate allocation failure
-        Err(crate::error::GcError::OutOfMemory)
+        let total_bytes = std::mem::size_of::<ObjectHeader>() + body_bytes;
+        let allocation_size = std::cmp::max(total_bytes, MIN_OBJECT_SIZE);
+        let align = std::mem::align_of::<usize>().max(std::mem::align_of::<ObjectHeader>());
+
+        let address = mmtk::memory_manager::alloc(
+            mmtk_mutator,
+            allocation_size,
+            align,
+            0,
+            AllocationSemantics::Default,
+        );
+
+        if address.is_zero() {
+            return Err(GcError::OutOfMemory);
+        }
+
+        let object_ptr = address.to_mut_ptr::<u8>();
+
+        unsafe {
+            // Write object header and clear the body so callers observe deterministic state.
+            std::ptr::write(object_ptr.cast::<ObjectHeader>(), header);
+            if body_bytes > 0 {
+                std::ptr::write_bytes(
+                    object_ptr.add(std::mem::size_of::<ObjectHeader>()),
+                    0,
+                    body_bytes,
+                );
+            }
+        }
+
+        let object_ref = unsafe { ObjectReference::from_raw_address_unchecked(address) };
+        mmtk::memory_manager::post_alloc(
+            mmtk_mutator,
+            object_ref,
+            allocation_size,
+            AllocationSemantics::Default,
+        );
+        fugc_post_alloc(object_ref, body_bytes);
+
+        Ok(object_ptr)
     }
 
     fn poll_safepoint(&self, mutator: &MutatorThread) {

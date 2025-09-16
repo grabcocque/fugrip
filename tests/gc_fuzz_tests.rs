@@ -245,7 +245,7 @@ fn fuzz_concurrent_marking_coordinator() {
 
         let heap_base = unsafe { Address::from_usize(0x10000000) };
         let thread_registry = Arc::new(fugrip::thread::ThreadRegistry::new());
-        let global_roots = Arc::new(fugrip::roots::GlobalRoots::default());
+        let global_roots = Arc::new(std::sync::Mutex::new(fugrip::roots::GlobalRoots::default()));
 
         let coordinator = ConcurrentMarkingCoordinator::new(
             heap_base,
@@ -483,7 +483,7 @@ fn stress_test_concurrent_gc_operations() {
 
     let heap_base = unsafe { Address::from_usize(0x10000000) };
     let thread_registry = Arc::new(fugrip::thread::ThreadRegistry::new());
-    let global_roots = Arc::new(fugrip::roots::GlobalRoots::default());
+    let global_roots = Arc::new(std::sync::Mutex::new(fugrip::roots::GlobalRoots::default()));
 
     let coordinator = Arc::new(ConcurrentMarkingCoordinator::new(
         heap_base,
@@ -565,7 +565,7 @@ fn stress_test_concurrent_gc_operations() {
     }
 
     // Let threads run for a bit
-    thread::sleep(std::time::Duration::from_millis(100));
+    # Using sleeps to paper over logic bugs is unprofessional(std::time::Duration::from_millis(100));
 
     // Signal stop
     stop_flag.store(true, Ordering::Relaxed);

@@ -36,6 +36,10 @@ pub enum GcError {
     ThreadError(String),
     /// MMTk operation failed
     MmtkError(String),
+    /// GC phase transition failed
+    PhaseTransitionFailed,
+    /// Emergency stop requested
+    EmergencyStop,
 }
 
 impl fmt::Display for GcError {
@@ -45,6 +49,8 @@ impl fmt::Display for GcError {
             GcError::InvalidReference => write!(f, "Invalid object reference"),
             GcError::ThreadError(msg) => write!(f, "Thread error: {}", msg),
             GcError::MmtkError(msg) => write!(f, "MMTk error: {}", msg),
+            GcError::PhaseTransitionFailed => write!(f, "GC phase transition failed"),
+            GcError::EmergencyStop => write!(f, "Emergency stop requested"),
         }
     }
 }

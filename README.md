@@ -104,22 +104,116 @@ unsafe {
 }
 ```
 
+### FUGC Plan Manager Integration
+
+```rust
+use fugrip::plan::FugcPlanManager;
+
+// Initialize FUGC plan manager
+let mut plan_manager = FugcPlanManager::new();
+
+// Access unified coordinator for 8-step protocol
+let coordinator = plan_manager.get_fugc_coordinator();
+
+// Trigger collection through plan manager
+plan_manager.gc();  // Initiates 8-step protocol
+
+// Monitor collection progress
+while plan_manager.is_fugc_collecting() {
+    let phase = plan_manager.fugc_phase();
+    println!("Current phase: {:?}", phase);
+}
+
+// Access performance statistics
+let stats = plan_manager.get_fugc_stats();
+println!("Cycles completed: {}", stats.work_shared);
+```
+
 ### Concurrent Marking Workflow
 
 ```rust
-// Initialize coordinator
-let mut coordinator = ConcurrentMarkingCoordinator::new(
-    heap_base, heap_size, 4, thread_registry, global_roots
-);
+// Initialize coordinator through plan manager
+let plan_manager = FugcPlanManager::new();
+let coordinator = plan_manager.get_fugc_coordinator();
 
-// Start concurrent marking
-coordinator.start_marking(vec![root1, root2, root3]);
+// 8-step protocol executes automatically
+coordinator.trigger_gc();
 
-// Mutators can continue running with barriers active
-// Workers process objects concurrently
+// Mutators continue running with barriers active during Steps 2-6
+// Workers process objects concurrently during marking phases
 
 // Wait for completion
-coordinator.wait_for_completion();
+coordinator.wait_until_idle(Duration::from_millis(500));
+```
+
+## 🎯 FUGC 8-Step Protocol
+
+Fugrip implements the complete FUGC 8-step concurrent collection protocol:
+
+### Protocol Sequencing
+
+1. **Step 1 - Idle State & Trigger**: Collection coordinator waits in idle state until `trigger_gc()` called
+2. **Step 2 - Write Barrier Activation**: Enable Dijkstra write barriers before any marking begins
+3. **Step 3 - Black Allocation**: Switch allocator to black allocation mode during concurrent marking
+4. **Step 4 - Global Root Marking**: Mark all global roots (static variables, VM globals) as grey
+5. **Step 5 - Stack Scanning**: Perform soft handshakes with mutator threads to scan stack roots
+6. **Step 6 - Tracing Termination**: Complete concurrent marking, ensure tricolor invariant satisfied
+7. **Step 7 - Barrier Deactivation**: Disable write barriers and prepare for sweep phase
+8. **Step 8 - Page-Based Sweep**: Sweep unmarked objects and update allocation page colors
+
+### Coordinator APIs
+
+The `FugcCoordinator` exposes these essential APIs for external control:
+
+```rust
+// Collection Control
+coordinator.trigger_gc();                    // Initiate 8-step protocol
+coordinator.wait_until_idle(timeout);        // Block until collection completes
+
+// Phase Monitoring
+coordinator.current_phase();                 // Get current protocol step
+coordinator.is_collecting();                 // Check if collection active
+
+// Statistics & Diagnostics
+coordinator.get_cycle_stats();               // Get collection cycle metrics
+coordinator.get_fugc_stats();                // Get performance statistics
+
+// Soft Handshakes (Internal)
+coordinator.request_handshake(thread_id);    // Request mutator cooperation
+coordinator.complete_handshake(thread_id);   // Signal handshake completion
+```
+
+### Testing Infrastructure Requirements
+
+For realistic testing of the 8-step protocol, the test suite requires:
+
+#### Background Mutator Simulation
+
+```rust
+// Spawns realistic mutator threads that poll safepoints
+fn spawn_mutator(mutator: MutatorThread) -> (JoinHandle<()>, Arc<AtomicBool>) {
+    let handle = thread::spawn(move || {
+        while running.load(Ordering::Relaxed) {
+            worker.poll_safepoint();  // Critical for handshake realism
+            # Using sleeps to paper over logic bugs is unprofessional(Duration::from_millis(1));
+        }
+    });
+}
+```
+
+#### Phase Manager Shim
+
+```rust
+// Lightweight helper for phase transition testing
+impl FugcCoordinator {
+    pub fn advance_to_phase(&self, target_phase: FugcPhase) -> bool {
+        // Used by tests to validate specific protocol steps
+    }
+
+    pub fn wait_for_phase_transition(&self, from: FugcPhase, to: FugcPhase) -> bool {
+        // Ensures tests can observe protocol sequencing
+    }
+}
 ```
 
 ## 🎯 FUGC Design Principles
@@ -131,6 +225,7 @@ Fugrip implements several FUGC-inspired concepts:
 3. **Color-Abstraction**: Tricolor marking provides clear object states
 4. **Work Stealing**: Dynamic load balancing across marking threads
 5. **Black Allocation**: Reduces redundant barrier operations
+6. **Soft Handshakes**: Cooperative stack scanning without stop-the-world pauses
 
 ## 🧪 Testing & Quality
 

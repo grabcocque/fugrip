@@ -38,6 +38,7 @@ struct MutatorInner {
     parked: AtomicBool,
     lock: Mutex<()>,
     cv: Condvar,
+    stack_roots: Mutex<Vec<usize>>,
 }
 
 impl MutatorInner {
@@ -48,6 +49,7 @@ impl MutatorInner {
             parked: AtomicBool::new(false),
             lock: Mutex::new(()),
             cv: Condvar::new(),
+            stack_roots: Mutex::new(Vec::new()),
         }
     }
 
@@ -64,6 +66,29 @@ impl MutatorInner {
         while !self.parked.load(Ordering::SeqCst) {
             thread::yield_now();
         }
+    }
+
+    fn register_root(&self, handle: *mut u8) {
+        if handle.is_null() {
+            return;
+        }
+        let mut roots = self.stack_roots.lock().unwrap();
+        if !roots.contains(&(handle as usize)) {
+            roots.push(handle as usize);
+        }
+    }
+
+    fn clear_roots(&self) {
+        self.stack_roots.lock().unwrap().clear();
+    }
+
+    fn snapshot_roots(&self) -> Vec<*mut u8> {
+        self.stack_roots
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|addr| *addr as *mut u8)
+            .collect()
     }
 }
 
@@ -113,6 +138,22 @@ impl MutatorThread {
             }
             self.inner.parked.store(false, Ordering::SeqCst);
         }
+    }
+
+    /// Register a stack root handle that should be treated as a GC root while
+    /// the mutator is parked for collection.
+    pub fn register_stack_root(&self, handle: *mut u8) {
+        self.inner.register_root(handle);
+    }
+
+    /// Clear all tracked stack roots for this mutator.
+    pub fn clear_stack_roots(&self) {
+        self.inner.clear_roots();
+    }
+
+    /// Snapshot all current stack roots.
+    pub fn stack_roots(&self) -> Vec<*mut u8> {
+        self.inner.snapshot_roots()
     }
 
     pub(crate) fn request_safepoint(&self) {
@@ -190,7 +231,14 @@ impl ThreadRegistry {
     }
 
     pub fn register(&self, thread: MutatorThread) {
-        self.mutators.lock().unwrap().push(thread.inner.clone());
+        let mut mutators = self.mutators.lock().unwrap();
+        if mutators
+            .iter()
+            .any(|existing| existing.id == thread.inner.id)
+        {
+            return;
+        }
+        mutators.push(thread.inner.clone());
     }
 
     pub fn iter(&self) -> Vec<MutatorThread> {
@@ -201,5 +249,22 @@ impl ThreadRegistry {
             .cloned()
             .map(MutatorThread::from_inner)
             .collect()
+    }
+
+    /// Remove a mutator from the registry.
+    pub fn unregister(&self, id: usize) {
+        let mut mutators = self.mutators.lock().unwrap();
+        mutators.retain(|inner| inner.id != id);
+    }
+
+    /// Lookup a mutator by identifier.
+    pub fn get(&self, id: usize) -> Option<MutatorThread> {
+        self.mutators
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|inner| inner.id == id)
+            .cloned()
+            .map(MutatorThread::from_inner)
     }
 }
