@@ -1,1 +1,47 @@
+# Rust
 /target
+
+**/*.rs.bk
+**/*.rs.bk.*
+**/*.rs.bak
+**/*.rs.bak.*
+**/*.rs.swp
+**/*.rs.swp.*
+
+# IDEs and editors
+/.idea
+.vscode/
+*.swp
+*~
+*.swo
+*.swn
+*.sublime-project
+*.sublime-workspace
+*.code-workspace
+*.tmproject
+*.tmproperties
+*.kate-swp
+*.komodoproject
+*.komodotools
+*.project
+*.cproject
+*.settings/
+*.launch
+
+# Misc
+.DS_Store
+*.log
+
+# Binaries
+*.exe
+*.dll
+*.so
+*.dylib
+*.out
+*.app
+
+# Test output
+/coverage/
+/coverage-*
+*lcov*
+tarpaulin-report.html
