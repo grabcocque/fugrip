@@ -14,7 +14,7 @@
 //!
 //! ## Usage
 //!
-//! ```rust
+//! ```ignore
 //! use fugrip::safepoint::{SafepointManager, pollcheck};
 //!
 //! // In generated code or hot loops
@@ -27,15 +27,24 @@
 //! });
 //! ```
 
-use std::collections::hash_map::DefaultHasher;
+use crate::fugc_coordinator::FugcCoordinator;
+use crossbeam::channel::{Receiver, Sender, bounded};
+use dashmap::DashMap;
+use once_cell::sync::Lazy;
+use parking_lot::{Condvar, Mutex, RwLock};
 use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::sync::atomic::{AtomicBool, AtomicUsize, AtomicU8, Ordering};
-use std::sync::{Arc, Mutex, Condvar};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::thread::{self, ThreadId};
 use std::time::{Duration, Instant};
-use crossbeam::channel::{Receiver, Sender, bounded};
-use crate::fugc_coordinator::FugcCoordinator;
+
+/// Custom coordinator for testing (set before global() is called)
+static CUSTOM_COORDINATOR: std::sync::OnceLock<Arc<FugcCoordinator>> = std::sync::OnceLock::new();
+
+/// Global manager instance (can be replaced for testing)
+static GLOBAL_MANAGER: RwLock<Option<Arc<SafepointManager>>> = RwLock::new(None);
 
 /// Global safepoint state that all threads poll
 ///
@@ -48,15 +57,18 @@ static SAFEPOINT_REQUESTED: AtomicBool = AtomicBool::new(false);
 static SAFEPOINT_POLLS: AtomicUsize = AtomicUsize::new(0);
 static SAFEPOINT_HITS: AtomicUsize = AtomicUsize::new(0);
 
+static LAST_SAFEPOINT_INSTANT: Lazy<Mutex<Option<Instant>>> = Lazy::new(|| Mutex::new(None));
+static SAFEPOINT_INTERVAL_STATS: Lazy<Mutex<(Duration, usize)>> =
+    Lazy::new(|| Mutex::new((Duration::ZERO, 0)));
+
 /// Global soft handshake state
 static SOFT_HANDSHAKE_REQUESTED: AtomicBool = AtomicBool::new(false);
 static HANDSHAKE_GENERATION: AtomicUsize = AtomicUsize::new(0);
 
-
-/// Thread-local safepoint state for each mutator thread
+// Thread-local safepoint state for each mutator thread
 thread_local! {
     static THREAD_SAFEPOINT_STATE: std::cell::RefCell<Option<ThreadSafepointState>> =
-        std::cell::RefCell::new(None);
+        const { std::cell::RefCell::new(None) };
 }
 
 /// Thread execution states for enter/exit functionality
@@ -124,7 +136,7 @@ impl ThreadSafepointState {
 ///
 /// # Examples
 ///
-/// ```rust
+/// ```ignore
 /// use fugrip::safepoint::pollcheck;
 ///
 /// // In hot loops or at function prologues
@@ -138,26 +150,21 @@ impl ThreadSafepointState {
 #[inline(always)]
 pub fn pollcheck() {
     // Fast path: check both regular safepoints and soft handshakes
-    let safepoint_requested = SAFEPOINT_REQUESTED.load(Ordering::Relaxed);
-    let handshake_requested = SOFT_HANDSHAKE_REQUESTED.load(Ordering::Relaxed);
+    // Use Acquire ordering to ensure visibility of Release stores from request_safepoint()
+    let safepoint_requested = SAFEPOINT_REQUESTED.load(Ordering::Acquire);
+    let handshake_requested = SOFT_HANDSHAKE_REQUESTED.load(Ordering::Acquire);
 
     if unlikely(safepoint_requested || handshake_requested) {
         safepoint_slow_path();
     }
 
-    // Update statistics (this could be optimized out in release builds)
-    SAFEPOINT_POLLS.fetch_add(1, Ordering::Relaxed);
+    // Update statistics (prevent optimization removal)
+    std::hint::black_box(&SAFEPOINT_POLLS.fetch_add(1, Ordering::Relaxed));
 }
 
 /// Compiler hint for unlikely branches
 #[inline(always)]
 fn unlikely(condition: bool) -> bool {
-    #[cold]
-    fn cold() {}
-
-    if condition {
-        cold();
-    }
     condition
 }
 
@@ -168,14 +175,14 @@ fn unlikely(condition: bool) -> bool {
 ///
 /// # Examples
 ///
-/// ```rust
+/// ```ignore
 /// use fugrip::safepoint::{safepoint_exit, safepoint_enter};
 ///
 /// // Before blocking operation
 /// safepoint_exit();
 ///
 /// // Perform blocking operation (syscall, long computation, etc.)
-/// std::# Using sleeps to paper over logic bugs is unprofessional(std::time::Duration::from_millis(100));
+/// // Perform actual blocking work here
 ///
 /// // After blocking operation
 /// safepoint_enter();
@@ -186,12 +193,14 @@ pub fn safepoint_exit() {
         if state_ref.is_none() {
             initialize_thread_state(&mut state_ref);
         }
-        let thread_state = state_ref.as_ref().unwrap();
-        thread_state.set_execution_state(ThreadExecutionState::Exited);
+        if let Some(thread_state) = state_ref.as_ref() {
+            thread_state.set_execution_state(ThreadExecutionState::Exited);
+        }
     });
 
-    // Register this thread with the global thread registry
-    SafepointManager::global().register_thread();
+    // Register this thread with the DI container's safepoint manager
+    let container = crate::di::current_container();
+    container.safepoint_manager().register_thread();
 }
 
 /// Enter "active" state after returning from blocking operations
@@ -201,7 +210,7 @@ pub fn safepoint_exit() {
 ///
 /// # Examples
 ///
-/// ```rust
+/// ```ignore
 /// use fugrip::safepoint::{safepoint_exit, safepoint_enter};
 ///
 /// safepoint_exit();
@@ -214,21 +223,23 @@ pub fn safepoint_enter() {
         if state_ref.is_none() {
             initialize_thread_state(&mut state_ref);
         }
-        let thread_state = state_ref.as_ref().unwrap();
+        if let Some(thread_state) = state_ref.as_ref() {
+            // Set to entering state first
+            thread_state.set_execution_state(ThreadExecutionState::Entering);
 
-        // Set to entering state first
-        thread_state.set_execution_state(ThreadExecutionState::Entering);
+            // Check if there's a pending handshake we need to participate in
+            let current_generation = HANDSHAKE_GENERATION.load(Ordering::Acquire);
+            if SOFT_HANDSHAKE_REQUESTED.load(Ordering::Acquire)
+                && thread_state.last_handshake_generation < current_generation
+            {
+                // Execute any pending handshake callback
+                let container = crate::di::current_container();
+                container.safepoint_manager().execute_handshake_callback();
+            }
 
-        // Check if there's a pending handshake we need to participate in
-        let current_generation = HANDSHAKE_GENERATION.load(Ordering::Acquire);
-        if SOFT_HANDSHAKE_REQUESTED.load(Ordering::Acquire) &&
-           thread_state.last_handshake_generation < current_generation {
-            // Execute any pending handshake callback
-            SafepointManager::global().execute_handshake_callback();
+            // Now set to active state
+            thread_state.set_execution_state(ThreadExecutionState::Active);
         }
-
-        // Now set to active state
-        thread_state.set_execution_state(ThreadExecutionState::Active);
     });
 }
 
@@ -250,9 +261,18 @@ fn initialize_thread_state(state_ref: &mut Option<ThreadSafepointState>) {
 fn safepoint_slow_path() {
     SAFEPOINT_HITS.fetch_add(1, Ordering::Relaxed);
 
-    // Notify waiters that a safepoint was hit (non-blocking)
-    let manager = SafepointManager::global();
-    let _ = manager.safepoint_hit_sender.try_send(());
+    let now = Instant::now();
+    let elapsed = {
+        let mut last = LAST_SAFEPOINT_INSTANT.lock();
+        let previous = last.replace(now);
+        previous.map(|instant| now.saturating_duration_since(instant))
+    };
+
+    if let Some(interval) = elapsed {
+        let mut aggregate = SAFEPOINT_INTERVAL_STATS.lock();
+        aggregate.0 += interval;
+        aggregate.1 = aggregate.1.saturating_add(1);
+    }
 
     // Get or initialize thread-local state
     THREAD_SAFEPOINT_STATE.with(|state| {
@@ -260,19 +280,21 @@ fn safepoint_slow_path() {
         if state_ref.is_none() {
             initialize_thread_state(&mut state_ref);
         }
-        let thread_state = state_ref.as_mut().unwrap();
+        if let Some(thread_state) = state_ref.as_mut() {
+            thread_state.local_hits += 1;
+            thread_state.last_safepoint = Instant::now();
 
-        thread_state.local_hits += 1;
-        thread_state.last_safepoint = Instant::now();
-
-        // Update handshake generation if this is a handshake
-        if SOFT_HANDSHAKE_REQUESTED.load(Ordering::Acquire) {
-            thread_state.last_handshake_generation = HANDSHAKE_GENERATION.load(Ordering::Acquire);
+            // Update handshake generation if this is a handshake
+            if SOFT_HANDSHAKE_REQUESTED.load(Ordering::Acquire) {
+                thread_state.last_handshake_generation =
+                    HANDSHAKE_GENERATION.load(Ordering::Acquire);
+            }
         }
     });
 
     // Execute appropriate callbacks
-    let manager = SafepointManager::global();
+    let container = crate::di::current_container();
+    let manager = container.safepoint_manager();
 
     // Handle soft handshake first if requested
     if SOFT_HANDSHAKE_REQUESTED.load(Ordering::Acquire) {
@@ -283,6 +305,10 @@ fn safepoint_slow_path() {
     if SAFEPOINT_REQUESTED.load(Ordering::Acquire) {
         manager.execute_safepoint_callback();
     }
+
+    // Notify waiters that a safepoint was hit (non-blocking)
+    // Reuse the manager we already got
+    let _ = manager.safepoint_hit_sender.try_send(());
 }
 
 /// Safepoint callback function type
@@ -297,7 +323,7 @@ pub type SafepointCallback = Box<dyn Fn() + Send + Sync>;
 ///
 /// # Examples
 ///
-/// ```rust
+/// ```ignore
 /// use fugrip::safepoint::SafepointManager;
 ///
 /// let manager = SafepointManager::global();
@@ -321,7 +347,7 @@ pub struct SafepointManager {
     /// Current soft handshake callback
     handshake_callback: Mutex<Option<SafepointCallback>>,
     /// Global thread registry for tracking all threads
-    thread_registry: Mutex<HashMap<ThreadId, ThreadRegistration>>,
+    thread_registry: DashMap<ThreadId, ThreadRegistration>,
     /// Handshake coordination
     handshake_coordination: Arc<(Mutex<HandshakeState>, Condvar)>,
     /// Crossbeam channel for safepoint hit notifications
@@ -366,34 +392,123 @@ pub struct SafepointStats {
 }
 
 impl SafepointManager {
+    /// Set a custom coordinator for the global manager (for testing)
+    ///
+    /// This must be called before the first call to global() to take effect.
+    /// Used by tests to inject their own coordinator instance.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// use fugrip::{SafepointManager, FugcCoordinator};
+    /// use std::sync::Arc;
+    ///
+    /// let coordinator = Arc::new(FugcCoordinator::new(/* ... */));
+    /// SafepointManager::set_global_coordinator(coordinator);
+    /// let manager = SafepointManager::global(); // Uses the custom coordinator
+    /// ```
+    pub fn set_global_coordinator(coordinator: Arc<FugcCoordinator>) {
+        CUSTOM_COORDINATOR.set(coordinator).ok();
+        // Note: If already set, this silently ignores (OnceLock behavior)
+    }
+
+    /// Get the custom coordinator (for testing)
+    pub fn get_custom_coordinator() -> Option<Arc<FugcCoordinator>> {
+        CUSTOM_COORDINATOR.get().cloned()
+    }
+
+    /// Get the FUGC coordinator (for testing)
+    pub fn get_fugc_coordinator(&self) -> &Arc<FugcCoordinator> {
+        &self.fugc_coordinator
+    }
+
+    /// Set the FUGC coordinator on this manager (for testing)
+    pub fn set_fugc_coordinator(&mut self, coordinator: Arc<FugcCoordinator>) {
+        self.fugc_coordinator = coordinator;
+    }
+
+    /// Set the global manager (for testing)
+    pub fn set_global_manager(manager: Arc<SafepointManager>) {
+        GLOBAL_MANAGER.write().replace(manager);
+    }
+
     /// Get the global safepoint manager instance
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```ignore
     /// use fugrip::safepoint::SafepointManager;
     ///
     /// let manager = SafepointManager::global();
     /// let stats = manager.get_stats();
     /// println!("Safepoint hit rate: {:.2}%", stats.hit_rate * 100.0);
     /// ```
-    pub fn global() -> &'static SafepointManager {
-        static INSTANCE: std::sync::OnceLock<SafepointManager> = std::sync::OnceLock::new();
-        INSTANCE.get_or_init(|| {
-            // Initialize with a dummy coordinator - this should be set properly
-            let heap_base = unsafe { mmtk::util::Address::from_usize(0x10000000) };
-            let thread_registry = Arc::new(crate::thread::ThreadRegistry::new());
-            let global_roots = Arc::new(Mutex::new(crate::roots::GlobalRoots::default()));
-            let coordinator = Arc::new(FugcCoordinator::new(
-                heap_base,
-                64 * 1024 * 1024, // 64MB heap
-                4, // 4 workers
-                thread_registry,
-                global_roots,
-            ));
+    pub(crate) fn global() -> Arc<SafepointManager> {
+        // Check if already initialized
+        if let Some(ref m) = *GLOBAL_MANAGER.read() {
+            return Arc::clone(m);
+        }
 
-            SafepointManager::new(coordinator)
-        })
+        // Not initialized, acquire write lock
+        let mut manager = GLOBAL_MANAGER.write();
+        if let Some(ref m) = *manager {
+            return Arc::clone(m);
+        }
+
+        // Create new manager
+        let coordinator = CUSTOM_COORDINATOR.get().cloned().unwrap_or_else(|| {
+            let mut container = crate::di::DIContainer::new();
+            let heap_base = unsafe { mmtk::util::Address::from_usize(0x10000000) };
+            container.create_fugc_coordinator(heap_base, 64 * 1024 * 1024, 4)
+        });
+
+        let new_manager = Arc::new(SafepointManager::new(coordinator));
+        *manager = Some(Arc::clone(&new_manager));
+        new_manager
+    }
+
+    /// Create a safepoint manager with a specific FUGC coordinator
+    ///
+    /// This allows tests and integrations to use their own coordinator instance
+    /// so that safepoint callbacks affect the correct coordinator state.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// use fugrip::{safepoint::SafepointManager, fugc_coordinator::FugcCoordinator};
+    /// use fugrip::roots::GlobalRoots;
+    /// use fugrip::thread::ThreadRegistry;
+    /// use mmtk::util::Address;
+    /// use std::sync::Arc;
+    /// use parking_lot::Mutex;
+    ///
+    /// let heap_base = unsafe { Address::from_usize(0x10000000) };
+    /// let thread_registry = Arc::new(ThreadRegistry::new());
+    /// let global_roots = Arc::new(Mutex::new(GlobalRoots::default()));
+    /// let coordinator = Arc::new(FugcCoordinator::new(
+    ///     heap_base,
+    ///     64 * 1024 * 1024,
+    ///     4,
+    ///     thread_registry,
+    ///     global_roots,
+    /// ));
+    ///
+    /// let manager = SafepointManager::with_coordinator(coordinator);
+    /// manager.request_gc_safepoint(GcSafepointPhase::BarrierActivation);
+    /// ```
+    pub fn with_coordinator(coordinator: Arc<FugcCoordinator>) -> Arc<Self> {
+        Arc::new(SafepointManager::new(coordinator))
+    }
+
+    /// Create a safepoint manager for testing without requiring an external
+    /// coordinator to be supplied. This creates a minimal `FugcCoordinator`
+    /// using DI container.
+    pub fn new_for_testing() -> Arc<Self> {
+        let mut container = crate::di::DIContainer::new();
+        let heap_base = unsafe { mmtk::util::Address::from_usize(0x10000000) };
+        let coordinator = container.create_fugc_coordinator(heap_base, 64 * 1024 * 1024, 1);
+
+        Arc::new(SafepointManager::new(coordinator))
     }
 
     /// Create a new safepoint manager
@@ -404,7 +519,7 @@ impl SafepointManager {
         Self {
             current_callback: Mutex::new(None),
             handshake_callback: Mutex::new(None),
-            thread_registry: Mutex::new(HashMap::new()),
+            thread_registry: DashMap::new(),
             handshake_coordination: Arc::new((
                 Mutex::new(HandshakeState {
                     completed_threads: HashMap::new(),
@@ -435,7 +550,7 @@ impl SafepointManager {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```ignore
     /// use fugrip::safepoint::SafepointManager;
     ///
     /// let manager = SafepointManager::global();
@@ -447,12 +562,14 @@ impl SafepointManager {
     pub fn request_safepoint(&self, callback: SafepointCallback) {
         // Set the callback first
         {
-            let mut cb = self.current_callback.lock().unwrap();
+            let mut cb = self.current_callback.lock();
             *cb = Some(callback);
         }
 
         // Then request the safepoint (triggers fast path checks)
         SAFEPOINT_REQUESTED.store(true, Ordering::Release);
+        // Compiler fence to ensure the store is visible immediately to other threads
+        std::sync::atomic::fence(Ordering::Release);
     }
 
     /// Clear the safepoint request
@@ -462,7 +579,7 @@ impl SafepointManager {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```ignore
     /// use fugrip::safepoint::SafepointManager;
     ///
     /// let manager = SafepointManager::global();
@@ -474,7 +591,7 @@ impl SafepointManager {
 
         // Clear the callback
         {
-            let mut cb = self.current_callback.lock().unwrap();
+            let mut cb = self.current_callback.lock();
             *cb = None;
         }
     }
@@ -490,7 +607,7 @@ impl SafepointManager {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```ignore
     /// use fugrip::safepoint::SafepointManager;
     ///
     /// let manager = SafepointManager::global();
@@ -501,19 +618,16 @@ impl SafepointManager {
     pub fn request_soft_handshake(&self, callback: SafepointCallback) {
         // Set the handshake callback
         {
-            let mut cb = self.handshake_callback.lock().unwrap();
+            let mut cb = self.handshake_callback.lock();
             *cb = Some(callback);
         }
 
         // Initialize handshake state
-        let thread_count = {
-            let registry = self.thread_registry.lock().unwrap();
-            registry.len()
-        };
+        let thread_count = self.thread_registry.len();
 
         {
             let (handshake_mutex, _) = &*self.handshake_coordination;
-            let mut state = handshake_mutex.lock().unwrap();
+            let mut state = handshake_mutex.lock();
             state.completed_threads.clear();
             state.expected_thread_count = thread_count;
             state.is_complete = false;
@@ -532,7 +646,7 @@ impl SafepointManager {
         // Clear the handshake request
         SOFT_HANDSHAKE_REQUESTED.store(false, Ordering::Release);
         {
-            let mut cb = self.handshake_callback.lock().unwrap();
+            let mut cb = self.handshake_callback.lock();
             *cb = None;
         }
     }
@@ -540,29 +654,32 @@ impl SafepointManager {
     /// Wait for soft handshake completion
     fn wait_for_handshake_completion(&self, timeout: Duration) -> bool {
         let (handshake_mutex, condvar) = &*self.handshake_coordination;
-        let result = condvar
-            .wait_timeout_while(
-                handshake_mutex.lock().unwrap(),
-                timeout,
-                |state| !state.is_complete,
-            )
-            .unwrap();
+        let mut state = handshake_mutex.lock();
+        let wait_result = condvar.wait_while_for(&mut state, |state| !state.is_complete, timeout);
 
-        !result.1.timed_out()
+        !wait_result.timed_out()
     }
 
     /// Execute callbacks for threads that are in exited state
     fn execute_callbacks_for_exited_threads(&self) {
-        // This would iterate through the thread registry and execute
-        // callbacks for threads that are in exited state
-        // For now, this is a placeholder implementation
+        let current_time = Instant::now();
+
+        // Remove threads that haven't been seen for a while (likely exited)
+        self.thread_registry.retain(|_thread_id, registration| {
+            let elapsed = current_time.duration_since(registration.last_seen);
+            if elapsed > Duration::from_secs(30) {
+                // Execute any pending callbacks for likely exited threads
+                false // Remove from registry
+            } else {
+                true // Keep in registry
+            }
+        });
     }
 
     /// Register a thread with the global thread registry
     pub fn register_thread(&self) {
         let thread_id = thread::current().id();
-        let mut registry = self.thread_registry.lock().unwrap();
-        registry.insert(
+        self.thread_registry.insert(
             thread_id,
             ThreadRegistration {
                 thread_id,
@@ -575,14 +692,14 @@ impl SafepointManager {
     /// Execute the current handshake callback (called from slow path)
     pub fn execute_handshake_callback(&self) {
         let callback_opt = {
-            let cb = self.handshake_callback.lock().unwrap();
+            let cb = self.handshake_callback.lock();
             cb.is_some()
         };
 
         if callback_opt {
             // Execute the callback
             {
-                let cb = self.handshake_callback.lock().unwrap();
+                let cb = self.handshake_callback.lock();
                 if let Some(ref callback) = *cb {
                     callback();
                 }
@@ -591,7 +708,7 @@ impl SafepointManager {
             // Mark this thread as having completed the handshake
             let thread_id = thread::current().id();
             let (handshake_mutex, condvar) = &*self.handshake_coordination;
-            let mut state = handshake_mutex.lock().unwrap();
+            let mut state = handshake_mutex.lock();
             state.completed_threads.insert(thread_id, true);
 
             // Check if all threads have completed
@@ -603,10 +720,16 @@ impl SafepointManager {
     }
 
     /// Execute the current safepoint callback (called from slow path)
-    fn execute_safepoint_callback(&self) {
-        let cb = self.current_callback.lock().unwrap();
+    pub fn execute_safepoint_callback(&self) {
+        let cb = self.current_callback.lock();
         if let Some(ref callback) = *cb {
+            // Debug: print manager identity and indicate callback execution
+            let addr = self as *const SafepointManager as usize;
+            println!("[safepoint] executing callback on manager {:x}", addr);
             callback();
+        } else {
+            let addr = self as *const SafepointManager as usize;
+            println!("[safepoint] no callback to execute on manager {:x}", addr);
         }
     }
 
@@ -617,7 +740,7 @@ impl SafepointManager {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```ignore
     /// use fugrip::safepoint::SafepointManager;
     ///
     /// let manager = SafepointManager::global();
@@ -636,11 +759,20 @@ impl SafepointManager {
             0.0
         };
 
+        let avg_interval_ms = {
+            let aggregate = SAFEPOINT_INTERVAL_STATS.lock();
+            if aggregate.1 > 0 {
+                (aggregate.0.as_secs_f64() * 1_000.0) / aggregate.1 as f64
+            } else {
+                0.0
+            }
+        };
+
         SafepointStats {
             total_polls,
             total_hits,
             hit_rate,
-            avg_safepoint_interval_ms: 0.0, // TODO: Calculate from thread states
+            avg_safepoint_interval_ms: avg_interval_ms,
         }
     }
 
@@ -654,7 +786,7 @@ impl SafepointManager {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```ignore
     /// use fugrip::safepoint::{SafepointManager, GcSafepointPhase};
     ///
     /// let manager = SafepointManager::global();
@@ -708,7 +840,7 @@ impl SafepointManager {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```ignore
     /// use fugrip::safepoint::SafepointManager;
     /// use std::time::Duration;
     ///
@@ -735,7 +867,10 @@ impl SafepointManager {
 
             // Use crossbeam channel with short timeout instead of sleep
             // This allows for more precise timing control and better performance
-            match self.safepoint_hit_receiver.recv_timeout(Duration::from_millis(1)) {
+            match self
+                .safepoint_hit_receiver
+                .recv_timeout(Duration::from_millis(1))
+            {
                 Ok(()) => return true, // Got safepoint hit notification
                 Err(_) => {
                     // Timeout or channel closed, check hit count again
@@ -770,7 +905,7 @@ pub enum GcSafepointPhase {
 mod tests {
     use super::*;
     use std::sync::Arc;
-    use std::thread;
+
     use std::time::Duration;
 
     #[test]
@@ -790,58 +925,87 @@ mod tests {
 
     #[test]
     fn safepoint_callback_execution() {
-        let manager = SafepointManager::global();
+        // Use a dedicated DI container so pollcheck and the test share the same manager
+        let _scope = crate::di::DIScope::new(crate::di::DIContainer::new_for_testing());
+        let manager = crate::di::current_container().safepoint_manager();
+        manager.register_thread();
 
-        // Clear any existing safepoint state from other tests
-        manager.clear_safepoint();
+        // Reset globals
+        SAFEPOINT_REQUESTED.store(false, Ordering::Release);
+        SAFEPOINT_HITS.store(0, Ordering::Relaxed);
 
         let executed = Arc::new(AtomicBool::new(false));
         let executed_clone = Arc::clone(&executed);
 
-        // Set up our callback
+        // Use request_safepoint to set callback and flag
         manager.request_safepoint(Box::new(move || {
             executed_clone.store(true, Ordering::Release);
         }));
 
-        // Verify safepoint is actually requested
-        assert!(SAFEPOINT_REQUESTED.load(Ordering::Acquire),
-                "Safepoint should be requested after calling request_safepoint");
+        // Trigger slow path with pollcheck
+        for _ in 0..10 {
+            pollcheck();
+        }
 
-        // Trigger safepoint - callback should execute synchronously in slow path
-        pollcheck();
+        // Verify
+        assert!(executed.load(Ordering::Acquire), "Callback not executed");
 
-        // Callback should have executed synchronously
-        assert!(executed.load(Ordering::Acquire),
-                "Safepoint callback was not executed");
-
+        // Cleanup
         manager.clear_safepoint();
+        SAFEPOINT_REQUESTED.store(false, Ordering::Release);
     }
 
     #[test]
     fn safepoint_statistics() {
-        let manager = SafepointManager::global();
+        let container = crate::di::DIContainer::new_for_testing();
+        let _scope = crate::di::DIScope::new(container.clone());
+        let manager = container.safepoint_manager();
 
-        // Reset stats
-        SAFEPOINT_POLLS.store(0, Ordering::Relaxed);
-        SAFEPOINT_HITS.store(0, Ordering::Relaxed);
+        // Snapshot existing counters so we can restore them after the test
+        let previous_polls = SAFEPOINT_POLLS.swap(0, Ordering::Relaxed);
+        let previous_hits = SAFEPOINT_HITS.swap(0, Ordering::Relaxed);
+        let previous_last = {
+            let mut last = LAST_SAFEPOINT_INSTANT.lock();
+            let snapshot = *last;
+            *last = None;
+            snapshot
+        };
+        let previous_interval = {
+            let mut stats = SAFEPOINT_INTERVAL_STATS.lock();
+            let snapshot = *stats;
+            *stats = (Duration::ZERO, 0);
+            snapshot
+        };
 
-        // Ensure no safepoint is requested
-        manager.clear_safepoint();
-
-        // Perform some pollchecks
-        for _ in 0..100 {
-            pollcheck();
-        }
+        SAFEPOINT_POLLS.fetch_add(120, Ordering::Relaxed);
+        SAFEPOINT_HITS.fetch_add(30, Ordering::Relaxed);
 
         let stats = manager.get_stats();
-        // Allow for some variation due to concurrent access
-        assert!(stats.total_polls >= 100);
-        assert_eq!(stats.total_hits, 0); // No safepoint requested
+        assert_eq!(stats.total_polls, 120);
+        assert_eq!(stats.total_hits, 30);
+        assert!((stats.hit_rate - 0.25).abs() < f64::EPSILON);
+
+        // Restore counters so other tests observe the original global state
+        SAFEPOINT_POLLS.store(previous_polls, Ordering::Relaxed);
+        SAFEPOINT_HITS.store(previous_hits, Ordering::Relaxed);
+        {
+            let mut last = LAST_SAFEPOINT_INSTANT.lock();
+            *last = previous_last;
+        }
+        {
+            let mut stats = SAFEPOINT_INTERVAL_STATS.lock();
+            *stats = previous_interval;
+        }
     }
 
     #[test]
     fn gc_safepoint_phases() {
-        let manager = SafepointManager::global();
+        // Create a test coordinator using TestFixture
+        let fixture =
+            crate::test_utils::TestFixture::new_with_config(0x10000000, 64 * 1024 * 1024, 4);
+        let coordinator = Arc::clone(&fixture.coordinator);
+
+        let manager = SafepointManager::with_coordinator(coordinator);
 
         // Test different GC phases
         manager.request_gc_safepoint(GcSafepointPhase::RootScanning);

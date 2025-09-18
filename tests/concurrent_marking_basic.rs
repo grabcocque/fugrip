@@ -7,14 +7,13 @@ use fugrip::concurrent::{
 use mmtk::util::{Address, ObjectReference};
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
 
 #[test]
 fn write_barrier_integration_test() {
     let heap_base = unsafe { Address::from_usize(0x100000) };
     let marking = Arc::new(TricolorMarking::new(heap_base, 0x100000));
     let coordinator = Arc::new(ParallelMarkingCoordinator::new(2));
-    let barrier = WriteBarrier::new(Arc::clone(&marking), coordinator);
+    let barrier = WriteBarrier::new(Arc::clone(&marking), coordinator, heap_base, 0x100000);
 
     // Create test objects
     let obj1 = unsafe { ObjectReference::from_raw_address_unchecked(heap_base + 0x1000usize) };
@@ -130,7 +129,7 @@ fn parallel_marking_work_distribution() {
                     total_work += stolen.len();
 
                     if !stolen.is_empty() {
-                        # Using sleeps to paper over logic bugs is unprofessional(Duration::from_millis(1));
+                        //(Duration::from_millis(1));
 
                         // Share some work back
                         if stolen.len() > 2 {
@@ -138,7 +137,7 @@ fn parallel_marking_work_distribution() {
                         }
                     }
 
-                    # Using sleeps to paper over logic bugs is unprofessional(Duration::from_millis(2));
+                    //(Duration::from_millis(2));
                 }
 
                 total_work
@@ -189,7 +188,7 @@ fn write_barrier_bulk_operations() {
     let heap_base = unsafe { Address::from_usize(0x600000) };
     let marking = Arc::new(TricolorMarking::new(heap_base, 0x100000));
     let coordinator = Arc::new(ParallelMarkingCoordinator::new(1));
-    let barrier = WriteBarrier::new(marking, coordinator);
+    let barrier = WriteBarrier::new(marking, coordinator, heap_base, 0x100000);
 
     barrier.activate();
 

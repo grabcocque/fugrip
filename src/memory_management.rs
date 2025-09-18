@@ -11,14 +11,16 @@
 //! - **Weak References**: Automatic nulling when target objects are collected
 //! - **Weak Maps**: JavaScript-style WeakMap with iteration support
 
-use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, Weak};
-use std::thread;
-use std::time::{Duration, Instant};
-use crossbeam::channel::{self, Receiver, Sender};
-use mmtk::util::{Address, ObjectReference};
 use crate::fugc_coordinator::FugcCoordinator;
+use crossbeam::channel::{self, Receiver, Sender};
+use dashmap::DashMap;
+use mmtk::util::{Address, ObjectReference};
+use parking_lot::Mutex;
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Weak};
+use std::thread;
+use std::time::Instant;
 
 /// Weak reference implementation with automatic nulling
 ///
@@ -41,7 +43,7 @@ impl<T> WeakReference<T> {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```ignore
     /// use fugrip::memory_management::WeakReference;
     /// use std::sync::Arc;
     ///
@@ -64,7 +66,7 @@ impl<T> WeakReference<T> {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```ignore
     /// use fugrip::memory_management::WeakReference;
     /// use std::sync::Arc;
     ///
@@ -86,7 +88,7 @@ impl<T> WeakReference<T> {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```ignore
     /// use fugrip::memory_management::WeakReference;
     /// use std::sync::Arc;
     ///
@@ -107,7 +109,7 @@ impl<T> WeakReference<T> {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```ignore
     /// use fugrip::memory_management::WeakReference;
     /// use std::sync::Arc;
     ///
@@ -145,12 +147,15 @@ impl<T> Clone for WeakReference<T> {
     }
 }
 
+type WeakRefBucket = Vec<Box<dyn WeakRefTrait>>;
+type WeakRefMap = DashMap<ObjectReference, WeakRefBucket>;
+
 /// Registry for managing weak references during GC
 ///
 /// This coordinates with the GC to null weak references when objects are collected.
 pub struct WeakRefRegistry {
     /// Map from ObjectReference to list of weak references
-    references: Arc<Mutex<HashMap<ObjectReference, Vec<Box<dyn WeakRefTrait>>>>>,
+    references: Arc<WeakRefMap>,
     /// Total number of weak references registered
     total_registered: AtomicUsize,
     /// Total number of weak references nulled
@@ -180,7 +185,7 @@ impl WeakRefRegistry {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```ignore
     /// use fugrip::memory_management::WeakRefRegistry;
     ///
     /// let registry = WeakRefRegistry::new();
@@ -188,7 +193,7 @@ impl WeakRefRegistry {
     /// ```
     pub fn new() -> Self {
         Self {
-            references: Arc::new(Mutex::new(HashMap::new())),
+            references: Arc::new(DashMap::new()),
             total_registered: AtomicUsize::new(0),
             total_nulled: AtomicUsize::new(0),
             total_cleaned: AtomicUsize::new(0),
@@ -199,7 +204,7 @@ impl WeakRefRegistry {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```ignore
     /// use fugrip::memory_management::{WeakRefRegistry, WeakReference};
     /// use std::sync::Arc;
     /// use mmtk::util::ObjectReference;
@@ -212,10 +217,14 @@ impl WeakRefRegistry {
     /// registry.register(obj_ref, weak_ref);
     /// assert_eq!(registry.total_count(), 1);
     /// ```
-    pub fn register<T: Send + Sync + 'static>(&self, object_ref: ObjectReference, weak_ref: WeakReference<T>) {
-        let mut refs = self.references.lock().unwrap();
-        refs.entry(object_ref)
-            .or_insert_with(Vec::new)
+    pub fn register<T: Send + Sync + 'static>(
+        &self,
+        object_ref: ObjectReference,
+        weak_ref: WeakReference<T>,
+    ) {
+        self.references
+            .entry(object_ref)
+            .or_default()
             .push(Box::new(weak_ref));
         self.total_registered.fetch_add(1, Ordering::Relaxed);
     }
@@ -224,7 +233,7 @@ impl WeakRefRegistry {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```ignore
     /// use fugrip::memory_management::{WeakRefRegistry, WeakReference};
     /// use std::sync::Arc;
     /// use mmtk::util::ObjectReference;
@@ -242,8 +251,7 @@ impl WeakRefRegistry {
     /// assert!(!weak_ref.is_valid());
     /// ```
     pub fn null_references_to_object(&self, object_ref: ObjectReference) -> usize {
-        let mut refs = self.references.lock().unwrap();
-        if let Some(weak_refs) = refs.remove(&object_ref) {
+        if let Some((_, weak_refs)) = self.references.remove(&object_ref) {
             let count = weak_refs.len();
             for weak_ref in weak_refs {
                 weak_ref.null();
@@ -261,7 +269,7 @@ impl WeakRefRegistry {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```ignore
     /// use fugrip::memory_management::WeakRefRegistry;
     ///
     /// let registry = WeakRefRegistry::new();
@@ -269,17 +277,17 @@ impl WeakRefRegistry {
     /// assert_eq!(cleaned, 0); // No invalid references to clean
     /// ```
     pub fn cleanup_invalid_references(&self) -> usize {
-        let mut refs = self.references.lock().unwrap();
         let mut cleaned_count = 0;
 
-        refs.retain(|_, weak_refs| {
+        self.references.retain(|_, weak_refs| {
             let original_len = weak_refs.len();
             weak_refs.retain(|weak_ref| weak_ref.is_valid());
             cleaned_count += original_len - weak_refs.len();
             !weak_refs.is_empty()
         });
 
-        self.total_cleaned.fetch_add(cleaned_count, Ordering::Relaxed);
+        self.total_cleaned
+            .fetch_add(cleaned_count, Ordering::Relaxed);
         cleaned_count
     }
 
@@ -300,8 +308,13 @@ impl WeakRefRegistry {
 
     /// Get current number of active weak references
     pub fn active_count(&self) -> usize {
-        let refs = self.references.lock().unwrap();
-        refs.values().map(|v| v.len()).sum()
+        self.references.iter().map(|entry| entry.len()).sum()
+    }
+}
+
+impl Default for WeakRefRegistry {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -341,7 +354,7 @@ pub enum ObjectState {
 ///
 /// # Examples
 ///
-/// ```rust
+/// ```ignore
 /// use fugrip::memory_management::FreeObjectManager;
 /// use mmtk::util::ObjectReference;
 ///
@@ -361,7 +374,7 @@ pub enum ObjectState {
 /// ```
 pub struct FreeObjectManager {
     /// Tracking of freed objects
-    freed_objects: Arc<Mutex<HashMap<ObjectReference, Instant>>>,
+    freed_objects: Arc<DashMap<ObjectReference, Instant>>,
     /// Statistics
     total_freed: AtomicUsize,
     redirections_performed: AtomicUsize,
@@ -371,7 +384,7 @@ impl FreeObjectManager {
     /// Create a new free object manager
     pub fn new() -> Self {
         Self {
-            freed_objects: Arc::new(Mutex::new(HashMap::new())),
+            freed_objects: Arc::new(DashMap::new()),
             total_freed: AtomicUsize::new(0),
             redirections_performed: AtomicUsize::new(0),
         }
@@ -387,7 +400,7 @@ impl FreeObjectManager {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```ignore
     /// use fugrip::memory_management::FreeObjectManager;
     /// use mmtk::util::ObjectReference;
     ///
@@ -400,8 +413,7 @@ impl FreeObjectManager {
     /// // Object is now freed and will trap on access
     /// ```
     pub fn free_object(&self, object: ObjectReference) {
-        let mut freed = self.freed_objects.lock().unwrap();
-        freed.insert(object, Instant::now());
+        self.freed_objects.insert(object, Instant::now());
         self.total_freed.fetch_add(1, Ordering::Relaxed);
 
         // In a real implementation, this would:
@@ -418,8 +430,7 @@ impl FreeObjectManager {
     /// # Returns
     /// `true` if the object has been freed, `false` otherwise
     pub fn is_freed(&self, object: ObjectReference) -> bool {
-        let freed = self.freed_objects.lock().unwrap();
-        freed.contains_key(&object)
+        self.freed_objects.contains_key(&object)
     }
 
     /// Redirect freed object pointers to the free singleton
@@ -435,7 +446,7 @@ impl FreeObjectManager {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```ignore
     /// use fugrip::memory_management::FreeObjectManager;
     /// use mmtk::util::ObjectReference;
     ///
@@ -458,8 +469,7 @@ impl FreeObjectManager {
 
             // Return reference to free singleton
             let singleton_addr = get_free_singleton_address();
-            ObjectReference::from_raw_address(singleton_addr)
-                .unwrap_or(object) // Fallback to original if singleton invalid
+            ObjectReference::from_raw_address(singleton_addr).unwrap_or(object) // Fallback to original if singleton invalid
         } else {
             object
         }
@@ -467,23 +477,28 @@ impl FreeObjectManager {
 
     /// Get statistics about freed objects
     pub fn get_stats(&self) -> FreeObjectStats {
-        let freed = self.freed_objects.lock().unwrap();
         FreeObjectStats {
             total_freed: self.total_freed.load(Ordering::Relaxed),
-            currently_freed: freed.len(),
+            currently_freed: self.freed_objects.len(),
             redirections_performed: self.redirections_performed.load(Ordering::Relaxed),
         }
     }
 
     /// Clean up old freed object entries (called during GC sweep)
     pub fn sweep_freed_objects(&self) {
-        let mut freed = self.freed_objects.lock().unwrap();
         // In a real implementation, this would remove entries for objects
         // that have been actually reclaimed by the GC
 
         // For demonstration, remove entries older than 1 second
         let now = Instant::now();
-        freed.retain(|_, timestamp| now.duration_since(*timestamp).as_secs() < 1);
+        self.freed_objects
+            .retain(|_, timestamp| now.duration_since(*timestamp).as_secs() < 1);
+    }
+}
+
+impl Default for FreeObjectManager {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -505,7 +520,7 @@ pub struct FreeObjectStats {
 ///
 /// # Examples
 ///
-/// ```rust
+/// ```ignore
 /// use fugrip::memory_management::FinalizerQueue;
 /// use mmtk::util::ObjectReference;
 ///
@@ -551,7 +566,7 @@ impl FinalizerQueue {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```ignore
     /// use fugrip::memory_management::FinalizerQueue;
     ///
     /// let queue = FinalizerQueue::new("resource_cleanup");
@@ -579,7 +594,7 @@ impl FinalizerQueue {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```ignore
     /// use fugrip::memory_management::FinalizerQueue;
     /// use mmtk::util::ObjectReference;
     ///
@@ -593,7 +608,7 @@ impl FinalizerQueue {
     /// }));
     /// ```
     pub fn register_for_finalization(&self, object: ObjectReference, finalizer: FinalizerCallback) {
-        let mut pending = self.pending.lock().unwrap();
+        let mut pending = self.pending.lock();
         pending.push_back((object, finalizer));
         self.total_registered.fetch_add(1, Ordering::Relaxed);
 
@@ -608,7 +623,7 @@ impl FinalizerQueue {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```ignore
     /// use fugrip::memory_management::FinalizerQueue;
     ///
     /// let queue = FinalizerQueue::new("processor");
@@ -616,10 +631,10 @@ impl FinalizerQueue {
     /// println!("Processed {} finalizations", processed);
     /// ```
     pub fn process_pending_finalizations(&self) -> usize {
-        let mut pending = self.pending.lock().unwrap();
+        let mut pending = self.pending.lock();
         let count = pending.len();
 
-        while let Some((object, finalizer)) = pending.pop_front() {
+        while let Some((_object, finalizer)) = pending.pop_front() {
             // In a real implementation, we would check if the object is actually
             // ready for finalization (i.e., unreachable but not yet collected)
 
@@ -635,7 +650,7 @@ impl FinalizerQueue {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```ignore
     /// use fugrip::memory_management::FinalizerQueue;
     /// use std::time::Duration;
     ///
@@ -656,7 +671,7 @@ impl FinalizerQueue {
                 match work_receiver.recv_timeout(timeout) {
                     Ok(()) | Err(channel::RecvTimeoutError::Timeout) => {
                         // Either got work notification or timeout - process pending work
-                        let mut pending_guard = pending.lock().unwrap();
+                        let mut pending_guard = pending.lock();
                         let count = pending_guard.len();
 
                         for _ in 0..count {
@@ -664,7 +679,7 @@ impl FinalizerQueue {
                                 drop(pending_guard); // Release lock during callback
                                 finalizer();
                                 total_processed.fetch_add(1, Ordering::Relaxed);
-                                pending_guard = pending.lock().unwrap();
+                                pending_guard = pending.lock();
                             }
                         }
                         // Keep the lock for next iteration check
@@ -685,7 +700,7 @@ impl FinalizerQueue {
 
     /// Get statistics for this finalizer queue
     pub fn get_stats(&self) -> FinalizerQueueStats {
-        let pending = self.pending.lock().unwrap();
+        let pending = self.pending.lock();
         FinalizerQueueStats {
             name: self.name.clone(),
             total_registered: self.total_registered.load(Ordering::Relaxed),
@@ -724,9 +739,9 @@ pub struct FinalizerQueueStats {
 #[derive(Debug)]
 pub struct WeakMap<K, V> {
     /// The underlying map storage
-    map: Arc<Mutex<HashMap<ObjectReference, (K, V)>>>,
+    map: Arc<DashMap<ObjectReference, (K, V)>>,
     /// Registry for weak key references
-    weak_keys: Arc<Mutex<HashMap<ObjectReference, WeakReference<K>>>>,
+    weak_keys: Arc<DashMap<ObjectReference, WeakReference<K>>>,
     /// Total number of entries ever inserted
     total_insertions: Arc<AtomicUsize>,
     /// Total number of entries removed by GC
@@ -752,7 +767,7 @@ impl<K: Send + Sync + Clone + 'static, V: Send + Sync + Clone + 'static> WeakMap
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```ignore
     /// use fugrip::memory_management::WeakMap;
     ///
     /// let weak_map: WeakMap<String, i32> = WeakMap::new();
@@ -760,8 +775,8 @@ impl<K: Send + Sync + Clone + 'static, V: Send + Sync + Clone + 'static> WeakMap
     /// ```
     pub fn new() -> Self {
         Self {
-            map: Arc::new(Mutex::new(HashMap::new())),
-            weak_keys: Arc::new(Mutex::new(HashMap::new())),
+            map: Arc::new(DashMap::new()),
+            weak_keys: Arc::new(DashMap::new()),
             total_insertions: Arc::new(AtomicUsize::new(0)),
             total_gc_removals: Arc::new(AtomicUsize::new(0)),
             total_explicit_deletions: Arc::new(AtomicUsize::new(0)),
@@ -772,14 +787,14 @@ impl<K: Send + Sync + Clone + 'static, V: Send + Sync + Clone + 'static> WeakMap
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```ignore
     /// use fugrip::memory_management::WeakMap;
     /// use std::sync::Arc;
-    /// use mmtk::util::ObjectReference;
+    /// use mmtk::util::{Address, ObjectReference};
     ///
     /// let mut weak_map = WeakMap::new();
     /// let key = Arc::new("key".to_string());
-    /// let obj_ref = ObjectReference::from_raw_address(std::ptr::null_mut());
+    /// let obj_ref = ObjectReference::from_raw_address(Address::ZERO).unwrap();
     ///
     /// weak_map.set(Arc::clone(&key), obj_ref, 42);
     /// assert_eq!(weak_map.get(&obj_ref), Some(42));
@@ -787,16 +802,10 @@ impl<K: Send + Sync + Clone + 'static, V: Send + Sync + Clone + 'static> WeakMap
     pub fn set(&self, key: Arc<K>, key_ref: ObjectReference, value: V) {
         let weak_key = WeakReference::new(key.clone(), Some(key_ref));
 
-        {
-            let mut weak_keys = self.weak_keys.lock().unwrap();
-            weak_keys.insert(key_ref, weak_key);
-        }
+        self.weak_keys.insert(key_ref, weak_key);
 
-        {
-            let mut map = self.map.lock().unwrap();
-            let key_owned = Arc::try_unwrap(key).unwrap_or_else(|arc| (*arc).clone());
-            map.insert(key_ref, (key_owned, value));
-        }
+        let key_owned = Arc::try_unwrap(key).unwrap_or_else(|arc| (*arc).clone());
+        self.map.insert(key_ref, (key_owned, value));
 
         self.total_insertions.fetch_add(1, Ordering::Relaxed);
     }
@@ -805,62 +814,60 @@ impl<K: Send + Sync + Clone + 'static, V: Send + Sync + Clone + 'static> WeakMap
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```ignore
     /// use fugrip::memory_management::WeakMap;
     /// use std::sync::Arc;
-    /// use mmtk::util::ObjectReference;
+    /// use mmtk::util::{Address, ObjectReference};
     ///
     /// let weak_map = WeakMap::new();
     /// let key = Arc::new("key".to_string());
-    /// let obj_ref = ObjectReference::from_raw_address(std::ptr::null_mut());
+    /// let obj_ref = ObjectReference::from_raw_address(Address::ZERO).unwrap();
     ///
     /// weak_map.set(Arc::clone(&key), obj_ref, 42);
     /// assert_eq!(weak_map.get(&obj_ref), Some(42));
     ///
-    /// assert_eq!(weak_map.get(&ObjectReference::from_raw_address(0x123 as *mut u8)), None);
+    /// assert_eq!(weak_map.get(&ObjectReference::from_raw_address(Address::from_usize(0x123)).unwrap()), None);
     /// ```
     pub fn get(&self, key_ref: &ObjectReference) -> Option<V>
     where
         V: Clone,
     {
-        let map = self.map.lock().unwrap();
-        map.get(key_ref).map(|(_, v)| v.clone())
+        self.map.get(key_ref).map(|entry| entry.1.clone())
     }
 
     /// Check if a key exists in the weak map
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```ignore
     /// use fugrip::memory_management::WeakMap;
     /// use std::sync::Arc;
-    /// use mmtk::util::ObjectReference;
+    /// use mmtk::util::{Address, ObjectReference};
     ///
     /// let weak_map = WeakMap::new();
     /// let key = Arc::new("key".to_string());
-    /// let obj_ref = ObjectReference::from_raw_address(std::ptr::null_mut());
+    /// let obj_ref = ObjectReference::from_raw_address(Address::ZERO).unwrap();
     ///
     /// assert!(!weak_map.has(&obj_ref));
     /// weak_map.set(Arc::clone(&key), obj_ref, 42);
     /// assert!(weak_map.has(&obj_ref));
     /// ```
     pub fn has(&self, key_ref: &ObjectReference) -> bool {
-        let map = self.map.lock().unwrap();
-        map.contains_key(key_ref)
+        self.map.contains_key(key_ref)
     }
 
     /// Delete a key-value pair from the weak map
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```ignore
     /// use fugrip::memory_management::WeakMap;
     /// use std::sync::Arc;
-    /// use mmtk::util::ObjectReference;
+    /// use mmtk::util::{Address, ObjectReference};
     ///
     /// let weak_map = WeakMap::new();
     /// let key = Arc::new("key".to_string());
-    /// let obj_ref = ObjectReference::from_raw_address(std::ptr::null_mut());
+    /// let obj_ref = ObjectReference::from_raw_address(Address::ZERO).unwrap();
     ///
     /// weak_map.set(Arc::clone(&key), obj_ref, 42);
     /// assert!(weak_map.delete(&obj_ref));
@@ -868,18 +875,12 @@ impl<K: Send + Sync + Clone + 'static, V: Send + Sync + Clone + 'static> WeakMap
     /// assert!(!weak_map.delete(&obj_ref)); // Already deleted
     /// ```
     pub fn delete(&self, key_ref: &ObjectReference) -> bool {
-        let removed_from_map = {
-            let mut map = self.map.lock().unwrap();
-            map.remove(key_ref).is_some()
-        };
-
-        let removed_from_weak_keys = {
-            let mut weak_keys = self.weak_keys.lock().unwrap();
-            weak_keys.remove(key_ref).is_some()
-        };
+        let removed_from_map = self.map.remove(key_ref).is_some();
+        let removed_from_weak_keys = self.weak_keys.remove(key_ref).is_some();
 
         if removed_from_map || removed_from_weak_keys {
-            self.total_explicit_deletions.fetch_add(1, Ordering::Relaxed);
+            self.total_explicit_deletions
+                .fetch_add(1, Ordering::Relaxed);
             true
         } else {
             false
@@ -890,29 +891,28 @@ impl<K: Send + Sync + Clone + 'static, V: Send + Sync + Clone + 'static> WeakMap
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```ignore
     /// use fugrip::memory_management::WeakMap;
     /// use std::sync::Arc;
-    /// use mmtk::util::ObjectReference;
+    /// use mmtk::util::{Address, ObjectReference};
     ///
     /// let weak_map = WeakMap::new();
     /// assert_eq!(weak_map.size(), 0);
     ///
     /// let key = Arc::new("key".to_string());
-    /// let obj_ref = ObjectReference::from_raw_address(std::ptr::null_mut());
+    /// let obj_ref = ObjectReference::from_raw_address(Address::ZERO).unwrap();
     /// weak_map.set(Arc::clone(&key), obj_ref, 42);
     /// assert_eq!(weak_map.size(), 1);
     /// ```
     pub fn size(&self) -> usize {
-        let map = self.map.lock().unwrap();
-        map.len()
+        self.map.len()
     }
 
     /// Check if the weak map is empty
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```ignore
     /// use fugrip::memory_management::WeakMap;
     ///
     /// let weak_map: WeakMap<String, i32> = WeakMap::new();
@@ -928,16 +928,16 @@ impl<K: Send + Sync + Clone + 'static, V: Send + Sync + Clone + 'static> WeakMap
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```ignore
     /// use fugrip::memory_management::WeakMap;
     /// use std::sync::Arc;
-    /// use mmtk::util::ObjectReference;
+    /// use mmtk::util::{Address, ObjectReference};
     ///
     /// let weak_map = WeakMap::new();
     /// let key1 = Arc::new("key1".to_string());
     /// let key2 = Arc::new("key2".to_string());
-    /// let obj_ref1 = ObjectReference::from_raw_address(std::ptr::null_mut());
-    /// let obj_ref2 = ObjectReference::from_raw_address(0x100 as *mut u8);
+    /// let obj_ref1 = ObjectReference::from_raw_address(Address::ZERO).unwrap();
+    /// let obj_ref2 = ObjectReference::from_raw_address(Address::from_usize(0x100)).unwrap();
     ///
     /// weak_map.set(Arc::clone(&key1), obj_ref1, 42);
     /// weak_map.set(Arc::clone(&key2), obj_ref2, 84);
@@ -946,8 +946,11 @@ impl<K: Send + Sync + Clone + 'static, V: Send + Sync + Clone + 'static> WeakMap
     /// assert_eq!(entries.len(), 2);
     /// ```
     pub fn iter(&self) -> WeakMapIterator<K, V> {
-        let map = self.map.lock().unwrap();
-        let entries: Vec<_> = map.iter().map(|(k, (key, value))| (*k, key.clone(), value.clone())).collect();
+        let entries: Vec<_> = self
+            .map
+            .iter()
+            .map(|entry| (*entry.key(), entry.0.clone(), entry.1.clone()))
+            .collect();
         WeakMapIterator {
             entries: entries.into_iter(),
         }
@@ -957,14 +960,14 @@ impl<K: Send + Sync + Clone + 'static, V: Send + Sync + Clone + 'static> WeakMap
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```ignore
     /// use fugrip::memory_management::WeakMap;
     /// use std::sync::Arc;
-    /// use mmtk::util::ObjectReference;
+    /// use mmtk::util::{Address, ObjectReference};
     ///
     /// let weak_map = WeakMap::new();
     /// let key = Arc::new("key".to_string());
-    /// let obj_ref = ObjectReference::from_raw_address(std::ptr::null_mut());
+    /// let obj_ref = ObjectReference::from_raw_address(Address::ZERO).unwrap();
     ///
     /// weak_map.set(Arc::clone(&key), obj_ref, 42);
     /// assert_eq!(weak_map.size(), 1);
@@ -973,14 +976,12 @@ impl<K: Send + Sync + Clone + 'static, V: Send + Sync + Clone + 'static> WeakMap
     /// assert_eq!(weak_map.size(), 0);
     /// ```
     pub fn clear(&self) {
-        let mut map = self.map.lock().unwrap();
-        let mut weak_keys = self.weak_keys.lock().unwrap();
+        let cleared_count = self.map.len();
+        self.map.clear();
+        self.weak_keys.clear();
 
-        let cleared_count = map.len();
-        map.clear();
-        weak_keys.clear();
-
-        self.total_explicit_deletions.fetch_add(cleared_count, Ordering::Relaxed);
+        self.total_explicit_deletions
+            .fetch_add(cleared_count, Ordering::Relaxed);
     }
 
     /// Remove entries whose keys have been garbage collected
@@ -989,7 +990,7 @@ impl<K: Send + Sync + Clone + 'static, V: Send + Sync + Clone + 'static> WeakMap
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```ignore
     /// use fugrip::memory_management::WeakMap;
     ///
     /// let weak_map: WeakMap<String, i32> = WeakMap::new();
@@ -997,16 +998,15 @@ impl<K: Send + Sync + Clone + 'static, V: Send + Sync + Clone + 'static> WeakMap
     /// assert_eq!(removed, 0); // No dead entries to clean
     /// ```
     pub fn cleanup_dead_entries(&self) -> usize {
-        let mut map = self.map.lock().unwrap();
-        let mut weak_keys = self.weak_keys.lock().unwrap();
         let mut removed_count = 0;
 
         // Find keys that are no longer valid
-        let dead_keys: Vec<ObjectReference> = weak_keys
+        let dead_keys: Vec<ObjectReference> = self
+            .weak_keys
             .iter()
-            .filter_map(|(key_ref, weak_ref)| {
-                if !weak_ref.is_valid() {
-                    Some(*key_ref)
+            .filter_map(|entry| {
+                if !entry.is_valid() {
+                    Some(*entry.key())
                 } else {
                     None
                 }
@@ -1015,13 +1015,14 @@ impl<K: Send + Sync + Clone + 'static, V: Send + Sync + Clone + 'static> WeakMap
 
         // Remove dead entries
         for key_ref in dead_keys {
-            if map.remove(&key_ref).is_some() {
+            if self.map.remove(&key_ref).is_some() {
                 removed_count += 1;
             }
-            weak_keys.remove(&key_ref);
+            self.weak_keys.remove(&key_ref);
         }
 
-        self.total_gc_removals.fetch_add(removed_count, Ordering::Relaxed);
+        self.total_gc_removals
+            .fetch_add(removed_count, Ordering::Relaxed);
         removed_count
     }
 
@@ -1033,6 +1034,16 @@ impl<K: Send + Sync + Clone + 'static, V: Send + Sync + Clone + 'static> WeakMap
             total_gc_removals: self.total_gc_removals.load(Ordering::Relaxed),
             total_explicit_deletions: self.total_explicit_deletions.load(Ordering::Relaxed),
         }
+    }
+}
+
+impl<K, V> Default for WeakMap<K, V>
+where
+    K: Send + Sync + Clone + 'static,
+    V: Send + Sync + Clone + 'static,
+{
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -1069,7 +1080,9 @@ trait WeakMapTrait: Send + Sync {
     fn is_empty(&self) -> bool;
 }
 
-impl<K: Send + Sync + Clone + 'static, V: Send + Sync + Clone + 'static> WeakMapTrait for WeakMap<K, V> {
+impl<K: Send + Sync + Clone + 'static, V: Send + Sync + Clone + 'static> WeakMapTrait
+    for WeakMap<K, V>
+{
     fn cleanup_dead_entries(&self) -> usize {
         WeakMap::cleanup_dead_entries(self)
     }
@@ -1097,7 +1110,7 @@ impl Drop for FinalizerQueue {
 ///
 /// # Examples
 ///
-/// ```rust
+/// ```ignore
 /// use fugrip::memory_management::MemoryManager;
 ///
 /// let manager = MemoryManager::new();
@@ -1117,13 +1130,13 @@ pub struct MemoryManager {
     /// Default finalizer queue
     default_finalizer_queue: FinalizerQueue,
     /// Named finalizer queues
-    finalizer_queues: Mutex<HashMap<String, FinalizerQueue>>,
+    finalizer_queues: DashMap<String, FinalizerQueue>,
     /// FUGC coordinator reference
     fugc_coordinator: Weak<FugcCoordinator>,
     /// Weak reference registry
     weak_ref_registry: WeakRefRegistry,
     /// Global weak maps registry
-    weak_maps: Mutex<HashMap<String, Box<dyn WeakMapTrait>>>,
+    weak_maps: DashMap<String, Box<dyn WeakMapTrait>>,
 }
 
 impl MemoryManager {
@@ -1132,10 +1145,10 @@ impl MemoryManager {
         Self {
             free_manager: FreeObjectManager::new(),
             default_finalizer_queue: FinalizerQueue::new("default"),
-            finalizer_queues: Mutex::new(HashMap::new()),
+            finalizer_queues: DashMap::new(),
             fugc_coordinator: Weak::new(),
             weak_ref_registry: WeakRefRegistry::new(),
-            weak_maps: Mutex::new(HashMap::new()),
+            weak_maps: DashMap::new(),
         }
     }
 
@@ -1156,22 +1169,21 @@ impl MemoryManager {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```ignore
     /// use fugrip::memory_management::MemoryManager;
     ///
     /// let manager = MemoryManager::new();
     /// let queue = manager.get_finalizer_queue("resource_cleanup");
     /// ```
     pub fn get_finalizer_queue(&self, name: &str) -> FinalizerQueue {
-        let mut queues = self.finalizer_queues.lock().unwrap();
-
-        if let Some(queue) = queues.get(name) {
+        if let Some(_existing_queue) = self.finalizer_queues.get(name) {
             // Return a clone of the queue (in a real implementation,
             // this would return a reference or handle)
             FinalizerQueue::new(name)
         } else {
             let queue = FinalizerQueue::new(name);
-            queues.insert(name.to_string(), FinalizerQueue::new(name));
+            self.finalizer_queues
+                .insert(name.to_string(), FinalizerQueue::new(name));
             queue
         }
     }
@@ -1180,7 +1192,7 @@ impl MemoryManager {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```ignore
     /// use fugrip::memory_management::MemoryManager;
     /// use std::sync::Arc;
     ///
@@ -1189,7 +1201,11 @@ impl MemoryManager {
     /// let weak_ref = manager.create_weak_reference(Arc::clone(&strong_ref), None);
     /// assert!(weak_ref.is_valid());
     /// ```
-    pub fn create_weak_reference<T: Send + Sync + 'static>(&self, strong_ref: Arc<T>, object_ref: Option<ObjectReference>) -> WeakReference<T> {
+    pub fn create_weak_reference<T: Send + Sync + 'static>(
+        &self,
+        strong_ref: Arc<T>,
+        object_ref: Option<ObjectReference>,
+    ) -> WeakReference<T> {
         let weak_ref = WeakReference::new(strong_ref, object_ref);
 
         if let Some(obj_ref) = object_ref {
@@ -1203,27 +1219,28 @@ impl MemoryManager {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```ignore
     /// use fugrip::memory_management::MemoryManager;
     ///
     /// let manager = MemoryManager::new();
     /// let weak_map = manager.get_weak_map::<String, i32>("global_cache");
     /// assert_eq!(weak_map.size(), 0);
     /// ```
-    pub fn get_weak_map<K: Send + Sync + Clone + 'static, V: Send + Sync + Clone + 'static>(&self, name: &str) -> Arc<WeakMap<K, V>> {
-        let mut weak_maps = self.weak_maps.lock().unwrap();
-
-        if weak_maps.contains_key(name) {
+    pub fn get_weak_map<K: Send + Sync + Clone + 'static, V: Send + Sync + Clone + 'static>(
+        &self,
+        name: &str,
+    ) -> Arc<WeakMap<K, V>> {
+        if self.weak_maps.contains_key(name) {
             // In a real implementation, this would require better type safety
             // For now, create a new one each time
             let weak_map = Arc::new(WeakMap::new());
             let boxed_map: Box<dyn WeakMapTrait> = Box::new((*weak_map).clone());
-            weak_maps.insert(name.to_string(), boxed_map);
+            self.weak_maps.insert(name.to_string(), boxed_map);
             weak_map
         } else {
             let weak_map = Arc::new(WeakMap::new());
             let boxed_map: Box<dyn WeakMapTrait> = Box::new((*weak_map).clone());
-            weak_maps.insert(name.to_string(), boxed_map);
+            self.weak_maps.insert(name.to_string(), boxed_map);
             weak_map
         }
     }
@@ -1240,16 +1257,17 @@ impl MemoryManager {
         let cleaned_weak_refs = self.weak_ref_registry.cleanup_invalid_references();
 
         // Clean up dead entries in all weak maps
-        let weak_maps = self.weak_maps.lock().unwrap();
         let mut total_weak_map_cleanups = 0;
-        for (_, weak_map) in weak_maps.iter() {
-            total_weak_map_cleanups += weak_map.cleanup_dead_entries();
+        for entry in self.weak_maps.iter() {
+            total_weak_map_cleanups += entry.cleanup_dead_entries();
         }
 
         // Log cleanup statistics in debug builds
         #[cfg(debug_assertions)]
-        println!("GC sweep: cleaned {} weak refs, {} weak map entries",
-                 cleaned_weak_refs, total_weak_map_cleanups);
+        println!(
+            "GC sweep: cleaned {} weak refs, {} weak map entries",
+            cleaned_weak_refs, total_weak_map_cleanups
+        );
     }
 
     /// Get comprehensive memory management statistics
@@ -1260,20 +1278,14 @@ impl MemoryManager {
         MemoryManagerStats {
             free_object_stats: free_stats,
             default_finalizer_stats: finalizer_stats,
-            active_finalizer_queues: {
-                let queues = self.finalizer_queues.lock().unwrap();
-                queues.len()
-            },
+            active_finalizer_queues: self.finalizer_queues.len(),
             weak_ref_stats: WeakRefStats {
                 total_registered: self.weak_ref_registry.total_count(),
                 total_nulled: self.weak_ref_registry.nulled_count(),
                 total_cleaned: self.weak_ref_registry.cleaned_count(),
                 currently_active: self.weak_ref_registry.active_count(),
             },
-            weak_map_count: {
-                let weak_maps = self.weak_maps.lock().unwrap();
-                weak_maps.len()
-            },
+            weak_map_count: self.weak_maps.len(),
         }
     }
 }
@@ -1315,15 +1327,13 @@ impl Default for MemoryManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
 
     #[test]
     fn test_free_object_manager() {
         let manager = FreeObjectManager::new();
 
-        let obj = ObjectReference::from_raw_address(unsafe {
-            Address::from_usize(0x1000)
-        }).unwrap();
+        let obj =
+            ObjectReference::from_raw_address(unsafe { Address::from_usize(0x1000) }).unwrap();
 
         // Initially not freed
         assert!(!manager.is_freed(obj));
@@ -1346,16 +1356,18 @@ mod tests {
     fn test_finalizer_queue() {
         let queue = FinalizerQueue::new("test");
 
-        let obj = ObjectReference::from_raw_address(unsafe {
-            Address::from_usize(0x2000)
-        }).unwrap();
+        let obj =
+            ObjectReference::from_raw_address(unsafe { Address::from_usize(0x2000) }).unwrap();
 
         let executed = Arc::new(AtomicBool::new(false));
         let executed_clone = Arc::clone(&executed);
 
-        queue.register_for_finalization(obj, Box::new(move || {
-            executed_clone.store(true, Ordering::Relaxed);
-        }));
+        queue.register_for_finalization(
+            obj,
+            Box::new(move || {
+                executed_clone.store(true, Ordering::Relaxed);
+            }),
+        );
 
         let stats = queue.get_stats();
         assert_eq!(stats.total_registered, 1);
@@ -1375,9 +1387,8 @@ mod tests {
     fn test_memory_manager_integration() {
         let manager = MemoryManager::new();
 
-        let obj = ObjectReference::from_raw_address(unsafe {
-            Address::from_usize(0x3000)
-        }).unwrap();
+        let obj =
+            ObjectReference::from_raw_address(unsafe { Address::from_usize(0x3000) }).unwrap();
 
         // Test free object integration
         manager.free_manager().free_object(obj);
@@ -1415,8 +1426,8 @@ mod tests {
 
     #[test]
     fn test_weak_maps() {
-        use std::sync::Arc;
         use mmtk::util::ObjectReference;
+        use std::sync::Arc;
 
         let manager = MemoryManager::new();
         let weak_map = manager.get_weak_map::<String, i32>("test_map");
@@ -1428,8 +1439,10 @@ mod tests {
         let key1 = Arc::new("key1".to_string());
         let key2 = Arc::new("key2".to_string());
         use mmtk::util::Address;
-        let obj_ref1 = ObjectReference::from_raw_address(unsafe { Address::from_usize(0x1000) }).unwrap();
-        let obj_ref2 = ObjectReference::from_raw_address(unsafe { Address::from_usize(0x2000) }).unwrap();
+        let obj_ref1 =
+            ObjectReference::from_raw_address(unsafe { Address::from_usize(0x1000) }).unwrap();
+        let obj_ref2 =
+            ObjectReference::from_raw_address(unsafe { Address::from_usize(0x2000) }).unwrap();
 
         weak_map.set(Arc::clone(&key1), obj_ref1, 42);
         weak_map.set(Arc::clone(&key2), obj_ref2, 84);

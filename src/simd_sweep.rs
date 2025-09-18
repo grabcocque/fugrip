@@ -82,10 +82,13 @@ impl SimdBitvector {
     /// assert_eq!(bitvector.max_objects(), 1024 * 1024 / 16);
     /// ```
     pub fn new(heap_base: Address, heap_size: usize, object_alignment: usize) -> Self {
-        assert!(object_alignment.is_power_of_two(), "Object alignment must be power of 2");
+        assert!(
+            object_alignment.is_power_of_two(),
+            "Object alignment must be power of 2"
+        );
 
         let max_objects = heap_size / object_alignment;
-        let words_needed = (max_objects + BITS_PER_WORD - 1) / BITS_PER_WORD;
+        let words_needed = max_objects.div_ceil(BITS_PER_WORD);
 
         // Align to SIMD block boundaries for optimal performance
         let aligned_words = (words_needed + WORDS_PER_SIMD_BLOCK - 1) & !(WORDS_PER_SIMD_BLOCK - 1);
@@ -189,18 +192,19 @@ impl SimdBitvector {
     /// ```
     pub fn simd_sweep(&self) -> SweepStatistics {
         let sweep_start = Instant::now();
-        let mut objects_swept = 0usize;
         let mut free_blocks = Vec::new();
 
-        #[cfg(target_arch = "x86_64")]
-        {
-            objects_swept = self.simd_sweep_x86_64(&mut free_blocks);
-        }
+        let objects_swept = {
+            #[cfg(target_arch = "x86_64")]
+            {
+                self.simd_sweep_x86_64(&mut free_blocks)
+            }
 
-        #[cfg(not(target_arch = "x86_64"))]
-        {
-            objects_swept = self.fallback_sweep(&mut free_blocks);
-        }
+            #[cfg(not(target_arch = "x86_64"))]
+            {
+                self.fallback_sweep(&mut free_blocks)
+            }
+        };
 
         let sweep_time = sweep_start.elapsed();
         self.objects_swept.store(objects_swept, Ordering::Relaxed);
@@ -283,15 +287,20 @@ impl SimdBitvector {
         let lane2 = unsafe { _mm256_extract_epi64(dead_mask, 2) } as u64;
         let lane3 = unsafe { _mm256_extract_epi64(dead_mask, 3) } as u64;
 
-        lane0.count_ones() as usize +
-        lane1.count_ones() as usize +
-        lane2.count_ones() as usize +
-        lane3.count_ones() as usize
+        lane0.count_ones() as usize
+            + lane1.count_ones() as usize
+            + lane2.count_ones() as usize
+            + lane3.count_ones() as usize
     }
 
     /// Extract contiguous free blocks from SIMD chunk
     #[cfg(target_arch = "x86_64")]
-    fn extract_free_blocks_simd(&self, chunk_index: usize, dead_mask: __m256i, free_blocks: &mut Vec<FreeBlock>) {
+    fn extract_free_blocks_simd(
+        &self,
+        chunk_index: usize,
+        dead_mask: __m256i,
+        free_blocks: &mut Vec<FreeBlock>,
+    ) {
         // Convert SIMD register back to scalar for free block analysis
         let mut temp_words = [0u64; WORDS_PER_SIMD_BLOCK];
         unsafe {
@@ -335,7 +344,12 @@ impl SimdBitvector {
     }
 
     /// Process a single remainder word during SIMD sweep
-    fn process_remainder_word(&self, word_index: usize, word: u64, free_blocks: &mut Vec<FreeBlock>) -> usize {
+    fn process_remainder_word(
+        &self,
+        word_index: usize,
+        word: u64,
+        free_blocks: &mut Vec<FreeBlock>,
+    ) -> usize {
         let inverted_word = !word;
         let dead_count = inverted_word.count_ones() as usize;
 
@@ -350,7 +364,12 @@ impl SimdBitvector {
     }
 
     /// Extract contiguous free blocks from a word of dead object bits
-    fn extract_free_blocks_from_word(&self, base_bit_index: usize, dead_word: u64, free_blocks: &mut Vec<FreeBlock>) {
+    fn extract_free_blocks_from_word(
+        &self,
+        base_bit_index: usize,
+        dead_word: u64,
+        free_blocks: &mut Vec<FreeBlock>,
+    ) {
         let mut word = dead_word;
         let mut bit_offset = 0;
 
@@ -401,7 +420,7 @@ impl SimdBitvector {
 
         if addr >= base && addr < base + self.heap_size {
             let offset = addr - base;
-            if offset % self.object_alignment == 0 {
+            if offset.is_multiple_of(self.object_alignment) {
                 let index = offset / self.object_alignment;
                 if index < self.max_objects {
                     return Some(index);
@@ -440,8 +459,19 @@ impl SimdBitvector {
     /// bitvector.clear_all_marks();
     /// ```
     pub fn clear_all_marks(&self) {
-        for atomic_word in &self.bits {
-            atomic_word.store(0, Ordering::Relaxed);
+        let mut idx = 0;
+        let len = self.bits.len();
+
+        while idx + WORDS_PER_SIMD_BLOCK <= len {
+            for lane in 0..WORDS_PER_SIMD_BLOCK {
+                self.bits[idx + lane].store(0, Ordering::Relaxed);
+            }
+            idx += WORDS_PER_SIMD_BLOCK;
+        }
+
+        while idx < len {
+            self.bits[idx].store(0, Ordering::Relaxed);
+            idx += 1;
         }
         self.objects_marked.store(0, Ordering::Relaxed);
     }
@@ -523,10 +553,7 @@ impl SimdBitvector {
     /// assert_eq!(count, 0); // No objects marked yet
     /// ```
     pub fn count_live_objects_in_range(&self, start_addr: Address, size: usize) -> usize {
-        let start_bit = match self.object_to_bit_index(start_addr) {
-            Some(bit) => bit,
-            None => 0,
-        };
+        let start_bit = self.object_to_bit_index(start_addr).unwrap_or_default();
         let end_addr = start_addr + size;
         let end_bit = match self.object_to_bit_index(end_addr) {
             Some(bit) => bit,
@@ -561,7 +588,7 @@ impl SimdBitvector {
         }
 
         let start_word = start_bit / 64;
-        let end_word = (end_bit + 63) / 64;
+        let end_word = end_bit.div_ceil(64);
         let mut total = 0usize;
 
         if start_word == end_word - 1 {
@@ -592,9 +619,21 @@ impl SimdBitvector {
             let middle_end = end_word.saturating_sub(1);
             if middle_end > middle_start && middle_start < self.bits.len() {
                 let middle_end_clamped = middle_end.min(self.bits.len());
-                for word_idx in middle_start..middle_end_clamped {
-                    let word = self.bits[word_idx].load(Ordering::Relaxed);
+                let mut idx = middle_start;
+                let mut block = [0u64; WORDS_PER_SIMD_BLOCK];
+
+                while idx + WORDS_PER_SIMD_BLOCK <= middle_end_clamped {
+                    for (lane, slot) in block.iter_mut().enumerate() {
+                        *slot = self.bits[idx + lane].load(Ordering::Relaxed);
+                    }
+                    total += self.count_words_simd(&block);
+                    idx += WORDS_PER_SIMD_BLOCK;
+                }
+
+                while idx < middle_end_clamped {
+                    let word = self.bits[idx].load(Ordering::Relaxed);
                     total += word.count_ones() as usize;
+                    idx += 1;
                 }
             }
 
@@ -619,6 +658,8 @@ impl SimdBitvector {
     /// This provides the same functionality as simd_bitvec.rs but integrated
     /// into the sweep implementation for better performance.
     fn count_words_simd(&self, words: &[u64]) -> usize {
+        self.simd_operations
+            .fetch_add(words.len(), Ordering::Relaxed);
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         {
             if is_x86_feature_detected!("avx2") {
@@ -636,8 +677,8 @@ impl SimdBitvector {
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     unsafe fn avx2_population_count(&self, words: &[u64]) -> usize {
         const LOOKUP_BYTES: [i8; 32] = [
-            0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4,
-            0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4,
+            0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4, 0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2,
+            3, 3, 4,
         ];
 
         let lookup = unsafe { _mm256_loadu_si256(LOOKUP_BYTES.as_ptr() as *const __m256i) };
@@ -770,6 +811,8 @@ pub struct FreeBlock {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mmtk::util::ObjectReference;
+    use std::sync::atomic::Ordering;
 
     #[test]
     fn bitvector_creation() {
@@ -817,7 +860,7 @@ mod tests {
         let bitvector = SimdBitvector::new(heap_base, 512, 16);
 
         // Leave some objects unmarked to create free blocks
-        let obj1 = unsafe { Address::from_usize(heap_base.as_usize() + 0) };
+        let obj1 = unsafe { Address::from_usize(heap_base.as_usize()) };
         let obj3 = unsafe { Address::from_usize(heap_base.as_usize() + 32) };
 
         bitvector.mark_live(obj1);
@@ -827,5 +870,122 @@ mod tests {
         let stats = bitvector.simd_sweep();
         assert!(stats.free_blocks > 0);
         assert!(stats.objects_swept > 0);
+    }
+
+    #[test]
+    fn clear_all_marks_resets_state() {
+        let heap_base = unsafe { Address::from_usize(0x20000000) };
+        let bitvector = SimdBitvector::new(heap_base, 1024, 16);
+
+        let first = unsafe { Address::from_usize(heap_base.as_usize() + 16) };
+        let second = unsafe { Address::from_usize(heap_base.as_usize() + 32) };
+
+        bitvector.mark_live(first);
+        bitvector.mark_live(second);
+        assert!(bitvector.is_marked(first));
+        assert!(bitvector.is_marked(second));
+        assert_eq!(bitvector.objects_marked.load(Ordering::Relaxed), 2);
+
+        bitvector.clear_all_marks();
+        assert!(!bitvector.is_marked(first));
+        assert!(!bitvector.is_marked(second));
+        assert_eq!(bitvector.objects_marked.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn clear_aliases_clear_all_marks() {
+        let heap_base = unsafe { Address::from_usize(0x21000000) };
+        let bitvector = SimdBitvector::new(heap_base, 1024, 16);
+
+        let marked = unsafe { Address::from_usize(heap_base.as_usize() + 64) };
+        bitvector.mark_live(marked);
+        assert!(bitvector.is_marked(marked));
+
+        bitvector.clear();
+        assert!(!bitvector.is_marked(marked));
+    }
+
+    #[test]
+    fn mark_object_live_tracks_object_references() {
+        let heap_base = unsafe { Address::from_usize(0x22000000) };
+        let bitvector = SimdBitvector::new(heap_base, 2048, 16);
+
+        let object_a = ObjectReference::from_raw_address(heap_base).unwrap();
+        let second_addr = unsafe { Address::from_usize(heap_base.as_usize() + 16) };
+        let object_b = ObjectReference::from_raw_address(second_addr).unwrap();
+
+        bitvector.mark_object_live(object_a);
+        bitvector.mark_object_live(object_b);
+
+        assert!(bitvector.is_marked(heap_base));
+        assert!(bitvector.is_marked(second_addr));
+        assert_eq!(bitvector.objects_marked.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn count_live_objects_in_range_covers_multi_word_segments() {
+        let heap_base = unsafe { Address::from_usize(0x23000000) };
+        let bitvector = SimdBitvector::new(heap_base, 4096, 16);
+
+        // Configure bit patterns directly so we can reason about coverage paths.
+        bitvector.bits[0].store((1u64 << 1) | (1u64 << 60), Ordering::Relaxed);
+        bitvector.bits[1].store(1u64 << 6, Ordering::Relaxed);
+
+        let start = unsafe { Address::from_usize(heap_base.as_usize() + 16) };
+        let count = bitvector.count_live_objects_in_range(start, 2048);
+        assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn count_bits_range_handles_single_word_masks() {
+        let heap_base = unsafe { Address::from_usize(0x24000000) };
+        let bitvector = SimdBitvector::new(heap_base, 2048, 16);
+        bitvector.bits[0].store(0b1111_0000, Ordering::Relaxed);
+
+        assert_eq!(bitvector.count_bits_range(4, 4), 4);
+        assert_eq!(bitvector.count_bits_range(0, 2), 0);
+    }
+
+    #[test]
+    fn count_bits_range_handles_cross_word_segments() {
+        let heap_base = unsafe { Address::from_usize(0x25000000) };
+        let bitvector = SimdBitvector::new(heap_base, 4096, 16);
+        bitvector.bits[0].store((1u64 << 63) | (1u64 << 62), Ordering::Relaxed);
+        bitvector.bits[1].store(1u64, Ordering::Relaxed);
+
+        // Starting near the end of the first word should require processing multiple words.
+        assert_eq!(bitvector.count_bits_range(62, 4), 3);
+    }
+
+    #[test]
+    fn count_words_simd_falls_back_to_scalar_sum() {
+        let heap_base = unsafe { Address::from_usize(0x26000000) };
+        let bitvector = SimdBitvector::new(heap_base, 1024, 16);
+        let words = [0b1011_0001u64, 0b1110u64];
+        let total = bitvector.count_words_simd(&words);
+        let expected: usize = words.iter().map(|w| w.count_ones() as usize).sum();
+        assert_eq!(total, expected);
+    }
+
+    #[test]
+    fn process_remainder_word_extracts_free_blocks() {
+        let heap_base = unsafe { Address::from_usize(0x27000000) };
+        let bitvector = SimdBitvector::new(heap_base, 2048, 16);
+        let mut free_blocks = Vec::new();
+
+        let live_word = 0b1111u64; // remaining bits are dead
+        let dead = bitvector.process_remainder_word(0, live_word, &mut free_blocks);
+
+        // Four dead objects should be reported from the inverted word, forming one block.
+        assert_eq!(dead, BITS_PER_WORD - 4);
+        assert_eq!(free_blocks.len(), 1);
+        assert_eq!(free_blocks[0].object_count, BITS_PER_WORD - 4);
+        assert_eq!(
+            free_blocks[0].size_bytes,
+            (BITS_PER_WORD - 4) * bitvector.object_alignment
+        );
+        let expected_start =
+            unsafe { Address::from_usize(heap_base.as_usize() + 4 * bitvector.object_alignment) };
+        assert_eq!(free_blocks[0].start_addr, expected_start);
     }
 }

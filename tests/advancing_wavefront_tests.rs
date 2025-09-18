@@ -11,17 +11,14 @@
 //! 3. **Write Barrier Enforcement**: All pointer stores during concurrent marking must
 //!    go through write barriers to maintain the wavefront invariant.
 
-use fugrip::{
-    FugcCoordinator, FugcPhase, GlobalRoots,
-    concurrent::ObjectColor,
-};
-use fugrip::thread::ThreadRegistry;
+use crossbeam::channel;
+use fugrip::test_utils::TestFixture;
+use fugrip::{FugcPhase, concurrent::ObjectColor};
 use mmtk::util::{Address, ObjectReference};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use crossbeam::channel;
 
 /// Test the core advancing wavefront property: once marked, always marked
 #[test]
@@ -29,59 +26,86 @@ fn test_advancing_wavefront_once_marked_always_marked() {
     println!("🌊 Testing advancing wavefront property: once marked, always marked");
 
     let heap_base = unsafe { Address::from_usize(0x30000000) };
-    let heap_size = 16 * 1024 * 1024; // 16MB
-    let thread_registry = Arc::new(ThreadRegistry::new());
-    let global_roots = Arc::new(Mutex::new(GlobalRoots::default()));
-
-    let coordinator = Arc::new(FugcCoordinator::new(
-        heap_base,
-        heap_size,
-        2, // 2 worker threads
-        thread_registry.clone(),
-        global_roots.clone(),
-    ));
+    let fixture = TestFixture::new_with_config(heap_base.as_usize(), 16 * 1024 * 1024, 2);
+    let coordinator = &fixture.coordinator;
 
     // Create some mock objects in the heap
     let obj1 = ObjectReference::from_raw_address(unsafe {
         Address::from_usize(heap_base.as_usize() + 0x1000)
-    }).unwrap();
+    })
+    .unwrap();
     let obj2 = ObjectReference::from_raw_address(unsafe {
         Address::from_usize(heap_base.as_usize() + 0x2000)
-    }).unwrap();
+    })
+    .unwrap();
     let obj3 = ObjectReference::from_raw_address(unsafe {
         Address::from_usize(heap_base.as_usize() + 0x3000)
-    }).unwrap();
+    })
+    .unwrap();
 
     // Initially all objects are white
-    assert_eq!(coordinator.tricolor_marking().get_color(obj1), ObjectColor::White);
-    assert_eq!(coordinator.tricolor_marking().get_color(obj2), ObjectColor::White);
-    assert_eq!(coordinator.tricolor_marking().get_color(obj3), ObjectColor::White);
+    assert_eq!(
+        coordinator.tricolor_marking().get_color(obj1),
+        ObjectColor::White
+    );
+    assert_eq!(
+        coordinator.tricolor_marking().get_color(obj2),
+        ObjectColor::White
+    );
+    assert_eq!(
+        coordinator.tricolor_marking().get_color(obj3),
+        ObjectColor::White
+    );
 
     // Start concurrent marking by activating barriers
     coordinator.write_barrier().activate();
     coordinator.black_allocator().activate();
 
     // Mark obj1 as grey (discovered)
-    coordinator.tricolor_marking().set_color(obj1, ObjectColor::Grey);
-    assert_eq!(coordinator.tricolor_marking().get_color(obj1), ObjectColor::Grey);
+    coordinator
+        .tricolor_marking()
+        .set_color(obj1, ObjectColor::Grey);
+    assert_eq!(
+        coordinator.tricolor_marking().get_color(obj1),
+        ObjectColor::Grey
+    );
 
     // Process obj1: grey -> black (scanned)
-    let success = coordinator.tricolor_marking().transition_color(obj1, ObjectColor::Grey, ObjectColor::Black);
+    let success = coordinator.tricolor_marking().transition_color(
+        obj1,
+        ObjectColor::Grey,
+        ObjectColor::Black,
+    );
     assert!(success, "Should successfully transition grey to black");
-    assert_eq!(coordinator.tricolor_marking().get_color(obj1), ObjectColor::Black);
+    assert_eq!(
+        coordinator.tricolor_marking().get_color(obj1),
+        ObjectColor::Black
+    );
 
     // KEY TEST: Once marked black, obj1 should stay black for the entire cycle
     // Even if mutator tries to make it white again, it should remain black
 
     // Simulate mutator attempting to "unmark" (this should fail or be ignored)
-    let failed_transition = coordinator.tricolor_marking().transition_color(obj1, ObjectColor::Black, ObjectColor::White);
-    assert!(!failed_transition, "Should not be able to transition black to white during collection");
+    let failed_transition = coordinator.tricolor_marking().transition_color(
+        obj1,
+        ObjectColor::Black,
+        ObjectColor::White,
+    );
+    assert!(
+        !failed_transition,
+        "Should not be able to transition black to white during collection"
+    );
 
     // Object should still be black
-    assert_eq!(coordinator.tricolor_marking().get_color(obj1), ObjectColor::Black);
+    assert_eq!(
+        coordinator.tricolor_marking().get_color(obj1),
+        ObjectColor::Black
+    );
 
     // Even direct setting should not change a black object back to white during collection
-    coordinator.tricolor_marking().set_color(obj1, ObjectColor::White);
+    coordinator
+        .tricolor_marking()
+        .set_color(obj1, ObjectColor::White);
     // In a real advancing wavefront collector, this would be protected, but for testing
     // we verify the principle by checking that transitions are controlled
 
@@ -98,32 +122,27 @@ fn test_incremental_update_collector_property() {
     println!("📈 Testing incremental update collector property");
 
     let heap_base = unsafe { Address::from_usize(0x40000000) };
-    let heap_size = 16 * 1024 * 1024;
-    let thread_registry = Arc::new(ThreadRegistry::new());
-    let global_roots = Arc::new(Mutex::new(GlobalRoots::default()));
-
-    let coordinator = Arc::new(FugcCoordinator::new(
-        heap_base,
-        heap_size,
-        2,
-        thread_registry.clone(),
-        global_roots.clone(),
-    ));
+    let fixture = TestFixture::new_with_config(heap_base.as_usize(), 16 * 1024 * 1024, 2);
+    let coordinator = fixture.coordinator.clone();
+    let global_roots = fixture.global_roots().clone();
 
     // Create a reference graph: root -> obj1 -> obj2
     let root = ObjectReference::from_raw_address(unsafe {
         Address::from_usize(heap_base.as_usize() + 0x100)
-    }).unwrap();
+    })
+    .unwrap();
     let obj1 = ObjectReference::from_raw_address(unsafe {
         Address::from_usize(heap_base.as_usize() + 0x1000)
-    }).unwrap();
+    })
+    .unwrap();
     let obj2 = ObjectReference::from_raw_address(unsafe {
         Address::from_usize(heap_base.as_usize() + 0x2000)
-    }).unwrap();
+    })
+    .unwrap();
 
     // Register root object
     {
-        let mut roots = global_roots.lock().unwrap();
+        let mut roots = global_roots.lock();
         roots.register(root.to_raw_address().as_usize() as *mut u8);
     }
 
@@ -131,15 +150,25 @@ fn test_incremental_update_collector_property() {
     coordinator.write_barrier().activate();
 
     // Step 1: Mark root (would be done by root scanning)
-    coordinator.tricolor_marking().set_color(root, ObjectColor::Grey);
+    coordinator
+        .tricolor_marking()
+        .set_color(root, ObjectColor::Grey);
 
     // Step 2: Process root -> marks obj1 as reachable
-    coordinator.tricolor_marking().transition_color(root, ObjectColor::Grey, ObjectColor::Black);
-    coordinator.tricolor_marking().set_color(obj1, ObjectColor::Grey); // root points to obj1
+    coordinator
+        .tricolor_marking()
+        .transition_color(root, ObjectColor::Grey, ObjectColor::Black);
+    coordinator
+        .tricolor_marking()
+        .set_color(obj1, ObjectColor::Grey); // root points to obj1
 
     // Step 3: Process obj1 -> marks obj2 as reachable
-    coordinator.tricolor_marking().transition_color(obj1, ObjectColor::Grey, ObjectColor::Black);
-    coordinator.tricolor_marking().set_color(obj2, ObjectColor::Grey); // obj1 points to obj2
+    coordinator
+        .tricolor_marking()
+        .transition_color(obj1, ObjectColor::Grey, ObjectColor::Black);
+    coordinator
+        .tricolor_marking()
+        .set_color(obj2, ObjectColor::Grey); // obj1 points to obj2
 
     // At this point: root=black, obj1=black, obj2=grey
 
@@ -151,9 +180,8 @@ fn test_incremental_update_collector_property() {
     unsafe {
         coordinator.write_barrier().write_barrier_fast(
             &obj1 as *const ObjectReference as *mut ObjectReference,
-            ObjectReference::from_raw_address(unsafe {
-                Address::from_usize(heap_base.as_usize() + 0x9000)
-            }).unwrap()  // Dummy "null" reference (word-aligned)
+            ObjectReference::from_raw_address(Address::from_usize(heap_base.as_usize() + 0x9000))
+                .unwrap(), // Dummy "null" reference (word-aligned)
         );
     }
 
@@ -161,7 +189,9 @@ fn test_incremental_update_collector_property() {
     // This demonstrates incremental update: obj2 was live at start but becomes garbage during GC
 
     // Complete the collection cycle
-    coordinator.tricolor_marking().transition_color(obj2, ObjectColor::Grey, ObjectColor::Black);
+    coordinator
+        .tricolor_marking()
+        .transition_color(obj2, ObjectColor::Grey, ObjectColor::Black);
 
     // In the next cycle, obj2 would be collected since it's no longer reachable
     // This proves the incremental update property: objects can become unreachable during collection
@@ -179,32 +209,36 @@ fn test_write_barrier_prevents_new_work() {
     println!("🛡️ Testing write barrier prevents new work for collector");
 
     let heap_base = unsafe { Address::from_usize(0x50000000) };
-    let heap_size = 16 * 1024 * 1024;
-    let thread_registry = Arc::new(ThreadRegistry::new());
-    let global_roots = Arc::new(Mutex::new(GlobalRoots::default()));
-
-    let coordinator = Arc::new(FugcCoordinator::new(
-        heap_base,
-        heap_size,
-        2,
-        thread_registry.clone(),
-        global_roots.clone(),
-    ));
+    let fixture = TestFixture::new_with_config(heap_base.as_usize(), 16 * 1024 * 1024, 2);
+    let coordinator = fixture.coordinator.clone();
+    let _global_roots = fixture.global_roots().clone();
 
     let black_obj = ObjectReference::from_raw_address(unsafe {
         Address::from_usize(heap_base.as_usize() + 0x1000)
-    }).unwrap();
+    })
+    .unwrap();
     let white_obj = ObjectReference::from_raw_address(unsafe {
         Address::from_usize(heap_base.as_usize() + 0x2000)
-    }).unwrap();
+    })
+    .unwrap();
 
     // Setup: black_obj is already marked, white_obj is not
     coordinator.write_barrier().activate();
-    coordinator.tricolor_marking().set_color(black_obj, ObjectColor::Black);
-    coordinator.tricolor_marking().set_color(white_obj, ObjectColor::White);
+    coordinator
+        .tricolor_marking()
+        .set_color(black_obj, ObjectColor::Black);
+    coordinator
+        .tricolor_marking()
+        .set_color(white_obj, ObjectColor::White);
 
-    assert_eq!(coordinator.tricolor_marking().get_color(black_obj), ObjectColor::Black);
-    assert_eq!(coordinator.tricolor_marking().get_color(white_obj), ObjectColor::White);
+    assert_eq!(
+        coordinator.tricolor_marking().get_color(black_obj),
+        ObjectColor::Black
+    );
+    assert_eq!(
+        coordinator.tricolor_marking().get_color(white_obj),
+        ObjectColor::White
+    );
 
     // ADVANCING WAVEFRONT TEST: Mutator stores white object into black object field
     // This would violate the tri-color invariant if not handled by write barrier
@@ -213,7 +247,7 @@ fn test_write_barrier_prevents_new_work() {
     unsafe {
         coordinator.write_barrier().write_barrier_fast(
             &black_obj as *const ObjectReference as *mut ObjectReference,
-            white_obj
+            white_obj,
         );
     }
 
@@ -222,7 +256,10 @@ fn test_write_barrier_prevents_new_work() {
     let white_obj_color_after_barrier = coordinator.tricolor_marking().get_color(white_obj);
 
     // In a proper implementation, white_obj should now be grey (marked for scanning)
-    println!("  📊 white_obj color after write barrier: {:?}", white_obj_color_after_barrier);
+    println!(
+        "  📊 white_obj color after write barrier: {:?}",
+        white_obj_color_after_barrier
+    );
 
     // This demonstrates that the write barrier prevents the mutator from creating
     // new work for the collector by immediately marking newly-referenced objects
@@ -238,17 +275,8 @@ fn test_black_allocation_advancing_wavefront() {
     println!("⚫ Testing black allocation maintains advancing wavefront");
 
     let heap_base = unsafe { Address::from_usize(0x60000000) };
-    let heap_size = 16 * 1024 * 1024;
-    let thread_registry = Arc::new(ThreadRegistry::new());
-    let global_roots = Arc::new(Mutex::new(GlobalRoots::default()));
-
-    let coordinator = Arc::new(FugcCoordinator::new(
-        heap_base,
-        heap_size,
-        2,
-        thread_registry.clone(),
-        global_roots.clone(),
-    ));
+    let fixture = TestFixture::new_with_config(heap_base.as_usize(), 16 * 1024 * 1024, 2);
+    let coordinator = fixture.coordinator.clone();
 
     // Start concurrent marking
     coordinator.write_barrier().activate();
@@ -259,7 +287,8 @@ fn test_black_allocation_advancing_wavefront() {
     // Simulate allocation during concurrent marking
     let new_obj = ObjectReference::from_raw_address(unsafe {
         Address::from_usize(heap_base.as_usize() + 0x5000)
-    }).unwrap();
+    })
+    .unwrap();
 
     // New objects allocated during marking should be black (already marked)
     coordinator.black_allocator().allocate_black(new_obj);
@@ -284,28 +313,23 @@ fn test_concurrent_marking_with_mutator_interference() {
     println!("🔄 Testing concurrent marking with realistic mutator interference");
 
     let heap_base = unsafe { Address::from_usize(0x70000000) };
-    let heap_size = 32 * 1024 * 1024;
-    let thread_registry = Arc::new(ThreadRegistry::new());
-    let global_roots = Arc::new(Mutex::new(GlobalRoots::default()));
-
-    let coordinator = Arc::new(FugcCoordinator::new(
-        heap_base,
-        heap_size,
-        4,
-        thread_registry.clone(),
-        global_roots.clone(),
-    ));
+    let fixture = TestFixture::new_with_config(heap_base.as_usize(), 32 * 1024 * 1024, 4);
+    let coordinator = fixture.coordinator.clone();
+    let global_roots = fixture.global_roots().clone();
 
     // Create a complex object graph
     let objects: Vec<ObjectReference> = (0..10)
-        .map(|i| ObjectReference::from_raw_address(unsafe {
-            Address::from_usize(heap_base.as_usize() + 0x1000 + i * 0x100)
-        }).unwrap())
+        .map(|i| {
+            ObjectReference::from_raw_address(unsafe {
+                Address::from_usize(heap_base.as_usize() + 0x1000 + i * 0x100)
+            })
+            .unwrap()
+        })
         .collect();
 
     // Register some objects as roots
     {
-        let mut roots = global_roots.lock().unwrap();
+        let mut roots = global_roots.lock();
         for &obj in &objects[0..3] {
             roots.register(obj.to_raw_address().as_usize() as *mut u8);
         }
@@ -319,7 +343,7 @@ fn test_concurrent_marking_with_mutator_interference() {
 
     // Create coordination channels for deterministic test execution
     let (marking_start_sender, marking_start_receiver) = channel::bounded(1);
-    let (marking_complete_sender, marking_complete_receiver) = channel::bounded(1);
+    let (marking_complete_sender, _marking_complete_receiver) = channel::bounded(1);
     let (mutator_complete_sender, mutator_complete_receiver) = channel::bounded(1);
 
     // Spawn mutator thread that modifies references during marking
@@ -336,7 +360,7 @@ fn test_concurrent_marking_with_mutator_interference() {
 
         while modification_count < target_modifications {
             // Simulate mutator creating new references
-            for i in 0..mutator_objects.len()-1 {
+            for i in 0..mutator_objects.len() - 1 {
                 let src = mutator_objects[i];
                 let dst = mutator_objects[i + 1];
 
@@ -344,7 +368,7 @@ fn test_concurrent_marking_with_mutator_interference() {
                 unsafe {
                     mutator_coordinator.write_barrier().write_barrier_fast(
                         &src as *const ObjectReference as *mut ObjectReference,
-                        dst
+                        dst,
                     );
                 }
 
@@ -365,7 +389,9 @@ fn test_concurrent_marking_with_mutator_interference() {
 
     // Perform concurrent marking while mutator is active
     for &obj in &objects[0..3] {
-        coordinator.tricolor_marking().set_color(obj, ObjectColor::Grey);
+        coordinator
+            .tricolor_marking()
+            .set_color(obj, ObjectColor::Grey);
     }
 
     // Signal mutator to start
@@ -374,7 +400,11 @@ fn test_concurrent_marking_with_mutator_interference() {
     // Process marking work
     for &obj in &objects {
         if coordinator.tricolor_marking().get_color(obj) == ObjectColor::Grey {
-            coordinator.tricolor_marking().transition_color(obj, ObjectColor::Grey, ObjectColor::Black);
+            coordinator.tricolor_marking().transition_color(
+                obj,
+                ObjectColor::Grey,
+                ObjectColor::Black,
+            );
         }
     }
 
@@ -411,7 +441,10 @@ fn test_concurrent_marking_with_mutator_interference() {
 
     // The advancing wavefront property ensures that concurrent mutations
     // cannot create unbounded work for the collector
-    assert!(barrier_hit_count > 0, "Write barriers should have been triggered");
+    assert!(
+        barrier_hit_count > 0,
+        "Write barriers should have been triggered"
+    );
     assert!(marked_count > 0, "Some objects should be marked");
 
     println!("  ✅ Concurrent marking maintains advancing wavefront under mutator interference");
@@ -426,31 +459,26 @@ fn test_complete_advancing_wavefront_cycle() {
     println!("🔄 Testing complete advancing wavefront GC cycle");
 
     let heap_base = unsafe { Address::from_usize(0x80000000) };
-    let heap_size = 16 * 1024 * 1024;
-    let thread_registry = Arc::new(ThreadRegistry::new());
-    let global_roots = Arc::new(Mutex::new(GlobalRoots::default()));
-
-    let coordinator = Arc::new(FugcCoordinator::new(
-        heap_base,
-        heap_size,
-        2,
-        thread_registry.clone(),
-        global_roots.clone(),
-    ));
+    let fixture = TestFixture::new_with_config(heap_base.as_usize(), 16 * 1024 * 1024, 2);
+    let coordinator = fixture.coordinator.clone();
+    let global_roots = fixture.global_roots().clone();
 
     // Phase 1: Setup object graph
     let root = ObjectReference::from_raw_address(unsafe {
         Address::from_usize(heap_base.as_usize() + 0x100)
-    }).unwrap();
+    })
+    .unwrap();
     let live_obj = ObjectReference::from_raw_address(unsafe {
         Address::from_usize(heap_base.as_usize() + 0x1000)
-    }).unwrap();
+    })
+    .unwrap();
     let garbage_obj = ObjectReference::from_raw_address(unsafe {
         Address::from_usize(heap_base.as_usize() + 0x2000)
-    }).unwrap();
+    })
+    .unwrap();
 
     {
-        let mut roots = global_roots.lock().unwrap();
+        let mut roots = global_roots.lock();
         roots.register(root.to_raw_address().as_usize() as *mut u8);
     }
 
@@ -463,20 +491,33 @@ fn test_complete_advancing_wavefront_cycle() {
 
     // Phase 3: Mark roots
     coordinator.advance_to_phase(FugcPhase::MarkGlobalRoots);
-    coordinator.tricolor_marking().set_color(root, ObjectColor::Grey);
+    coordinator
+        .tricolor_marking()
+        .set_color(root, ObjectColor::Grey);
 
     // Phase 4: Concurrent marking with advancing wavefront
     coordinator.advance_to_phase(FugcPhase::Tracing);
 
     // Process root -> marks live_obj
-    coordinator.tricolor_marking().transition_color(root, ObjectColor::Grey, ObjectColor::Black);
-    coordinator.tricolor_marking().set_color(live_obj, ObjectColor::Grey);
+    coordinator
+        .tricolor_marking()
+        .transition_color(root, ObjectColor::Grey, ObjectColor::Black);
+    coordinator
+        .tricolor_marking()
+        .set_color(live_obj, ObjectColor::Grey);
 
     // Process live_obj
-    coordinator.tricolor_marking().transition_color(live_obj, ObjectColor::Grey, ObjectColor::Black);
+    coordinator.tricolor_marking().transition_color(
+        live_obj,
+        ObjectColor::Grey,
+        ObjectColor::Black,
+    );
 
     // garbage_obj remains white (unreachable)
-    assert_eq!(coordinator.tricolor_marking().get_color(garbage_obj), ObjectColor::White);
+    assert_eq!(
+        coordinator.tricolor_marking().get_color(garbage_obj),
+        ObjectColor::White
+    );
 
     // Phase 5: Complete marking - advancing wavefront guarantees termination
     let marked_objects = coordinator.tricolor_marking().get_black_objects();
@@ -489,11 +530,10 @@ fn test_complete_advancing_wavefront_cycle() {
     // Phase 6: Sweep - incremental update allows garbage collection
     coordinator.advance_to_phase(FugcPhase::Sweeping);
 
-    // In a real implementation, sweep would reclaim garbage_obj
-    // Since it's white, it would be added to free list
-
-    println!("  📊 Garbage object (white) would be reclaimed: {:?}",
-             coordinator.tricolor_marking().get_color(garbage_obj));
+    assert!(
+        !coordinator.is_object_marked(garbage_obj),
+        "Garbage object should be reclaimed during sweep"
+    );
 
     // Phase 7: Reset for next cycle
     coordinator.tricolor_marking().clear();
@@ -513,24 +553,19 @@ fn test_advancing_wavefront_bounded_work() {
     println!("⚡ Testing advancing wavefront provides bounded work guarantee");
 
     let heap_base = unsafe { Address::from_usize(0x90000000) };
-    let heap_size = 64 * 1024 * 1024; // Larger heap
-    let thread_registry = Arc::new(ThreadRegistry::new());
-    let global_roots = Arc::new(Mutex::new(GlobalRoots::default()));
-
-    let coordinator = Arc::new(FugcCoordinator::new(
-        heap_base,
-        heap_size,
-        4,
-        thread_registry.clone(),
-        global_roots.clone(),
-    ));
+    let fixture = TestFixture::new_with_config(heap_base.as_usize(), 64 * 1024 * 1024, 4);
+    let coordinator = fixture.coordinator.clone();
+    let _global_roots = fixture.global_roots().clone();
 
     // Create many objects
     let num_objects = 1000;
     let objects: Vec<ObjectReference> = (0..num_objects)
-        .map(|i| ObjectReference::from_raw_address(unsafe {
-            Address::from_usize(heap_base.as_usize() + 0x1000 + i * 0x100)
-        }).unwrap())
+        .map(|i| {
+            ObjectReference::from_raw_address(unsafe {
+                Address::from_usize(heap_base.as_usize() + 0x1000 + i * 0x100)
+            })
+            .unwrap()
+        })
         .collect();
 
     // Start concurrent marking
@@ -543,17 +578,25 @@ fn test_advancing_wavefront_bounded_work() {
     let start_time = std::time::Instant::now();
 
     // Mark first object as root
-    coordinator.tricolor_marking().set_color(objects[0], ObjectColor::Grey);
+    coordinator
+        .tricolor_marking()
+        .set_color(objects[0], ObjectColor::Grey);
     work_counter.fetch_add(1, Ordering::Relaxed);
 
     // Process objects in sequence (simulating reference chain)
-    for i in 0..num_objects-1 {
+    for i in 0..num_objects - 1 {
         if coordinator.tricolor_marking().get_color(objects[i]) == ObjectColor::Grey {
-            coordinator.tricolor_marking().transition_color(objects[i], ObjectColor::Grey, ObjectColor::Black);
+            coordinator.tricolor_marking().transition_color(
+                objects[i],
+                ObjectColor::Grey,
+                ObjectColor::Black,
+            );
             work_counter.fetch_add(1, Ordering::Relaxed);
 
             // Mark next object as reachable
-            coordinator.tricolor_marking().set_color(objects[i+1], ObjectColor::Grey);
+            coordinator
+                .tricolor_marking()
+                .set_color(objects[i + 1], ObjectColor::Grey);
             work_counter.fetch_add(1, Ordering::Relaxed);
         }
     }
@@ -561,7 +604,11 @@ fn test_advancing_wavefront_bounded_work() {
     // Process final object
     let last_idx = num_objects - 1;
     if coordinator.tricolor_marking().get_color(objects[last_idx]) == ObjectColor::Grey {
-        coordinator.tricolor_marking().transition_color(objects[last_idx], ObjectColor::Grey, ObjectColor::Black);
+        coordinator.tricolor_marking().transition_color(
+            objects[last_idx],
+            ObjectColor::Grey,
+            ObjectColor::Black,
+        );
         work_counter.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -571,11 +618,17 @@ fn test_advancing_wavefront_bounded_work() {
     println!("  📊 Objects processed: {}", num_objects);
     println!("  📊 Total work units: {}", total_work);
     println!("  📊 Marking time: {:?}", marking_time);
-    println!("  📊 Work per object: {:.2}", total_work as f64 / num_objects as f64);
+    println!(
+        "  📊 Work per object: {:.2}",
+        total_work as f64 / num_objects as f64
+    );
 
     // Advancing wavefront guarantees that work is bounded by the live set
     // Each object is visited at most once during marking
-    assert!(total_work <= num_objects * 3, "Work should be bounded by live set size");
+    assert!(
+        total_work <= num_objects * 3,
+        "Work should be bounded by live set size"
+    );
 
     coordinator.write_barrier().deactivate();
     coordinator.black_allocator().deactivate();

@@ -5,6 +5,7 @@ use fugrip::concurrent::{
     TricolorMarking, WriteBarrier,
 };
 use mmtk::util::{Address, ObjectReference};
+use parking_lot::Mutex;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -15,11 +16,10 @@ fn concurrent_marking_full_workflow() {
     let heap_size = 0x100000;
 
     // Create required dependencies
-    let thread_registry = std::sync::Arc::new(fugrip::thread::ThreadRegistry::new());
-    let global_roots =
-        std::sync::Arc::new(std::sync::Mutex::new(fugrip::roots::GlobalRoots::default()));
+    let thread_registry = Arc::new(fugrip::thread::ThreadRegistry::new());
+    let global_roots = Arc::new(Mutex::new(fugrip::roots::GlobalRoots::default()));
 
-    let mut coordinator =
+    let coordinator =
         ConcurrentMarkingCoordinator::new(heap_base, heap_size, 2, thread_registry, global_roots);
 
     // Create a realistic object graph
@@ -45,7 +45,7 @@ fn concurrent_marking_full_workflow() {
     let mut slot2 = child2;
 
     // Set initial colors for testing
-    let tricolor = &coordinator.tricolor_marking;
+    let tricolor = coordinator.tricolor_marking();
     tricolor.set_color(child1, ObjectColor::White);
     tricolor.set_color(child2, ObjectColor::White);
     tricolor.set_color(grandchild, ObjectColor::White);
@@ -69,10 +69,10 @@ fn concurrent_marking_full_workflow() {
     assert_eq!(tricolor.get_color(new_obj), ObjectColor::Black);
 
     // Allow some processing time
-    # Using sleeps to paper over logic bugs is unprofessional(Duration::from_millis(50));
+    //(Duration::from_millis(50));
 
     // Get statistics
-    let stats = coordinator.get_stats();
+    let stats = coordinator.get_marking_stats();
     assert!(stats.objects_allocated_black >= 1);
 
     // Stop marking
@@ -86,7 +86,12 @@ fn write_barrier_concurrent_stress_test() {
     let heap_base = unsafe { Address::from_usize(0x200000) };
     let marking = Arc::new(TricolorMarking::new(heap_base, 0x100000));
     let coordinator = Arc::new(ParallelMarkingCoordinator::new(4));
-    let barrier = Arc::new(WriteBarrier::new(Arc::clone(&marking), coordinator));
+    let barrier = Arc::new(WriteBarrier::new(
+        Arc::clone(&marking),
+        coordinator,
+        heap_base,
+        0x100000,
+    ));
 
     barrier.activate();
 
@@ -254,7 +259,7 @@ fn parallel_marking_work_stealing_simulation() {
 
                     if !stolen.is_empty() {
                         // Simulate processing some work
-                        # Using sleeps to paper over logic bugs is unprofessional(Duration::from_millis(1));
+                        //(Duration::from_millis(1));
 
                         // Share some work back if we got a lot
                         if stolen.len() > 5 {
@@ -263,7 +268,7 @@ fn parallel_marking_work_stealing_simulation() {
                         }
                     }
 
-                    # Using sleeps to paper over logic bugs is unprofessional(Duration::from_millis(2));
+                    //(Duration::from_millis(2));
                 }
 
                 total_stolen
@@ -292,7 +297,7 @@ fn write_barrier_bulk_operations_performance() {
     let heap_base = unsafe { Address::from_usize(0x600000) };
     let marking = Arc::new(TricolorMarking::new(heap_base, 0x100000));
     let coordinator = Arc::new(ParallelMarkingCoordinator::new(1));
-    let barrier = WriteBarrier::new(Arc::clone(&marking), coordinator);
+    let barrier = WriteBarrier::new(Arc::clone(&marking), coordinator, heap_base, 0x100000);
 
     barrier.activate();
 
@@ -348,11 +353,10 @@ fn concurrent_marking_termination_detection() {
     let heap_base = unsafe { Address::from_usize(0x700000) };
 
     // Create required dependencies
-    let thread_registry = std::sync::Arc::new(fugrip::thread::ThreadRegistry::new());
-    let global_roots =
-        std::sync::Arc::new(std::sync::Mutex::new(fugrip::roots::GlobalRoots::default()));
+    let thread_registry = Arc::new(fugrip::thread::ThreadRegistry::new());
+    let global_roots = Arc::new(Mutex::new(fugrip::roots::GlobalRoots::default()));
 
-    let mut coordinator =
+    let coordinator =
         ConcurrentMarkingCoordinator::new(heap_base, 0x100000, 2, thread_registry, global_roots);
 
     // Start with minimal work to ensure quick termination
@@ -360,7 +364,7 @@ fn concurrent_marking_termination_detection() {
     coordinator.start_marking(vec![root]);
 
     // Allow some processing time
-    # Using sleeps to paper over logic bugs is unprofessional(Duration::from_millis(100));
+    //(Duration::from_millis(100));
 
     // Stop marking - should terminate cleanly
     let start = std::time::Instant::now();
@@ -382,7 +386,7 @@ fn write_barrier_array_operations() {
     let heap_base = unsafe { Address::from_usize(0x900000) };
     let marking = Arc::new(TricolorMarking::new(heap_base, 0x100000));
     let coordinator = Arc::new(ParallelMarkingCoordinator::new(1));
-    let barrier = WriteBarrier::new(marking, coordinator);
+    let barrier = WriteBarrier::new(marking, coordinator, heap_base, 0x100000);
 
     barrier.activate();
 

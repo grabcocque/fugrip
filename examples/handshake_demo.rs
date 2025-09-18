@@ -4,18 +4,19 @@
 //! and how threads that are blocked in syscalls or long operations can
 //! still participate in GC coordination through the enter/exit mechanism.
 
-use fugrip::{pollcheck, safepoint_enter, safepoint_exit, SafepointManager};
+use crossbeam::channel::{self};
+use fugrip::{SafepointManager, pollcheck, safepoint_enter, safepoint_exit};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::Duration;
-use crossbeam::channel::{self, Receiver, Sender};
 
 fn main() {
     println!("FUGC Soft Handshake & Enter/Exit Demo");
     println!("=====================================");
 
-    let manager = SafepointManager::global();
+    let container = fugrip::di::DIContainer::new();
+    let manager = container.safepoint_manager();
     let counter = Arc::new(AtomicUsize::new(0));
 
     // Demonstrate basic soft handshake
@@ -39,7 +40,11 @@ fn demonstrate_basic_handshake(manager: &SafepointManager, counter: Arc<AtomicUs
     let counter_clone = Arc::clone(&counter);
     manager.request_soft_handshake(Box::new(move || {
         let old_value = counter_clone.fetch_add(1, Ordering::Relaxed);
-        println!("   📞 Handshake callback executed! Counter: {} -> {}", old_value, old_value + 1);
+        println!(
+            "   📞 Handshake callback executed! Counter: {} -> {}",
+            old_value,
+            old_value + 1
+        );
     }));
 
     println!("   ✓ Soft handshake completed");
@@ -239,7 +244,8 @@ fn demonstrate_error_handling() {
 
     // Case 1: Multiple rapid handshakes
     println!("   Case 1: Rapid handshake requests");
-    let manager = SafepointManager::global();
+    let container = fugrip::di::DIContainer::new();
+    let manager = container.safepoint_manager();
 
     for i in 0..5 {
         manager.request_soft_handshake(Box::new(move || {

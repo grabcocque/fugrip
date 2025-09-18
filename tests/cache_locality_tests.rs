@@ -3,11 +3,13 @@
 //! These tests measure and validate cache-friendly optimizations
 //! in realistic garbage collection scenarios.
 
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use fugrip::cache_optimization::*;
-use fugrip::concurrent::{ConcurrentMarkingCoordinator, ObjectColor, TricolorMarking};
+use fugrip::concurrent::{ObjectColor, TricolorMarking};
+use fugrip::fugc_coordinator::FugcCoordinator;
 use mmtk::util::{Address, ObjectReference};
 
 /// Generate objects with controlled spatial locality patterns
@@ -214,11 +216,10 @@ fn concurrent_marking_cache_integration() {
 
     let objects = create_objects_with_locality(1000, 0.7);
     let heap_base = unsafe { Address::from_usize(0x10000000) };
-
     let thread_registry = Arc::new(fugrip::thread::ThreadRegistry::new());
     let global_roots = Arc::new(Mutex::new(fugrip::roots::GlobalRoots::default()));
 
-    let coordinator = ConcurrentMarkingCoordinator::new(
+    let coordinator = FugcCoordinator::new(
         heap_base,
         64 * 1024 * 1024,
         4,
@@ -231,12 +232,11 @@ fn concurrent_marking_cache_integration() {
     coordinator.mark_objects_cache_optimized(&objects);
     let cache_time = start.elapsed();
 
-    // Get cache statistics if available
-    if let Some(stats) = coordinator.get_cache_stats() {
-        println!("Cache stats: {:?}", stats);
-        assert!(stats.batch_size > 0);
-        assert!(stats.prefetch_distance > 0);
-    }
+    // Get cache statistics
+    let stats = coordinator.get_cache_stats();
+    println!("Cache stats: {:?}", stats);
+    assert!(stats.batch_size > 0);
+    assert!(stats.prefetch_distance > 0);
 
     println!("Cache-optimized concurrent marking time: {:?}", cache_time);
     assert!(cache_time > Duration::ZERO);
@@ -334,10 +334,7 @@ fn cache_profiling_integration() {
     // to measure L1/L2/L3 cache hit rates during GC operations
 
     let objects = create_objects_with_locality(5000, 0.8);
-    let heap_base = unsafe { Address::from_usize(0x10000000) };
-
-    let tricolor = Arc::new(TricolorMarking::new(heap_base, 64 * 1024 * 1024));
-    let cache_marking = CacheOptimizedMarking::new(tricolor);
+    let cache_marking = CacheOptimizedMarking::new(64);
 
     // Start profiling (would enable hardware counters)
     let start = Instant::now();

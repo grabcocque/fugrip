@@ -19,3 +19,35 @@ impl CollectorPhase {
         )
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::CollectorPhase;
+
+    #[test]
+    fn safepoint_requirements_match_specification() {
+        let safepoint_phases = [
+            CollectorPhase::Prepare,
+            CollectorPhase::Sweep,
+            CollectorPhase::Release,
+        ];
+
+        for phase in safepoint_phases.iter().copied() {
+            assert!(
+                phase.requires_safepoint(),
+                "{phase:?} should require safepoint"
+            );
+        }
+
+        for phase in [
+            CollectorPhase::Idle,
+            CollectorPhase::Mark,
+            CollectorPhase::ProcessWeak,
+        ] {
+            assert!(
+                !phase.requires_safepoint(),
+                "{phase:?} should not require safepoint"
+            );
+        }
+    }
+}

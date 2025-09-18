@@ -1,0 +1,37 @@
+# Nextest configuration for the fugrip repository.
+# See https://nexte.st/book/configuration.html for current format
+[profile.default]
+# Run all tests regardless of failure (equivalent to --no-fail-fast)
+# Note: fail-fast is controlled via CLI, not config in this nextest version
+
+# Default timeout settings - terminate tests after 20s (2 periods of 10s)
+slow-timeout = { period = "10s", terminate-after = 2, grace-period = "5s" }
+leak-timeout = "100ms"
+
+# Stress tests get longer timeouts - terminate after 120s (2 periods of 60s)
+[[profile.default.overrides]]
+filter = 'test(stress_)'
+slow-timeout = { period = "60s", terminate-after = 2, grace-period = "10s" }
+leak-timeout = "1s"
+
+# Cache tests - terminate after 60s (2 periods of 30s)
+[[profile.default.overrides]]
+filter = 'test(cache_)'
+slow-timeout = { period = "30s", terminate-after = 2, grace-period = "5s" }
+
+# Concurrent marking tests - terminate after 60s (2 periods of 30s)
+[[profile.default.overrides]]
+filter = 'test(concurrent_marking)'
+slow-timeout = { period = "30s", terminate-after = 2, grace-period = "5s" }
+
+# FUGC protocol tests - terminate after 60s (2 periods of 30s)
+[[profile.default.overrides]]
+filter = 'test(fugc_8_step)'
+slow-timeout = { period = "30s", terminate-after = 2, grace-period = "5s" }
+
+# This test had infinite loop bugs that were fixed
+
+# Handshake tests - terminate after 60s (2 periods of 30s)
+[[profile.default.overrides]]
+filter = 'test(handshake)'
+slow-timeout = { period = "30s", terminate-after = 2, grace-period = "5s" }

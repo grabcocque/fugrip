@@ -22,7 +22,7 @@ lcov_file="coverage.lcov"
 mkdir -p "${out_dir}"
 
 echo "[coverage] running cargo llvm-cov to produce LCOV..."
-cargo llvm-cov --workspace --all-features --lcov --output-path "${lcov_file}" > /dev/null
+cargo llvm-cov --workspace --all-features --lib --lcov --output-path "${lcov_file}" > /dev/null
 
 if [[ ! -s "${lcov_file}" ]]; then
   echo "[coverage] ERROR: LCOV file not produced: ${lcov_file}" >&2

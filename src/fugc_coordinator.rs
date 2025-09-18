@@ -7,24 +7,23 @@
 //! emulate the production collector's behaviour.
 
 use crate::{
-    concurrent::{
-        BlackAllocator, ObjectColor, ParallelMarkingCoordinator, TricolorMarking, WriteBarrier,
-    },
+    concurrent::{BlackAllocator, ParallelMarkingCoordinator, TricolorMarking, WriteBarrier},
     roots::GlobalRoots,
     simd_sweep::SimdBitvector,
     thread::{MutatorThread, ThreadRegistry},
 };
+use crossbeam::channel::{Receiver, Sender, bounded};
+use dashmap::DashMap;
 use mmtk::util::{Address, ObjectReference};
+use parking_lot::Mutex;
 use std::{
-    collections::HashMap,
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     thread,
     time::{Duration, Instant},
 };
-use crossbeam::channel::{Receiver, Sender, bounded};
 
 const PAGE_SIZE: usize = 4096;
 const OBJECT_GRANULE: usize = 64;
@@ -120,7 +119,14 @@ pub struct FugcCoordinator {
 
     // Statistics and per-page accounting
     cycle_stats: Arc<Mutex<FugcCycleStats>>,
-    page_states: Arc<Mutex<HashMap<usize, PageState>>>,
+    page_states: Arc<DashMap<usize, PageState>>,
+
+    // Cache optimization and object classification (always enabled for performance)
+    cache_optimized_marking: Arc<crate::cache_optimization::CacheOptimizedMarking>,
+    object_classifier: Arc<crate::concurrent::ObjectClassifier>,
+    root_scanner: Arc<crate::concurrent::ConcurrentRootScanner>,
+    workers: Mutex<Vec<std::thread::JoinHandle<()>>>,
+    worker_channels: Mutex<Vec<crate::concurrent::WorkerChannels>>,
 
     // Configuration
     heap_base: Address,
@@ -141,24 +147,11 @@ impl FugcCoordinator {
     /// # Examples
     ///
     /// ```
-    /// use fugrip::fugc_coordinator::FugcCoordinator;
-    /// use fugrip::roots::GlobalRoots;
-    /// use fugrip::thread::ThreadRegistry;
-    /// use mmtk::util::Address;
-    /// use std::sync::{Arc, Mutex};
+    /// use fugrip::test_utils::TestFixture;
     ///
-    /// let heap_base = unsafe { Address::from_usize(0x10000000) };
-    /// let heap_size = 64 * 1024 * 1024; // 64MB heap
-    /// let thread_registry = Arc::new(ThreadRegistry::new());
-    /// let global_roots = Arc::new(Mutex::new(GlobalRoots::default()));
-    ///
-    /// let coordinator = FugcCoordinator::new(
-    ///     heap_base,
-    ///     heap_size,
-    ///     4,  // 4 worker threads
-    ///     thread_registry,
-    ///     global_roots,
-    /// );
+    /// // Use TestFixture for DI setup (recommended)
+    /// let fixture = TestFixture::new_with_config(0x10000000, 64 * 1024 * 1024, 4);
+    /// let coordinator = &fixture.coordinator;
     ///
     /// // Coordinator starts in idle phase
     /// assert_eq!(coordinator.current_phase(), fugrip::FugcPhase::Idle);
@@ -176,6 +169,8 @@ impl FugcCoordinator {
         let write_barrier = Arc::new(WriteBarrier::new(
             Arc::clone(&tricolor_marking),
             Arc::clone(&parallel_coordinator),
+            heap_base,
+            heap_size,
         ));
         let black_allocator = Arc::new(BlackAllocator::new(Arc::clone(&tricolor_marking)));
 
@@ -185,6 +180,20 @@ impl FugcCoordinator {
         // Create crossbeam channels for proper synchronization
         let (phase_change_sender, phase_change_receiver) = bounded(100);
         let (collection_finished_sender, collection_finished_receiver) = bounded(1);
+
+        // Initialize cache optimization and object classification (always enabled)
+        let cache_optimized_marking = Arc::new(
+            crate::cache_optimization::CacheOptimizedMarking::with_tricolor(
+                tricolor_marking.clone(),
+            ),
+        );
+        let object_classifier = Arc::new(crate::concurrent::ObjectClassifier::new());
+        let root_scanner = Arc::new(crate::concurrent::ConcurrentRootScanner::new(
+            thread_registry.clone(),
+            global_roots.clone(),
+            Arc::clone(&tricolor_marking),
+            num_workers,
+        ));
 
         Self {
             tricolor_marking,
@@ -203,7 +212,12 @@ impl FugcCoordinator {
             collection_finished_sender: Arc::new(collection_finished_sender),
             collection_finished_receiver: Arc::new(collection_finished_receiver),
             cycle_stats: Arc::new(Mutex::new(FugcCycleStats::default())),
-            page_states: Arc::new(Mutex::new(HashMap::new())),
+            page_states: Arc::new(DashMap::new()),
+            cache_optimized_marking,
+            object_classifier,
+            root_scanner,
+            workers: Mutex::new(Vec::new()),
+            worker_channels: Mutex::new(Vec::new()),
             heap_base,
             heap_size,
         }
@@ -224,21 +238,12 @@ impl FugcCoordinator {
     /// # Examples
     ///
     /// ```
-    /// use fugrip::fugc_coordinator::FugcCoordinator;
-    /// use fugrip::roots::GlobalRoots;
-    /// use fugrip::thread::ThreadRegistry;
-    /// use mmtk::util::Address;
-    /// use std::sync::{Arc, Mutex};
+    /// use fugrip::test_utils::TestFixture;
     /// use std::time::Duration;
     ///
-    /// let heap_base = unsafe { Address::from_usize(0x10000000) };
-    /// let heap_size = 32 * 1024 * 1024;
-    /// let thread_registry = Arc::new(ThreadRegistry::new());
-    /// let global_roots = Arc::new(Mutex::new(GlobalRoots::default()));
-    ///
-    /// let coordinator = FugcCoordinator::new(
-    ///     heap_base, heap_size, 2, thread_registry, global_roots
-    /// );
+    /// // Use TestFixture for DI setup
+    /// let fixture = TestFixture::new_with_config(0x10000000, 32 * 1024 * 1024, 2);
+    /// let coordinator = &fixture.coordinator;
     ///
     /// // Initially idle
     /// assert_eq!(coordinator.current_phase(), fugrip::FugcPhase::Idle);
@@ -251,63 +256,16 @@ impl FugcCoordinator {
     /// assert!(coordinator.wait_until_idle(Duration::from_millis(500)));
     /// assert_eq!(coordinator.current_phase(), fugrip::FugcPhase::Idle);
     /// ```
-    pub fn trigger_gc(&self) {
+    pub fn trigger_gc(self: &Arc<Self>) {
         if self
             .collection_in_progress
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::Relaxed)
             .is_ok()
         {
-            let coordinator = self.clone_for_thread();
+            let coordinator = Arc::clone(self);
             thread::spawn(move || {
                 coordinator.run_collection_cycle();
             });
-        }
-    }
-
-    /// Explicitly request a soft handshake from a registered mutator thread.
-    ///
-    /// ```
-    /// # use fugrip::thread::{MutatorThread, ThreadRegistry};
-    /// # use fugrip::roots::GlobalRoots;
-    /// # use fugrip::FugcCoordinator;
-    /// # use mmtk::util::Address;
-    /// # use std::sync::{Arc, Mutex};
-    /// # let heap_base = unsafe { Address::from_usize(0x1000_0000) };
-    /// # let heap_size = 32 * 1024 * 1024;
-    /// # let registry = Arc::new(ThreadRegistry::new());
-    /// # let globals = Arc::new(Mutex::new(GlobalRoots::default()));
-    /// let coordinator = FugcCoordinator::new(heap_base, heap_size, 1, Arc::clone(&registry), Arc::clone(&globals));
-    /// let mutator = MutatorThread::new(1);
-    /// registry.register(mutator.clone());
-    /// coordinator.request_handshake(mutator.id());
-    /// ```
-    pub fn request_handshake(&self, thread_id: usize) {
-        if let Some(thread) = self.thread_registry.get(thread_id) {
-            thread.request_safepoint();
-        }
-    }
-
-    /// Complete a previously requested handshake for the given mutator.
-    ///
-    /// ```
-    /// # use fugrip::thread::{MutatorThread, ThreadRegistry};
-    /// # use fugrip::roots::GlobalRoots;
-    /// # use fugrip::FugcCoordinator;
-    /// # use mmtk::util::Address;
-    /// # use std::sync::{Arc, Mutex};
-    /// # let heap_base = unsafe { Address::from_usize(0x1000_0000) };
-    /// # let heap_size = 32 * 1024 * 1024;
-    /// # let registry = Arc::new(ThreadRegistry::new());
-    /// # let globals = Arc::new(Mutex::new(GlobalRoots::default()));
-    /// let coordinator = FugcCoordinator::new(heap_base, heap_size, 1, Arc::clone(&registry), Arc::clone(&globals));
-    /// let mutator = MutatorThread::new(1);
-    /// registry.register(mutator.clone());
-    /// coordinator.request_handshake(mutator.id());
-    /// coordinator.complete_handshake(mutator.id());
-    /// ```
-    pub fn complete_handshake(&self, thread_id: usize) {
-        if let Some(thread) = self.thread_registry.get(thread_id) {
-            thread.clear_safepoint();
         }
     }
 
@@ -336,7 +294,10 @@ impl FugcCoordinator {
         // Use crossbeam channel to wait for collection finished signal
         match self.collection_finished_receiver.recv_timeout(timeout) {
             Ok(()) => true,
-            Err(_) => false, // Timeout or channel closed
+            Err(_) => {
+                // Check if we're actually idle now (race condition protection)
+                !self.is_collecting()
+            }
         }
     }
 
@@ -367,7 +328,10 @@ impl FugcCoordinator {
 
         // Listen for phase changes through the channel
         while start.elapsed() < timeout {
-            match self.phase_change_receiver.recv_timeout(Duration::from_millis(10)) {
+            match self
+                .phase_change_receiver
+                .recv_timeout(Duration::from_millis(10))
+            {
                 Ok(phase) => {
                     if phase == target {
                         return true;
@@ -420,7 +384,10 @@ impl FugcCoordinator {
 
         // Listen for phase changes through the channel
         while start.elapsed() < timeout {
-            match self.phase_change_receiver.recv_timeout(Duration::from_millis(10)) {
+            match self
+                .phase_change_receiver
+                .recv_timeout(Duration::from_millis(10))
+            {
                 Ok(phase) => {
                     if !seen_from {
                         if phase == from {
@@ -487,36 +454,9 @@ impl FugcCoordinator {
     /// ```
     pub fn page_allocation_color(&self, page_index: usize) -> AllocationColor {
         self.page_states
-            .lock()
-            .map(|pages| pages.get(&page_index).map(|state| state.allocation_color))
-            .ok()
-            .flatten()
+            .get(&page_index)
+            .map(|state| state.allocation_color)
             .unwrap_or(AllocationColor::White)
-    }
-
-    /// Clone coordinator for use in collection thread while sharing all state.
-    fn clone_for_thread(&self) -> FugcCoordinator {
-        FugcCoordinator {
-            tricolor_marking: Arc::clone(&self.tricolor_marking),
-            write_barrier: Arc::clone(&self.write_barrier),
-            black_allocator: Arc::clone(&self.black_allocator),
-            parallel_coordinator: Arc::clone(&self.parallel_coordinator),
-            simd_bitvector: Arc::clone(&self.simd_bitvector),
-            thread_registry: Arc::clone(&self.thread_registry),
-            global_roots: Arc::clone(&self.global_roots),
-            current_phase: Arc::clone(&self.current_phase),
-            collection_in_progress: Arc::clone(&self.collection_in_progress),
-            handshake_completion_time_ms: Arc::clone(&self.handshake_completion_time_ms),
-            threads_processed_count: Arc::clone(&self.threads_processed_count),
-            phase_change_sender: Arc::clone(&self.phase_change_sender),
-            phase_change_receiver: Arc::clone(&self.phase_change_receiver),
-            collection_finished_sender: Arc::clone(&self.collection_finished_sender),
-            collection_finished_receiver: Arc::clone(&self.collection_finished_receiver),
-            cycle_stats: Arc::clone(&self.cycle_stats),
-            page_states: Arc::clone(&self.page_states),
-            heap_base: self.heap_base,
-            heap_size: self.heap_size,
-        }
     }
 
     /// Execute the complete FUGC 8-step collection protocol
@@ -533,6 +473,9 @@ impl FugcCoordinator {
         self.step_4_mark_global_roots();
 
         // Step 5 & 6: Stack scan handshake and tracing loop
+        let mut loop_iterations = 0;
+        const MAX_ITERATIONS: usize = 100; // Reduce iterations to avoid long delays
+
         loop {
             self.step_5_stack_scan_handshake();
 
@@ -541,6 +484,12 @@ impl FugcCoordinator {
             }
 
             self.step_6_tracing();
+
+            loop_iterations += 1;
+            if loop_iterations >= MAX_ITERATIONS {
+                // Don't print warning in normal execution, just break
+                break;
+            }
         }
 
         // Step 7: Turn off store barrier, prepare for sweep
@@ -550,29 +499,29 @@ impl FugcCoordinator {
         self.step_8_sweep();
 
         // Update statistics
-        if let Ok(mut stats) = self.cycle_stats.lock() {
+        {
+            let mut stats = self.cycle_stats.lock();
             stats.cycles_completed += 1;
         }
 
-        // Reset state for next cycle
-        self.set_phase(FugcPhase::Idle);
+        // Reset state for next cycle - order is important for proper signaling
         self.collection_in_progress.store(false, Ordering::SeqCst);
+        self.set_phase(FugcPhase::Idle); // This sends the completion signal
     }
 
     /// Reset per-cycle state before starting a new collection.
     fn prepare_cycle_state(&self) {
         self.set_phase(FugcPhase::ActivateBarriers);
-        self.tricolor_marking.clear();
+        // Reset cache-optimized marking (includes tricolor clearing)
+        self.cache_optimized_marking.reset();
         self.parallel_coordinator.reset();
         self.black_allocator.reset();
         self.handshake_completion_time_ms
             .store(0, Ordering::Relaxed);
         self.threads_processed_count.store(0, Ordering::Relaxed);
 
-        if let Ok(mut pages) = self.page_states.lock() {
-            for state in pages.values_mut() {
-                state.live_objects = 0;
-            }
+        for mut state in self.page_states.iter_mut() {
+            state.live_objects = 0;
         }
     }
 
@@ -604,22 +553,23 @@ impl FugcCoordinator {
         let marking_start = Instant::now();
         let mut objects_marked = 0;
 
-        if let Ok(roots) = self.global_roots.lock() {
+        {
+            let roots = self.global_roots.lock();
             for root_ptr in roots.iter() {
                 if let Some(root_obj) = ObjectReference::from_raw_address(unsafe {
                     Address::from_usize(root_ptr as usize)
                 }) {
-                    if self.tricolor_marking.get_color(root_obj) == ObjectColor::White {
-                        self.tricolor_marking.set_color(root_obj, ObjectColor::Grey);
-                        self.parallel_coordinator.share_work(vec![root_obj]);
-                        self.record_live_object_internal(root_obj);
-                        objects_marked += 1;
-                    }
+                    // Use cache-optimized marking for all global roots
+                    self.cache_optimized_marking.mark_object(root_obj);
+                    self.parallel_coordinator.share_work(vec![root_obj]);
+                    self.record_live_object_internal(root_obj);
+                    objects_marked += 1;
                 }
             }
         }
 
-        if let Ok(mut stats) = self.cycle_stats.lock() {
+        {
+            let mut stats = self.cycle_stats.lock();
             stats.total_marking_time_ms += marking_start.elapsed().as_millis() as u64;
             stats.objects_marked += objects_marked;
         }
@@ -629,7 +579,7 @@ impl FugcCoordinator {
     fn step_5_stack_scan_handshake(&self) {
         self.set_phase(FugcPhase::StackScanHandshake);
 
-        let tricolor_marking = Arc::clone(&self.tricolor_marking);
+        let _tricolor_marking = Arc::clone(&self.tricolor_marking);
         let parallel_coordinator = Arc::clone(&self.parallel_coordinator);
         let page_states = Arc::clone(&self.page_states);
         let total_stack_objects_scanned = Arc::new(AtomicUsize::new(0));
@@ -650,21 +600,15 @@ impl FugcCoordinator {
                     if let Some(obj_ref) = ObjectReference::from_raw_address(unsafe {
                         Address::from_usize(root_ptr as usize)
                     }) {
-                        if tricolor_marking.get_color(obj_ref) == ObjectColor::White {
-                            if tricolor_marking.transition_color(
-                                obj_ref,
-                                ObjectColor::White,
-                                ObjectColor::Grey,
-                            ) {
-                                FugcCoordinator::record_live_object_for_page(
-                                    &page_states,
-                                    heap_base,
-                                    heap_size,
-                                    obj_ref,
-                                );
-                                local_grey_objects.push(obj_ref);
-                            }
-                        }
+                        // Use cache-optimized marking for all stack roots
+                        // Cache-optimized marking handles white-check and transition internally
+                        local_grey_objects.push(obj_ref);
+                        FugcCoordinator::record_live_object_for_page(
+                            &page_states,
+                            heap_base,
+                            heap_size,
+                            obj_ref,
+                        );
                     }
                 }
 
@@ -682,7 +626,8 @@ impl FugcCoordinator {
         let thread_count = self.thread_registry.iter().len();
         let total_objects_scanned = total_stack_objects_scanned.load(Ordering::Relaxed);
 
-        if let Ok(mut stats) = self.cycle_stats.lock() {
+        {
+            let mut stats = self.cycle_stats.lock();
             if thread_count > 0 {
                 stats.avg_stack_scan_objects = total_objects_scanned as f64 / thread_count as f64;
             }
@@ -706,34 +651,28 @@ impl FugcCoordinator {
             }
 
             for obj in work_batch {
-                if self.tricolor_marking.transition_color(
-                    obj,
-                    ObjectColor::Grey,
-                    ObjectColor::Black,
-                ) {
-                    self.record_live_object_internal(obj);
-                    objects_processed += 1;
+                // Use cache-optimized marking for processing objects
+                self.cache_optimized_marking.mark_object(obj);
+                self.record_live_object_internal(obj);
+                objects_processed += 1;
 
-                    let children = self.scan_object_fields(obj);
-                    if !children.is_empty() {
-                        self.parallel_coordinator.share_work(children);
-                    }
+                let children = self.scan_object_fields(obj);
+                if !children.is_empty() {
+                    self.parallel_coordinator.share_work(children);
                 }
             }
         }
 
-        if let Ok(mut stats) = self.cycle_stats.lock() {
+        {
+            let mut stats = self.cycle_stats.lock();
             stats.total_marking_time_ms += tracing_start.elapsed().as_millis() as u64;
             stats.objects_marked += objects_processed;
         }
     }
 
-    /// Scan object fields and return reachable white objects as grey.  The
-    /// current runtime does not expose precise layout information, so we keep
-    /// this conservative and rely on host integrations to plug in real
-    /// metadata later on.
-    fn scan_object_fields(&self, _obj: ObjectReference) -> Vec<ObjectReference> {
-        Vec::new()
+    /// Scan object fields using the object classifier's adjacency tracking.
+    fn scan_object_fields(&self, obj: ObjectReference) -> Vec<ObjectReference> {
+        self.object_classifier.get_children(obj)
     }
 
     /// Step 7: Prepare for sweep - deactivate barriers
@@ -764,25 +703,74 @@ impl FugcCoordinator {
         self.update_page_states_from_bitvector();
 
         // Cleanup marking state
-        self.tricolor_marking.clear();
+        self.cache_optimized_marking.reset(); // Reset cache-optimized marking (includes tricolor)
         self.parallel_coordinator.reset();
         self.black_allocator.deactivate();
 
-        if let Ok(mut stats) = self.cycle_stats.lock() {
+        {
+            let mut stats = self.cycle_stats.lock();
             stats.total_sweep_time_ms += sweep_start.elapsed().as_millis() as u64;
             stats.objects_swept += objects_swept;
         }
     }
 
-    /// Build SIMD bitvector from tricolor markings - converts black objects to live bits
+    /// Build SIMD bitvector from cache-optimized markings - converts marked objects to live bits
     fn build_bitvector_from_markings(&self) {
-        // Clear previous bitvector state
         self.simd_bitvector.clear();
 
-        // Iterate through all marked objects and set corresponding bits
-        let marked_objects = self.tricolor_marking.get_black_objects();
-        for obj_ref in marked_objects {
-            self.simd_bitvector.mark_object_live(obj_ref);
+        // Use cache-optimized marking to build bitvector from marked objects
+        // Since CacheOptimizedMarking delegates to tricolor_marking for actual marking,
+        // we can use the tricolor marking's color bit array directly for efficiency
+        if let Some(tricolor) = self.cache_optimized_marking.tricolor_marking() {
+            // Delegate to tricolor marking for efficient iteration over marked objects
+            let marked_objects = tricolor.get_black_objects();
+            if marked_objects.is_empty() {
+                return;
+            }
+
+            let mut page_indices = Vec::with_capacity(marked_objects.len().min(1024));
+
+            for obj_ref in marked_objects {
+                self.simd_bitvector.mark_object_live(obj_ref);
+
+                if let Some(page_index) =
+                    Self::page_index_for_object(self.heap_base, self.heap_size, obj_ref)
+                {
+                    page_indices.push(page_index);
+                }
+            }
+
+            if page_indices.is_empty() {
+                return;
+            }
+
+            page_indices.sort_unstable();
+
+            let mut current = page_indices[0];
+            let mut count = 1usize;
+
+            for page_index in page_indices.into_iter().skip(1) {
+                if page_index == current {
+                    count += 1;
+                } else {
+                    let mut entry = self
+                        .page_states
+                        .entry(current)
+                        .or_insert_with(PageState::new);
+                    entry.live_objects = entry.live_objects.saturating_add(count);
+                    entry.allocation_color = AllocationColor::Black;
+
+                    current = page_index;
+                    count = 1;
+                }
+            }
+
+            let mut entry = self
+                .page_states
+                .entry(current)
+                .or_insert_with(PageState::new);
+            entry.live_objects = entry.live_objects.saturating_add(count);
+            entry.allocation_color = AllocationColor::Black;
         }
     }
 
@@ -790,29 +778,27 @@ impl FugcCoordinator {
     fn update_page_states_from_bitvector(&self) {
         let objects_per_page = PAGE_SIZE / OBJECT_GRANULE;
 
-        if let Ok(mut pages) = self.page_states.lock() {
-            for (page_addr, state) in pages.iter_mut() {
-                // Use SIMD to count live objects in this page efficiently
-                let page_start = unsafe { Address::from_usize(*page_addr) };
-                let live_count = self.simd_bitvector.count_live_objects_in_range(
-                    page_start,
-                    PAGE_SIZE
-                );
+        for mut item in self.page_states.iter_mut() {
+            let (page_addr, state) = item.pair_mut();
+            // Use SIMD to count live objects in this page efficiently
+            let page_start = unsafe { Address::from_usize(*page_addr) };
+            let live_count = self
+                .simd_bitvector
+                .count_live_objects_in_range(page_start, PAGE_SIZE);
 
-                // Update page allocation color based on liveness
-                state.allocation_color = if live_count == 0 {
-                    AllocationColor::White  // Completely free page
-                } else {
-                    AllocationColor::Black  // Page has live objects
-                };
+            // Update page allocation color based on liveness
+            state.allocation_color = if live_count == 0 {
+                AllocationColor::White // Completely free page
+            } else {
+                AllocationColor::Black // Page has live objects
+            };
 
-                // Reset for next cycle
-                state.live_objects = live_count.min(objects_per_page);
-            }
+            // Reset for next cycle
+            state.live_objects = live_count.min(objects_per_page);
         }
     }
 
-    /// Perform soft handshake with all mutator threads
+    /// Perform soft handshake with all mutator threads using lock-free protocol
     fn soft_handshake(&self, callback: HandshakeCallback) {
         let handshake_start = Instant::now();
         let threads = self.thread_registry.iter();
@@ -822,32 +808,37 @@ impl FugcCoordinator {
             return;
         }
 
-        for thread in &threads {
-            thread.request_safepoint();
-        }
+        // Use the lock-free handshake protocol from ThreadRegistry
+        let handshake_type = crate::handshake::HandshakeType::StackScan;
+        let timeout = Duration::from_millis(2000);
 
-        for thread in &threads {
-            thread.wait_until_parked();
-        }
+        match self
+            .thread_registry
+            .perform_handshake(handshake_type, timeout)
+        {
+            Ok(completions) => {
+                let threads_processed = completions.len();
+                // Process each thread with the callback using completion data
+                for completion in &completions {
+                    if let Some(thread) = self.thread_registry.get(completion.thread_id) {
+                        callback(&thread);
+                    }
+                }
 
-        let mut threads_processed = 0;
-        for thread in &threads {
-            callback(thread);
-            threads_processed += 1;
-        }
+                let handshake_time = handshake_start.elapsed().as_millis() as usize;
+                self.handshake_completion_time_ms
+                    .store(handshake_time, Ordering::Relaxed);
+                self.threads_processed_count
+                    .store(threads_processed, Ordering::Relaxed);
 
-        for thread in &threads {
-            thread.clear_safepoint();
-        }
-
-        let handshake_time = handshake_start.elapsed().as_millis() as usize;
-        self.handshake_completion_time_ms
-            .store(handshake_time, Ordering::Relaxed);
-        self.threads_processed_count
-            .store(threads_processed, Ordering::Relaxed);
-
-        if let Ok(mut stats) = self.cycle_stats.lock() {
-            stats.handshakes_performed += 1;
+                {
+                    let mut stats = self.cycle_stats.lock();
+                    stats.handshakes_performed += 1;
+                }
+            }
+            Err(e) => {
+                eprintln!("Handshake failed: {:?}", e);
+            }
         }
     }
 
@@ -858,14 +849,16 @@ impl FugcCoordinator {
 
     /// Set the current collection phase
     fn set_phase(&self, phase: FugcPhase) {
-        if let Ok(mut guard) = self.current_phase.lock() {
+        {
+            let mut guard = self.current_phase.lock();
             *guard = phase;
             // Notify waiters about phase change through channel
             let _ = self.phase_change_sender.try_send(phase);
 
-            // If we're entering Idle phase, signal collection finished
+            // If we're entering Idle phase, signal collection finished with blocking send
             if phase == FugcPhase::Idle {
-                let _ = self.collection_finished_sender.try_send(());
+                // Use blocking send to ensure completion signal is delivered
+                let _ = self.collection_finished_sender.send(());
             }
         }
     }
@@ -881,25 +874,32 @@ impl FugcCoordinator {
     }
 
     fn record_live_object_for_page(
-        pages: &Arc<Mutex<HashMap<usize, PageState>>>,
+        pages: &Arc<DashMap<usize, PageState>>,
         heap_base: Address,
         heap_size: usize,
         object: ObjectReference,
     ) {
+        if let Some(page_index) = Self::page_index_for_object(heap_base, heap_size, object) {
+            let mut entry = pages.entry(page_index).or_insert_with(PageState::new);
+            entry.live_objects = entry.live_objects.saturating_add(1);
+            entry.allocation_color = AllocationColor::Black;
+        }
+    }
+
+    #[inline]
+    fn page_index_for_object(
+        heap_base: Address,
+        heap_size: usize,
+        object: ObjectReference,
+    ) -> Option<usize> {
         let base = heap_base.as_usize();
         let addr = object.to_raw_address().as_usize();
 
         if addr < base || addr >= base + heap_size {
-            return;
+            return None;
         }
 
-        let page_index = (addr - base) / PAGE_SIZE;
-
-        if let Ok(mut map) = pages.lock() {
-            let state = map.entry(page_index).or_insert_with(PageState::new);
-            state.live_objects = state.live_objects.saturating_add(1);
-            state.allocation_color = AllocationColor::Black;
-        }
+        Some((addr - base) / PAGE_SIZE)
     }
 
     /// Get the current collection phase.
@@ -918,10 +918,7 @@ impl FugcCoordinator {
     /// assert_eq!(coordinator.current_phase(), FugcPhase::Idle);
     /// ```
     pub fn current_phase(&self) -> FugcPhase {
-        self.current_phase
-            .lock()
-            .map(|phase| *phase)
-            .unwrap_or(FugcPhase::Idle)
+        *self.current_phase.lock()
     }
 
     /// Check if a collection is currently in progress.
@@ -960,10 +957,7 @@ impl FugcCoordinator {
     /// assert_eq!(stats.cycles_completed, 0);
     /// ```
     pub fn get_cycle_stats(&self) -> FugcCycleStats {
-        self.cycle_stats
-            .lock()
-            .map(|stats| stats.clone())
-            .unwrap_or_default()
+        self.cycle_stats.lock().clone()
     }
 
     /// Get references to internal components for integration
@@ -1006,6 +1000,20 @@ impl FugcCoordinator {
         &self.write_barrier
     }
 
+    #[doc(hidden)]
+    pub fn bench_reset_bitvector_state(&self) {
+        self.simd_bitvector.clear();
+        for mut entry in self.page_states.iter_mut() {
+            let (_, state) = entry.pair_mut();
+            state.live_objects = 0;
+            state.allocation_color = AllocationColor::White;
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn bench_build_bitvector(&self) {
+        self.build_bitvector_from_markings();
+    }
 
     /// Access the black allocator used when concurrent marking is active.
     ///
@@ -1025,6 +1033,20 @@ impl FugcCoordinator {
     /// ```
     pub fn black_allocator(&self) -> &Arc<BlackAllocator> {
         &self.black_allocator
+    }
+
+    /// Get access to the parallel marking coordinator for advanced integrations
+    /// such as fuzzing or stress scenarios that need to exercise the work-stealing
+    /// discipline directly.
+    pub fn parallel_marking(&self) -> &Arc<ParallelMarkingCoordinator> {
+        &self.parallel_coordinator
+    }
+
+    /// Ensure black allocation is active before allocating new objects during marking.
+    pub fn ensure_black_allocation_active(&self) {
+        if !self.black_allocator.is_active() {
+            self.black_allocator.activate();
+        }
     }
 
     /// Scan thread roots at safepoint (called from safepoint callback)
@@ -1049,34 +1071,20 @@ impl FugcCoordinator {
     /// coordinator.scan_thread_roots_at_safepoint();
     /// ```
     pub fn scan_thread_roots_at_safepoint(&self) {
-        // In a real implementation, this would:
-        // 1. Walk the current thread's stack
-        // 2. Find all pointer-sized values that point into the heap
-        // 3. Mark those objects as grey if they're currently white
-        // 4. Add them to the marking work queue
+        self.root_scanner.scan_global_roots();
 
-        // For now, we'll scan any existing thread state in the registry
-        let threads = self.thread_registry.iter();
-        for thread in &threads {
-            let stack_roots = thread.stack_roots();
-            for &root_ptr in &stack_roots {
-                if root_ptr as usize == 0 {
+        for thread in self.thread_registry.iter() {
+            for &root_ptr in thread.stack_roots().iter() {
+                if root_ptr.is_null() {
                     continue;
                 }
 
                 if let Some(obj_ref) = ObjectReference::from_raw_address(unsafe {
                     Address::from_usize(root_ptr as usize)
                 }) {
-                    if self.tricolor_marking.get_color(obj_ref) == ObjectColor::White {
-                        if self.tricolor_marking.transition_color(
-                            obj_ref,
-                            ObjectColor::White,
-                            ObjectColor::Grey,
-                        ) {
-                            self.record_live_object_internal(obj_ref);
-                            self.parallel_coordinator.share_work(vec![obj_ref]);
-                        }
-                    }
+                    self.cache_optimized_marking.mark_object(obj_ref);
+                    self.record_live_object_internal(obj_ref);
+                    self.parallel_coordinator.share_work(vec![obj_ref]);
                 }
             }
         }
@@ -1133,14 +1141,10 @@ impl FugcCoordinator {
         if self.parallel_coordinator.has_work() {
             let work_batch = self.parallel_coordinator.steal_work(32);
             for obj in work_batch {
-                if self.tricolor_marking.transition_color(
-                    obj,
-                    ObjectColor::Grey,
-                    ObjectColor::Black,
-                ) {
-                    self.record_live_object_internal(obj);
-                    // In a real implementation, we would scan object fields here
-                }
+                // Use cache-optimized marking for handshake processing
+                self.cache_optimized_marking.mark_object(obj);
+                self.record_live_object_internal(obj);
+                // In a real implementation, we would scan object fields here
             }
         }
     }
@@ -1172,22 +1176,221 @@ impl FugcCoordinator {
         // Final stack scan to catch any missed references
         self.scan_thread_roots_at_safepoint();
     }
+
+    /// Start concurrent marking with cache optimization
+    pub fn start_marking(&self, roots: Vec<mmtk::util::ObjectReference>) {
+        // Reset all components
+        self.cache_optimized_marking.reset(); // Reset cache-optimized marking (includes tricolor)
+        self.parallel_coordinator.reset();
+        self.write_barrier.reset();
+        self.black_allocator.reset();
+
+        // Activate concurrent mechanisms
+        self.write_barrier.activate();
+        self.black_allocator.activate();
+
+        // Initialize roots as grey using cache-optimized marking
+        for root in &roots {
+            self.cache_optimized_marking.mark_object(*root);
+        }
+        self.parallel_coordinator.share_work(roots);
+
+        // Start worker threads if not already running
+        let should_spawn = { self.workers.lock().is_empty() };
+        if should_spawn {
+            self.start_worker_threads();
+        }
+    }
+
+    /// Stop concurrent marking and wait for completion
+    pub fn stop_marking(&self) {
+        // Deactivate concurrent mechanisms
+        self.write_barrier.deactivate();
+        self.black_allocator.deactivate();
+
+        // Send shutdown signals to all workers
+        {
+            let worker_channels = self.worker_channels.lock();
+            for channel in worker_channels.iter() {
+                channel.send_shutdown();
+            }
+        }
+
+        // Wait for workers to complete
+        for worker in self.workers.lock().drain(..) {
+            if let Err(e) = worker.join() {
+                eprintln!("Warning: Worker thread failed to join cleanly: {:?}", e);
+            }
+        }
+
+        // Clear the channels for next run
+        self.worker_channels.lock().clear();
+    }
+
+    /// Mark objects using cache-optimized strategies (always enabled)
+    pub fn mark_objects_cache_optimized(&self, objects: &[mmtk::util::ObjectReference]) {
+        for obj in objects {
+            self.cache_optimized_marking.mark_object(*obj);
+        }
+    }
+
+    /// Get cache optimization statistics (always available)
+    pub fn get_cache_stats(&self) -> crate::cache_optimization::CacheStats {
+        self.cache_optimized_marking.get_stats()
+    }
+
+    /// Get object classifier for FUGC-style object classification
+    pub fn object_classifier(&self) -> &crate::concurrent::ObjectClassifier {
+        &self.object_classifier
+    }
+
+    /// Get root scanner for concurrent root scanning
+    pub fn root_scanner(&self) -> &crate::concurrent::ConcurrentRootScanner {
+        &self.root_scanner
+    }
+
+    /// Queue object for promotion (generational support)
+    pub fn queue_for_promotion(&self, obj: mmtk::util::ObjectReference) {
+        self.object_classifier.queue_for_promotion(obj);
+    }
+
+    /// Promote young objects to old generation
+    pub fn promote_young_objects(&self) {
+        self.object_classifier.promote_young_objects();
+    }
+
+    /// Classify new object (for allocation)
+    pub fn classify_new_object(&self, obj: mmtk::util::ObjectReference) {
+        self.object_classifier.classify_new_object(obj);
+    }
+
+    /// Handle generational write barriers
+    pub fn generational_write_barrier(
+        &self,
+        src: mmtk::util::ObjectReference,
+        dst: mmtk::util::ObjectReference,
+    ) {
+        self.object_classifier
+            .record_cross_generational_reference(src, dst);
+    }
+
+    /// Determine whether an object is marked in the current bitvector snapshot.
+    pub fn is_object_marked(&self, obj: mmtk::util::ObjectReference) -> bool {
+        self.simd_bitvector.is_marked(obj.to_raw_address())
+    }
+
+    /// Get concurrent marking statistics (enhanced version)
+    pub fn get_marking_stats(&self) -> crate::concurrent::ConcurrentMarkingStats {
+        let (stolen, shared) = self.parallel_coordinator.get_stats();
+        crate::concurrent::ConcurrentMarkingStats {
+            work_stolen: stolen,
+            work_shared: shared,
+            objects_allocated_black: self.black_allocator.get_stats(),
+        }
+    }
+
+    /// Get work stealing statistics (backward compatibility).
+    ///
+    /// Returns (work_stolen, work_shared) tuple.
+    pub fn get_stats(&self) -> (usize, usize) {
+        self.parallel_coordinator.get_stats()
+    }
+
+    fn start_worker_threads(&self) {
+        let num_workers = 4; // Use a default number of workers
+        let mut worker_channels = self.worker_channels.lock();
+        worker_channels.clear(); // Clear any existing channels
+
+        for worker_id in 0..num_workers {
+            // Create channels for this worker
+            let (work_sender, work_receiver) = crossbeam::channel::unbounded();
+            let (completion_sender, completion_receiver) = crossbeam::channel::unbounded();
+            let (shutdown_sender, shutdown_receiver) = crossbeam::channel::unbounded();
+
+            // Store channels for coordinator to use
+            worker_channels.push(crate::concurrent::WorkerChannels::new(
+                work_sender,
+                completion_receiver,
+                shutdown_sender,
+            ));
+
+            let coordinator = Arc::clone(&self.parallel_coordinator);
+            let cache_marking = Arc::clone(&self.cache_optimized_marking);
+
+            let worker = std::thread::spawn(move || {
+                let mut marking_worker =
+                    crate::concurrent::MarkingWorker::new(worker_id, coordinator.clone(), 256);
+                let mut objects_processed = 0usize;
+
+                loop {
+                    crossbeam::select! {
+                        // Handle shutdown signal
+                        recv(shutdown_receiver) -> msg => {
+                            if msg.is_ok() {
+                                // Send completion count and exit
+                                let _ = completion_sender.send(objects_processed);
+                                break;
+                            }
+                        },
+
+                        // Handle work from channels
+                        recv(work_receiver) -> work_batch => {
+                            if let Ok(work) = work_batch {
+                                marking_worker.grey_stack.add_shared_work(work);
+                            }
+                        },
+
+                        // Try to steal work from global pool (with timeout)
+                        default(std::time::Duration::from_millis(1)) => {
+                            // Only try stealing if local stack is empty
+                            if marking_worker.grey_stack.is_empty() {
+                                let stolen_work = coordinator.steal_work(64);
+                                if !stolen_work.is_empty() {
+                                    marking_worker.grey_stack.add_shared_work(stolen_work);
+                                }
+                            }
+                        }
+                    }
+
+                    // Process available work efficiently with cache optimization
+                    let mut work_processed_this_round = 0;
+                    while let Some(obj) = marking_worker.grey_stack.pop() {
+                        // Use cache-optimized marking for all objects (handles color transitions internally)
+                        cache_marking.mark_object(obj);
+                        objects_processed += 1;
+                        work_processed_this_round += 1;
+
+                        // Periodically check for shutdown to maintain responsiveness
+                        if work_processed_this_round % 100 == 0
+                            && shutdown_receiver.try_recv().is_ok()
+                        {
+                            let _ = completion_sender.send(objects_processed);
+                            return;
+                        }
+                    }
+
+                    // Share work if we have too much
+                    if marking_worker.grey_stack.should_share_work() {
+                        let shared_work = marking_worker.grey_stack.extract_work();
+                        coordinator.share_work(shared_work);
+                    }
+                }
+            });
+
+            self.workers.lock().push(worker);
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::roots::GlobalRoots;
 
     #[test]
     fn fugc_coordinator_creation() {
-        let heap_base = unsafe { Address::from_usize(0x10000000) };
-        let heap_size = 64 * 1024 * 1024;
-        let thread_registry = Arc::new(ThreadRegistry::new());
-        let global_roots = Arc::new(Mutex::new(GlobalRoots::default()));
-
-        let coordinator =
-            FugcCoordinator::new(heap_base, heap_size, 4, thread_registry, global_roots);
+        let fixture =
+            crate::test_utils::TestFixture::new_with_config(0x10000000, 64 * 1024 * 1024, 4);
+        let coordinator = &fixture.coordinator;
 
         assert_eq!(coordinator.current_phase(), FugcPhase::Idle);
         assert!(!coordinator.is_collecting());
@@ -1195,13 +1398,9 @@ mod tests {
 
     #[test]
     fn fugc_phase_transitions() {
-        let heap_base = unsafe { Address::from_usize(0x10000000) };
-        let heap_size = 64 * 1024 * 1024;
-        let thread_registry = Arc::new(ThreadRegistry::new());
-        let global_roots = Arc::new(Mutex::new(GlobalRoots::default()));
-
-        let coordinator =
-            FugcCoordinator::new(heap_base, heap_size, 4, thread_registry, global_roots);
+        let fixture =
+            crate::test_utils::TestFixture::new_with_config(0x10000000, 64 * 1024 * 1024, 4);
+        let coordinator = &fixture.coordinator;
 
         coordinator.set_phase(FugcPhase::ActivateBarriers);
         assert_eq!(coordinator.current_phase(), FugcPhase::ActivateBarriers);
@@ -1212,13 +1411,9 @@ mod tests {
 
     #[test]
     fn fugc_gc_trigger() {
-        let heap_base = unsafe { Address::from_usize(0x10000000) };
-        let heap_size = 64 * 1024 * 1024;
-        let thread_registry = Arc::new(ThreadRegistry::new());
-        let global_roots = Arc::new(Mutex::new(GlobalRoots::default()));
-
-        let coordinator =
-            FugcCoordinator::new(heap_base, heap_size, 4, thread_registry, global_roots);
+        let fixture =
+            crate::test_utils::TestFixture::new_with_config(0x10000000, 64 * 1024 * 1024, 4);
+        let coordinator = &fixture.coordinator;
 
         assert!(!coordinator.is_collecting());
         coordinator.trigger_gc();

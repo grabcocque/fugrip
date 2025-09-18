@@ -144,48 +144,32 @@ impl AllocatorInterface for MMTkAllocator {
     }
 }
 
-/// Dummy allocator implementation for testing and fallback.
-///
-/// # Examples
-///
-/// ```
-/// use fugrip::allocator::{StubAllocator, AllocatorInterface};
-/// use fugrip::core::ObjectHeader;
-/// use fugrip::thread::MutatorThread;
-///
-/// // Create a stub allocator for testing
-/// let allocator = StubAllocator::new();
-/// let default_allocator = StubAllocator::default();
-///
-/// // Use for safepoint polling in tests
-/// let mutator = MutatorThread::new(1);
-/// allocator.poll_safepoint(&mutator);
-/// ```
-pub struct StubAllocator;
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-impl StubAllocator {
-    pub const fn new() -> Self {
-        Self
-    }
-}
+    #[test]
+    fn test_mmtk_allocator_creation() {
+        let allocator = MMTkAllocator::new();
+        let default_allocator = MMTkAllocator;
 
-impl Default for StubAllocator {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl AllocatorInterface for StubAllocator {
-    fn allocate(
-        &self,
-        _mmtk_mutator: &mut mmtk::Mutator<crate::binding::RustVM>,
-        _header: ObjectHeader,
-        _bytes: usize,
-    ) -> GcResult<*mut u8> {
-        Err(crate::error::GcError::OutOfMemory)
+        // Both should be valid instances
+        let mutator = MutatorThread::new(1);
+        allocator.poll_safepoint(&mutator);
+        default_allocator.poll_safepoint(&mutator);
     }
 
-    fn poll_safepoint(&self, _mutator: &MutatorThread) {
-        // No-op for stub implementation
+    // Note: Testing allocate() requires a valid Mutator, which is complex to create
+    // The StubAllocator always returns OutOfMemory error as designed
+
+    #[test]
+    fn test_allocator_interface_trait() {
+        fn test_allocator<A: AllocatorInterface>(allocator: &A) {
+            let mutator = MutatorThread::new(3);
+            allocator.poll_safepoint(&mutator);
+        }
+
+        test_allocator(&MMTkAllocator::new());
+        // StubAllocator moved to test_utils.rs for testing purposes
     }
 }

@@ -9,6 +9,7 @@
 //! - Root scanning accuracy
 
 use mmtk::util::{Address, ObjectReference};
+use parking_lot::Mutex;
 use proptest::prelude::*;
 use quickcheck::{TestResult, quickcheck};
 use std::collections::HashSet;
@@ -202,7 +203,7 @@ proptest! {
         let heap_size = 64 * 1024 * 1024;
         let tricolor = Arc::new(TricolorMarking::new(heap_base, heap_size));
         let coordinator = Arc::new(fugrip::concurrent::ParallelMarkingCoordinator::new(4));
-        let barrier = WriteBarrier::new(tricolor, coordinator);
+        let barrier = WriteBarrier::new(tricolor, coordinator, heap_base, heap_size);
 
         // Activate barrier
         barrier.activate();
@@ -245,7 +246,7 @@ fn fuzz_concurrent_marking_coordinator() {
 
         let heap_base = unsafe { Address::from_usize(0x10000000) };
         let thread_registry = Arc::new(fugrip::thread::ThreadRegistry::new());
-        let global_roots = Arc::new(std::sync::Mutex::new(fugrip::roots::GlobalRoots::default()));
+        let global_roots = Arc::new(Mutex::new(fugrip::roots::GlobalRoots::default()));
 
         let coordinator = ConcurrentMarkingCoordinator::new(
             heap_base,
@@ -273,7 +274,7 @@ fn fuzz_concurrent_marking_coordinator() {
                 }
                 1 => {
                     // Test statistics retrieval
-                    let stats = coordinator.get_stats();
+                    let stats = coordinator.get_marking_stats();
                     assert!(stats.work_stolen < 1000000); // Sanity check
                 }
                 2 => {
@@ -483,7 +484,7 @@ fn stress_test_concurrent_gc_operations() {
 
     let heap_base = unsafe { Address::from_usize(0x10000000) };
     let thread_registry = Arc::new(fugrip::thread::ThreadRegistry::new());
-    let global_roots = Arc::new(std::sync::Mutex::new(fugrip::roots::GlobalRoots::default()));
+    let global_roots = Arc::new(Mutex::new(fugrip::roots::GlobalRoots::default()));
 
     let coordinator = Arc::new(ConcurrentMarkingCoordinator::new(
         heap_base,
@@ -495,14 +496,17 @@ fn stress_test_concurrent_gc_operations() {
 
     let stop_flag = Arc::new(AtomicBool::new(false));
     let mut handles = Vec::new();
+    let (progress_tx, progress_rx) = crossbeam::channel::bounded(4);
 
     // Spawn multiple threads performing different operations
     for thread_id in 0..4 {
         let coordinator = Arc::clone(&coordinator);
         let stop_flag = Arc::clone(&stop_flag);
 
+        let progress_tx = progress_tx.clone();
         let handle = thread::spawn(move || {
             let mut operation_count = 0;
+            let mut signaled_progress = false;
 
             while !stop_flag.load(Ordering::Relaxed) && operation_count < 1000 {
                 // Generate objects for this thread
@@ -552,6 +556,11 @@ fn stress_test_concurrent_gc_operations() {
 
                 operation_count += 1;
 
+                if !signaled_progress && operation_count >= 50 {
+                    let _ = progress_tx.send(());
+                    signaled_progress = true;
+                }
+
                 // Yield to other threads occasionally
                 if operation_count % 10 == 0 {
                     thread::yield_now();
@@ -564,8 +573,16 @@ fn stress_test_concurrent_gc_operations() {
         handles.push(handle);
     }
 
-    // Let threads run for a bit
-    # Using sleeps to paper over logic bugs is unprofessional(std::time::Duration::from_millis(100));
+    drop(progress_tx);
+
+    for _ in 0..4 {
+        progress_rx
+            .recv()
+            .expect("Thread failed to report progress");
+    }
+
+    // Use proper crossbeam synchronization - let threads complete their work naturally
+    // No sleep calls - threads will terminate when they hit their operation limits
 
     // Signal stop
     stop_flag.store(true, Ordering::Relaxed);
@@ -583,6 +600,6 @@ fn stress_test_concurrent_gc_operations() {
     );
 
     // Verify final state is consistent
-    let final_stats = coordinator.get_stats();
+    let final_stats = coordinator.get_marking_stats();
     assert!(final_stats.work_stolen < total_operations * 10); // Sanity check
 }

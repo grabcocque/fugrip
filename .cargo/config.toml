@@ -1,0 +1,5 @@
+[alias]
+# Main test aliases using nextest
+test-stress = "nextest run --features stress-tests"
+test-all = "nextest run"
+test-smoke = "nextest run --features smoke"

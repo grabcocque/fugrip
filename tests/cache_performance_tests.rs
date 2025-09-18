@@ -4,10 +4,12 @@
 //! effectiveness in real-world scenarios.
 
 use mmtk::util::{Address, ObjectReference};
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::Arc;
 
 use fugrip::cache_optimization::*;
-use fugrip::concurrent::{ConcurrentMarkingCoordinator, ObjectColor, TricolorMarking};
+use fugrip::concurrent::{ObjectColor, TricolorMarking};
+use fugrip::fugc_coordinator::FugcCoordinator;
 
 /// Test cache-friendly allocation patterns
 #[test]
@@ -202,7 +204,7 @@ fn test_concurrent_cache_access() {
     let thread_registry = Arc::new(fugrip::thread::ThreadRegistry::new());
     let global_roots = Arc::new(Mutex::new(fugrip::roots::GlobalRoots::default()));
 
-    let coordinator = ConcurrentMarkingCoordinator::new(
+    let coordinator = FugcCoordinator::new(
         heap_base,
         64 * 1024 * 1024,
         4, // 4 workers
@@ -224,16 +226,15 @@ fn test_concurrent_cache_access() {
 
     // Verify objects were processed
     for obj in &objects {
-        let color = coordinator.tricolor_marking.get_color(*obj);
+        let color = coordinator.tricolor_marking().get_color(*obj);
         // Objects should be either grey (in queue) or black (processed)
         assert_ne!(color, ObjectColor::White, "Object should be marked");
     }
 
     // Verify cache stats are available
-    if let Some(cache_stats) = coordinator.get_cache_stats() {
-        assert!(cache_stats.batch_size > 0);
-        assert!(cache_stats.prefetch_distance > 0);
-    }
+    let cache_stats = coordinator.get_cache_stats();
+    assert!(cache_stats.batch_size > 0);
+    assert!(cache_stats.prefetch_distance > 0);
 }
 
 /// Performance comparison test

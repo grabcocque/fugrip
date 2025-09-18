@@ -1,8 +1,9 @@
 //! FUGC plan implementation that integrates with MMTk's MarkSweep plan and provides
 //! FUGC-specific concurrent marking and optimized write barriers.
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use anyhow::Result;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use mmtk::MMTK;
 use mmtk::util::ObjectReference;
@@ -43,6 +44,24 @@ pub struct FugcPlanManager {
 
     /// Flag to enable/disable concurrent collection features
     concurrent_collection_enabled: AtomicBool,
+
+    /// Allocation statistics tracking
+    allocation_stats: AllocationStats,
+}
+
+/// Statistics for tracking allocations
+pub struct AllocationStats {
+    pub total_allocated: AtomicUsize,
+    pub allocation_count: AtomicUsize,
+}
+
+impl Default for AllocationStats {
+    fn default() -> Self {
+        Self {
+            total_allocated: AtomicUsize::new(0),
+            allocation_count: AtomicUsize::new(0),
+        }
+    }
 }
 
 impl FugcPlanManager {
@@ -60,27 +79,21 @@ impl FugcPlanManager {
     /// // Will panic if mmtk() is called before initialize()
     /// ```
     pub fn new() -> Self {
-        // Initialize FUGC coordinator with basic configuration
-        let thread_registry = Arc::new(crate::thread::ThreadRegistry::new());
-        let global_roots = Arc::new(Mutex::new(crate::roots::GlobalRoots::default()));
+        // Initialize FUGC coordinator using DI container
+        let mut container = crate::di::DIContainer::new();
 
         // Use reasonable defaults for heap configuration
         let heap_base = unsafe { mmtk::util::Address::from_usize(0x10000000) }; // 256MB base
         let heap_size = 128 * 1024 * 1024; // 128MB heap
         let num_workers = 4; // 4 GC workers
 
-        let fugc_coordinator = Arc::new(FugcCoordinator::new(
-            heap_base,
-            heap_size,
-            num_workers,
-            thread_registry,
-            global_roots,
-        ));
+        let fugc_coordinator = container.create_fugc_coordinator(heap_base, heap_size, num_workers);
 
         Self {
             mmtk: None,
             fugc_coordinator,
             concurrent_collection_enabled: AtomicBool::new(true),
+            allocation_stats: AllocationStats::default(),
         }
     }
 
@@ -90,8 +103,15 @@ impl FugcPlanManager {
         self.mmtk = Some(mmtk);
     }
 
-    /// Get the MMTk instance. Panics if not initialized.
-    pub fn mmtk(&self) -> &'static MMTK<RustVM> {
+    /// Get the MMTk instance. Returns an error if not initialized.
+    pub fn mmtk(&self) -> anyhow::Result<&'static MMTK<RustVM>> {
+        self.mmtk.ok_or_else(|| {
+            anyhow::anyhow!("FUGC plan manager not initialized - call initialize() first")
+        })
+    }
+
+    /// Get the MMTk instance (unsafe version for when you know it's initialized)
+    pub fn mmtk_unchecked(&self) -> &'static MMTK<RustVM> {
         self.mmtk.expect("FUGC plan manager not initialized")
     }
 
@@ -155,9 +175,8 @@ impl FugcPlanManager {
 
         let aligned_size = (size + align - 1) & !(align - 1);
 
-        // If concurrent collection is enabled, we would mark newly allocated objects as black
         if self.is_concurrent_collection_enabled() {
-            // In a real implementation, this would coordinate with the black allocator
+            self.fugc_coordinator.ensure_black_allocation_active();
         }
 
         (aligned_size, align)
@@ -165,15 +184,42 @@ impl FugcPlanManager {
 
     /// Post allocation hook for FUGC-specific processing
     pub fn post_alloc(&self, obj: ObjectReference, bytes: usize) {
-        // In a real implementation, this would call MMTk's post_alloc via the mutator
-        // For now, this is a placeholder showing the FUGC-specific processing
-
-        let _ = obj;
-        let _ = bytes;
-
-        // Additional FUGC-specific post-allocation processing
+        // Perform FUGC-specific post-allocation processing
         if self.is_concurrent_collection_enabled() {
             self.fugc_coordinator.black_allocator().allocate_black(obj);
+        }
+
+        // Track allocation statistics
+        self.allocation_stats
+            .total_allocated
+            .fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
+        self.allocation_stats
+            .allocation_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        // Check if we should trigger collection based on allocation pressure
+        self.check_allocation_pressure(bytes);
+    }
+
+    /// Check allocation pressure and potentially trigger collection.
+    /// This integrates with MMTk's allocation paths to provide responsive GC triggering.
+    fn check_allocation_pressure(&self, _bytes_allocated: usize) {
+        // Fast path: only check every N allocations to reduce overhead
+        static ALLOCATION_COUNTER: std::sync::atomic::AtomicUsize =
+            std::sync::atomic::AtomicUsize::new(0);
+        let count = ALLOCATION_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        // Only check pressure every 64 allocations for performance
+        if !count.is_multiple_of(64) {
+            return;
+        }
+
+        // Check if collection should be triggered
+        if self.should_trigger_collection() {
+            // Trigger collection asynchronously to avoid blocking allocation
+            if let Some(mmtk) = self.mmtk {
+                self.coordinate_fugc_with_mmtk_collection(mmtk);
+            }
         }
     }
 
@@ -184,19 +230,15 @@ impl FugcPlanManager {
         slot: mmtk::util::Address,
         target: ObjectReference,
     ) {
-        // In a real implementation, this would call MMTk's write barrier via the mutator
-        // For now, this demonstrates the FUGC write barrier integration
+        unsafe {
+            let slot_ptr = slot.to_mut_ptr::<ObjectReference>();
+            // Always perform the actual store
+            std::ptr::write(slot_ptr, target);
 
-        let _ = src;
-        let _ = slot;
-        let _ = target;
-
-        // FUGC-specific optimized write barrier
-        if self.is_concurrent_collection_enabled() {
-            // Convert the slot address to a mutable pointer for the write barrier
-            let slot_ptr = slot.to_ptr::<ObjectReference>() as *mut ObjectReference;
-            unsafe {
+            if self.is_concurrent_collection_enabled() {
                 self.get_write_barrier().write_barrier(slot_ptr, target);
+                self.fugc_coordinator
+                    .generational_write_barrier(src, target);
             }
         }
     }
@@ -219,25 +261,28 @@ impl FugcPlanManager {
     /// ```
     pub fn get_fugc_stats(&self) -> FugcStats {
         // Get stats from FUGC coordinator components
-        let black_allocator_stats = self.fugc_coordinator.black_allocator().get_stats();
-        let cycle_stats = self.fugc_coordinator.get_cycle_stats();
-
-        // Note: In a real implementation, we would get actual MMTk stats
         let (total_bytes, used_bytes) = if let Some(mmtk) = self.mmtk {
-            // MMTk plans have get_total_pages and other methods, but not get_total_bytes
-            // We'll use placeholder values for demonstration
+            // Calculate actual memory usage from MMTk plan
             let total_pages = mmtk.get_plan().get_total_pages();
             let reserved_pages = mmtk.get_plan().get_reserved_pages();
-            (total_pages * 4096, reserved_pages * 4096) // Assume 4KB pages
+            let page_size = mmtk::util::constants::BYTES_IN_PAGE;
+            (total_pages * page_size, reserved_pages * page_size)
         } else {
-            (0, 0)
+            // Use allocation statistics when MMTk is not available
+            let total_allocated = self
+                .allocation_stats
+                .total_allocated
+                .load(std::sync::atomic::Ordering::Relaxed);
+            (total_allocated, total_allocated)
         };
+
+        let marking_stats = self.fugc_coordinator.get_marking_stats();
 
         FugcStats {
             concurrent_collection_enabled: self.is_concurrent_collection_enabled(),
-            work_stolen: 0, // FUGC uses different work coordination
-            work_shared: cycle_stats.handshakes_performed, // Use handshakes as work sharing metric
-            objects_allocated_black: black_allocator_stats,
+            work_stolen: marking_stats.work_stolen,
+            work_shared: marking_stats.work_shared,
+            objects_allocated_black: marking_stats.objects_allocated_black,
             total_bytes,
             used_bytes,
         }
@@ -267,13 +312,79 @@ impl FugcPlanManager {
     /// coordinator.wait_until_idle(Duration::from_millis(500));
     /// ```
     pub fn gc(&self) {
-        if let Some(_mmtk) = self.mmtk {
-            // Always use FUGC 8-step protocol collection
+        if let Some(mmtk) = self.mmtk {
+            // Integrate FUGC 8-step protocol with MMTk collection phases
+            self.coordinate_fugc_with_mmtk_collection(mmtk);
+        } else {
+            // Fallback to coordinator-only collection for testing/uninitialized state
             self.fugc_coordinator.trigger_gc();
-
-            // Note: In a real implementation, this would coordinate with MMTk's collection API
-            // MMTk handles the actual sweeping and memory reclamation
         }
+    }
+
+    /// Coordinate FUGC's 8-step protocol with MMTk's collection phases.
+    /// This ensures proper integration between FUGC's concurrent marking
+    /// and MMTk's heap management and sweeping.
+    fn coordinate_fugc_with_mmtk_collection(&self, mmtk: &'static mmtk::MMTK<RustVM>) {
+        use crate::fugc_coordinator::FugcPhase;
+
+        // Step 1: Check if we should trigger collection
+        if !self.should_trigger_collection() {
+            return;
+        }
+
+        // Step 2: Start FUGC 8-step protocol
+        self.fugc_coordinator.trigger_gc();
+
+        // Step 3: Wait for FUGC to reach marking phase, then coordinate with MMTk
+        let coordinator = Arc::clone(&self.fugc_coordinator);
+
+        // Poll FUGC coordinator state and coordinate with MMTk phases
+        std::thread::spawn(move || {
+            // Wait for write barriers to be activated (Step 2 of FUGC protocol)
+            // Use the coordinator's phase advancement helper which listens on the
+            // internal channel for phase transitions instead of busy-waiting.
+            let _ = coordinator.advance_to_phase(FugcPhase::ActivateBarriers);
+
+            // Now MMTk can begin its collection knowing FUGC barriers are active
+            // This handles allocation failure and coordinates with FUGC marking
+            // We get the first available mutator thread to trigger the collection
+            use crate::binding::MUTATOR_MAP;
+            if let Some(entry) = MUTATOR_MAP.iter().next() {
+                let tls = mmtk::util::opaque_pointer::VMMutatorThread(
+                    mmtk::util::opaque_pointer::VMThread(
+                        mmtk::util::opaque_pointer::OpaquePointer::from_address(unsafe {
+                            mmtk::util::Address::from_usize(*entry.key())
+                        }),
+                    ),
+                );
+                mmtk::memory_manager::handle_user_collection_request::<RustVM>(mmtk, tls);
+            }
+
+            // FUGC will complete its 8-step protocol including sweep coordination
+            // MMTk handles the actual memory reclamation and page management
+        });
+    }
+
+    /// Determine if collection should be triggered based on allocation pressure
+    /// and FUGC coordinator state.
+    fn should_trigger_collection(&self) -> bool {
+        // Don't trigger if already collecting
+        if self.is_fugc_collecting() {
+            return false;
+        }
+
+        // Simple heuristic: trigger after significant allocation activity
+        let total_allocated = self
+            .allocation_stats
+            .total_allocated
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let allocation_count = self
+            .allocation_stats
+            .allocation_count
+            .load(std::sync::atomic::Ordering::Relaxed);
+
+        // Trigger collection if we've allocated more than 32MB or 10k objects
+        total_allocated > 32 * 1024 * 1024 || allocation_count > 10_000
     }
 
     /// Get access to the FUGC coordinator for advanced operations.
@@ -450,13 +561,13 @@ impl Default for FugcPlanManager {
 /// ```
 /// use fugrip::plan::create_fugc_mmtk_options;
 ///
-/// let options = create_fugc_mmtk_options();
+/// let options = create_fugc_mmtk_options().expect("Failed to create MMTk options");
 ///
 /// // Options are configured for FUGC characteristics
 /// // Thread count is optimized for concurrent collection
 /// // Stress factor is set for incremental collection behavior
 /// ```
-pub fn create_fugc_mmtk_options() -> mmtk::util::options::Options {
+pub fn create_fugc_mmtk_options() -> Result<mmtk::util::options::Options> {
     let mut options = mmtk::util::options::Options::default();
 
     // Use MarkSweep plan - optimal for FUGC's non-moving concurrent design
@@ -464,19 +575,19 @@ pub fn create_fugc_mmtk_options() -> mmtk::util::options::Options {
         .plan
         .set(mmtk::util::options::PlanSelector::MarkSweep)
     {
-        panic!("Failed to set MarkSweep plan");
+        anyhow::bail!("Failed to set MarkSweep plan");
     }
 
     // Enable concurrent collection features
     let thread_count = std::cmp::max(1, num_cpus::get() / 2); // Reserve half CPUs for mutators
     if !options.threads.set(thread_count) {
-        panic!("Failed to set thread count");
+        anyhow::bail!("Failed to set thread count to {}", thread_count);
     }
 
     // Configure for FUGC-style incremental collection
     if !options.stress_factor.set(4096) {
-        panic!("Failed to set stress factor");
+        anyhow::bail!("Failed to set stress factor to 4096");
     }
 
-    options
+    Ok(options)
 }

@@ -59,3 +59,40 @@ impl std::error::Error for GcError {}
 
 /// Result type for GC operations
 pub type GcResult<T> = Result<T, GcError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn display_formats_readable_messages() {
+        let cases = [
+            (GcError::OutOfMemory, "Out of memory"),
+            (GcError::InvalidReference, "Invalid object reference"),
+            (
+                GcError::ThreadError("register failed".into()),
+                "Thread error: register failed",
+            ),
+            (
+                GcError::MmtkError("plan init".into()),
+                "MMTk error: plan init",
+            ),
+            (GcError::PhaseTransitionFailed, "GC phase transition failed"),
+            (GcError::EmergencyStop, "Emergency stop requested"),
+        ];
+
+        for (error, expected) in cases {
+            assert_eq!(error.to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn gc_result_alias_behaves_like_result() {
+        fn take_result(value: GcResult<usize>) -> usize {
+            value.unwrap_or_default()
+        }
+
+        assert_eq!(take_result(Ok(42)), 42);
+        assert_eq!(take_result(Err(GcError::OutOfMemory)), 0);
+    }
+}

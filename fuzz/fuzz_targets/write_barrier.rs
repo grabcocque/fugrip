@@ -1,6 +1,6 @@
 #![no_main]
 
-use fugrip::concurrent::{ObjectColor, ParallelMarkingCoordinator, TricolorMarking, WriteBarrier};
+use fugrip::test_utils::TestFixture;
 use libfuzzer_sys::fuzz_target;
 use mmtk::util::{Address, ObjectReference};
 use std::sync::Arc;
@@ -10,19 +10,20 @@ fuzz_target!(|data: &[u8]| {
         return;
     }
 
-    // Set up GC infrastructure
     let heap_base = unsafe { Address::from_usize(0x10000000) };
     let heap_size = 0x1000000; // 16MB
-    let tricolor_marking = Arc::new(TricolorMarking::new(heap_base, heap_size));
-    let coordinator = Arc::new(ParallelMarkingCoordinator::new(1));
-    let barrier = WriteBarrier::new(tricolor_marking, coordinator);
 
-    // Parse input data
+    let fixture = TestFixture::new_with_config(heap_base.as_usize(), heap_size, 2);
+    let coordinator = Arc::clone(&fixture.coordinator);
+    let barrier = Arc::clone(coordinator.write_barrier());
+
     let num_operations = (data[0] as usize % 32) + 1; // 1-32 operations
     let should_activate = data[1] & 1 == 1;
 
     if should_activate {
         barrier.activate();
+    } else {
+        barrier.deactivate();
     }
 
     // Create some test objects with proper alignment
@@ -33,20 +34,19 @@ fuzz_target!(|data: &[u8]| {
         })
         .collect();
 
-    // Set initial colors
+    // Set initial colors through the coordinator so state stays consistent
     for (i, &obj) in objects.iter().enumerate() {
         let color = match data.get(i + 2) {
             Some(&val) => match val % 3 {
-                0 => ObjectColor::White,
-                1 => ObjectColor::Grey,
-                _ => ObjectColor::Black,
+                0 => fugrip::concurrent::ObjectColor::White,
+                1 => fugrip::concurrent::ObjectColor::Grey,
+                _ => fugrip::concurrent::ObjectColor::Black,
             },
-            None => ObjectColor::White,
+            None => fugrip::concurrent::ObjectColor::White,
         };
-        barrier.tricolor_marking.set_color(obj, color);
+        coordinator.tricolor_marking().set_color(obj, color);
     }
 
-    // Perform write barrier operations
     let mut data_idx = 18;
     for _ in 0..num_operations {
         if data_idx + 2 >= data.len() {
@@ -60,7 +60,6 @@ fuzz_target!(|data: &[u8]| {
         let mut slot = objects[slot_idx];
         let new_value = objects[value_idx];
 
-        // Perform write barrier operation
         unsafe {
             barrier.write_barrier(&mut slot as *mut ObjectReference, new_value);
         }

@@ -6,10 +6,12 @@
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use mmtk::util::{Address, ObjectReference};
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::Arc;
 
 use fugrip::cache_optimization::*;
-use fugrip::concurrent::{ConcurrentMarkingCoordinator, TricolorMarking};
+use fugrip::concurrent::TricolorMarking;
+use fugrip::fugc_coordinator::FugcCoordinator;
 
 /// Generate a realistic object graph for benchmarking
 fn generate_object_graph(num_objects: usize, locality_factor: f64) -> Vec<ObjectReference> {
@@ -26,9 +28,13 @@ fn generate_object_graph(num_objects: usize, locality_factor: f64) -> Vec<Object
             base_addr + (i * 1024) + fastrand::usize(..512)
         };
 
-        if let Some(obj_ref) =
-            ObjectReference::from_raw_address(unsafe { Address::from_usize(addr) })
-        {
+        debug_assert!(
+            addr > 0 && addr < 0x20000000,
+            "Invalid address generated: {}",
+            addr
+        );
+        let raw_addr = unsafe { Address::from_usize(addr) };
+        if let Some(obj_ref) = ObjectReference::from_raw_address(raw_addr) {
             objects.push(obj_ref);
         }
     }
@@ -39,15 +45,17 @@ fn generate_object_graph(num_objects: usize, locality_factor: f64) -> Vec<Object
 /// Benchmark cache-aware allocation strategies
 fn bench_cache_allocation(c: &mut Criterion) {
     let mut group = c.benchmark_group("cache_allocation");
+    group.warm_up_time(std::time::Duration::from_millis(500));
+    group.measurement_time(std::time::Duration::from_secs(5));
+    group.sample_size(100);
 
     for size in [64, 256, 1024, 4096].iter() {
         group.throughput(Throughput::Bytes(*size as u64));
 
         group.bench_with_input(BenchmarkId::new("cache_aware", size), size, |b, &size| {
-            let allocator = CacheAwareAllocator::new(
-                unsafe { Address::from_usize(0x10000000) },
-                1024 * 1024, // 1MB
-            );
+            let base_addr = unsafe { Address::from_usize(0x10000000) };
+            debug_assert!(base_addr.as_usize() > 0, "Invalid base address");
+            let allocator = CacheAwareAllocator::new(base_addr, 1024 * 1024); // 1MB
 
             b.iter(|| {
                 allocator.reset();
@@ -77,8 +85,11 @@ fn bench_cache_allocation(c: &mut Criterion) {
 /// Benchmark locality-aware work stealing
 fn bench_work_stealing(c: &mut Criterion) {
     let mut group = c.benchmark_group("work_stealing");
+    group.warm_up_time(std::time::Duration::from_millis(500));
+    group.measurement_time(std::time::Duration::from_secs(5));
+    group.sample_size(100);
 
-    for num_objects in [100, 1000, 10000].iter() {
+    for num_objects in [100, 1000, 10000, 50000].iter() {
         for locality in [0.1, 0.5, 0.9].iter() {
             let objects = generate_object_graph(*num_objects, *locality);
 
@@ -131,8 +142,11 @@ fn bench_work_stealing(c: &mut Criterion) {
 /// Benchmark cache-optimized marking vs standard marking
 fn bench_marking_strategies(c: &mut Criterion) {
     let mut group = c.benchmark_group("marking_strategies");
+    group.warm_up_time(std::time::Duration::from_millis(500));
+    group.measurement_time(std::time::Duration::from_secs(5));
+    group.sample_size(100);
 
-    for num_objects in [1000, 5000, 20000].iter() {
+    for num_objects in [1000, 5000, 20000, 100000].iter() {
         for locality in [0.2, 0.8].iter() {
             let objects = generate_object_graph(*num_objects, *locality);
 
@@ -144,8 +158,9 @@ fn bench_marking_strategies(c: &mut Criterion) {
                 &objects,
                 |b, objects| {
                     let heap_base = unsafe { Address::from_usize(0x10000000) };
-                    let tricolor = Arc::new(TricolorMarking::new(heap_base, 64 * 1024 * 1024));
-                    let cache_marking = CacheOptimizedMarking::new(tricolor);
+                    debug_assert!(heap_base.as_usize() > 0, "Invalid heap base");
+                    let _tricolor = Arc::new(TricolorMarking::new(heap_base, 64 * 1024 * 1024));
+                    let cache_marking = CacheOptimizedMarking::new(64);
 
                     b.iter(|| {
                         cache_marking.mark_objects_batch(objects);
@@ -161,6 +176,7 @@ fn bench_marking_strategies(c: &mut Criterion) {
                 &objects,
                 |b, objects| {
                     let heap_base = unsafe { Address::from_usize(0x10000000) };
+                    debug_assert!(heap_base.as_usize() > 0, "Invalid heap base");
                     let tricolor = Arc::new(TricolorMarking::new(heap_base, 64 * 1024 * 1024));
 
                     b.iter(|| {
@@ -179,6 +195,9 @@ fn bench_marking_strategies(c: &mut Criterion) {
 /// Benchmark memory layout optimization effectiveness
 fn bench_memory_layout(c: &mut Criterion) {
     let mut group = c.benchmark_group("memory_layout");
+    group.warm_up_time(std::time::Duration::from_millis(500));
+    group.measurement_time(std::time::Duration::from_secs(5));
+    group.sample_size(100);
 
     let optimizer = MemoryLayoutOptimizer::new();
     let sizes = vec![32, 64, 128, 256, 512];
@@ -194,6 +213,10 @@ fn bench_memory_layout(c: &mut Criterion) {
         b.iter(|| {
             for i in 0..1000 {
                 let object_addr = unsafe { Address::from_usize(0x10000 + i * 128) };
+                debug_assert!(
+                    object_addr.as_usize() > 0,
+                    "Invalid object address in metadata colocation"
+                );
                 let metadata_addr = optimizer.colocate_metadata(object_addr, 16);
                 std::hint::black_box(metadata_addr);
             }
@@ -206,9 +229,12 @@ fn bench_memory_layout(c: &mut Criterion) {
 /// Benchmark comprehensive GC cycle with cache optimizations
 fn bench_gc_cycle_cache_impact(c: &mut Criterion) {
     let mut group = c.benchmark_group("gc_cycle_cache");
+    group.warm_up_time(std::time::Duration::from_millis(500));
+    group.measurement_time(std::time::Duration::from_secs(5));
+    group.sample_size(100);
 
-    for heap_size in [1024 * 1024, 16 * 1024 * 1024].iter() {
-        for object_count in [5000, 50000].iter() {
+    for heap_size in [1024 * 1024, 16 * 1024 * 1024, 64 * 1024 * 1024].iter() {
+        for object_count in [5000, 50000, 200000].iter() {
             group.bench_with_input(
                 BenchmarkId::new(
                     "optimized",
@@ -219,10 +245,11 @@ fn bench_gc_cycle_cache_impact(c: &mut Criterion) {
                     b.iter(|| {
                         let objects = generate_object_graph(object_count, 0.7);
                         let heap_base = unsafe { Address::from_usize(0x10000000) };
+                        debug_assert!(heap_base.as_usize() > 0, "Invalid heap base in GC cycle");
 
                         // Simulate GC cycle with cache optimizations
-                        let tricolor = Arc::new(TricolorMarking::new(heap_base, heap_size));
-                        let cache_marking = CacheOptimizedMarking::new(Arc::clone(&tricolor));
+                        let _tricolor = Arc::new(TricolorMarking::new(heap_base, heap_size));
+                        let cache_marking = CacheOptimizedMarking::new(64);
 
                         // Simulate mark phase
                         cache_marking.mark_objects_batch(&objects);
@@ -251,6 +278,10 @@ fn bench_gc_cycle_cache_impact(c: &mut Criterion) {
                     b.iter(|| {
                         let objects = generate_object_graph(object_count, 0.7);
                         let heap_base = unsafe { Address::from_usize(0x10000000) };
+                        debug_assert!(
+                            heap_base.as_usize() > 0,
+                            "Invalid heap base in standard GC cycle"
+                        );
 
                         // Simulate standard GC cycle
                         let tricolor = Arc::new(TricolorMarking::new(heap_base, heap_size));
@@ -278,8 +309,11 @@ fn bench_gc_cycle_cache_impact(c: &mut Criterion) {
 /// Benchmark concurrent marking with different thread counts and cache strategies
 fn bench_concurrent_marking_scalability(c: &mut Criterion) {
     let mut group = c.benchmark_group("concurrent_marking_scalability");
+    group.warm_up_time(std::time::Duration::from_millis(500));
+    group.measurement_time(std::time::Duration::from_secs(5));
+    group.sample_size(100);
 
-    for thread_count in [1, 2, 4, 8].iter() {
+    for thread_count in [1, 2, 4, 8, 16].iter() {
         for cache_optimization in [false, true].iter() {
             group.bench_with_input(
                 BenchmarkId::new(
@@ -296,11 +330,15 @@ fn bench_concurrent_marking_scalability(c: &mut Criterion) {
 
                     b.iter(|| {
                         let heap_base = unsafe { Address::from_usize(0x10000000) };
+                        debug_assert!(
+                            heap_base.as_usize() > 0,
+                            "Invalid heap base in concurrent marking"
+                        );
                         let thread_registry = Arc::new(fugrip::thread::ThreadRegistry::new());
                         let global_roots =
                             Arc::new(Mutex::new(fugrip::roots::GlobalRoots::default()));
 
-                        let coordinator = ConcurrentMarkingCoordinator::new(
+                        let coordinator = FugcCoordinator::new(
                             heap_base,
                             64 * 1024 * 1024,
                             thread_count,
@@ -313,7 +351,7 @@ fn bench_concurrent_marking_scalability(c: &mut Criterion) {
                         } else {
                             for obj in &objects {
                                 coordinator
-                                    .tricolor_marking
+                                    .tricolor_marking()
                                     .set_color(*obj, fugrip::concurrent::ObjectColor::Grey);
                             }
                         }

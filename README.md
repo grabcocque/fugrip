@@ -1,397 +1,75 @@
-# Fugrip: FUGC-Inspired Concurrent Garbage Collector
+Fil's Unbelievable Garbage Collector
+Fil-C uses a parallel concurrent on-the-fly grey-stack Dijkstra accurate non-moving garbage collector called FUGC (Fil's Unbelievable Garbage Collector). You can find the source code for the collector itself in fugc.c, though be warned, that code cannot possibly work without lots of support logic in the rest of the runtime and in the compiler.
 
-Fugrip is a high-performance concurrent garbage collector for Rust VMs, inspired by FUGC (Functional Update Garbage Collection) principles. It integrates with MMTk to provide modern GC capabilities with excellent performance characteristics.
+Let's break down FUGC's features:
 
-## 🚀 Key Features
+Parallel: marking and sweeping happen in multiple threads, in parallel. The more cores you have, the faster the collector finishes.
 
-### Concurrent Marking Infrastructure
+Concurrent: marking and sweeping happen on some threads other than the mutator threads (i.e. your program's threads). Mutator threads don't have to stop and wait for the collector. The interaction between the collector thread and mutator threads is mostly non-blocking (locking is only used on allocation slow paths).
 
-- **Dijkstra Write Barriers**: Prevents missed objects during concurrent marking
-- **Tricolor Marking**: Atomic color transitions with 2-bit per object encoding
-- **Parallel Marking Workers**: Work-stealing coordinator with load balancing
-- **Black Allocation**: Objects allocated black during marking to reduce barrier overhead
-- **Concurrent Root Scanning**: Thread-safe root enumeration during marking
+On-the-fly: there is no global stop-the-world, but instead we use "soft handshakes" (aka "ragged safepoints"). This means that the GC may ask threads to do some work (like scan stack), but threads do this asynchronously, on their own time, without waiting for the collector or other threads. The only "pause" threads experience is the callback executed in response to the soft handshake, which does work bounded by that thread's stack height. That "pause" is usually shorter than the slowest path you might take through a typical malloc implementation.
 
-### FUGC-Inspired Object Management
+Grey-stack: the collector assumes it must rescan thread stacks to fixpoint. That is, GC starts with a soft handshake to scan stack, and then marks in a loop. If this loop runs out of work, then FUGC does another soft handshake. If that reveals more objects, then concurrent marking resumes. This prevents us from having a load barrier (no instrumentation runs when loading a pointer from the heap into a local variable). Only a store barrier is necessary, and that barrier is very simple. This fixpoint converges super quickly because all newly allocated objects during GC are pre-marked.
 
-- **Object Classification**: Age-based (young/old) and mutability-based categorization
-- **Generational Hints**: Framework for future generational collection
-- **Precise Lifetimes**: Fine-grained object lifecycle management
+Dijkstra: storing a pointer field in an object that's in the heap or in a global variable while FUGC is in its marking phase causes the newly pointed-to object to get marked. This is called a Dijkstra barrier and it is a kind of store barrier. Due to the grey stack, there is no load barrier like in the classic Dijkstra collector. The FUGC store barrier uses a compare-and-swap with relaxed memory ordering on the slowest path (if the GC is running and the object being stored was not already marked).
 
-### Performance Optimizations
+Accurate: the GC accurately (aka precisely, aka exactly) finds all pointers to objects, nothing more, nothing less. llvm::FilPizlonator ensures that the runtime always knows where the root pointers are on the stack and in globals. The Fil-C runtime has a clever API and Ruby code generator for tracking pointers in low-level code that interacts with pizlonated code. All objects know where their outgoing pointers are - they can only be in the InvisiCap auxiliary allocation.
 
-- **Inline Barrier Fast Path**: 2.5x performance improvement when barriers inactive
-- **Relaxed Memory Ordering**: Optimized atomic operations for hot paths
-- **Branch Prediction Hints**: Compiler-guided optimization for common cases
-- **Multiple Barrier Variants**: Choose appropriate barrier for your use case
+Non-moving: the GC doesn't move objects. This makes concurrency easy to implement and avoids a lot of synchronization between mutator and collector. However, FUGC will "move" pointers to free objects (it will repoint the capability pointer to the free singleton so it doesn't have to mark the freed allocation).
 
-## 📊 Performance Characteristics
+This makes FUGC an advancing wavefront garbage collector. Advancing wavefront means that the mutator cannot create new work for the collector by modifying the heap. Once an object is marked, it'll stay marked for that GC cycle. It's also an incremental update collector, since some objects that would have been live at the start of GC might get freed if they become free during the collection cycle.
 
-Based on comprehensive benchmarks:
+FUGC relies on safepoints, which comprise:
 
-```
-Write Barrier Performance (ns/op):
-├── Inactive barrier (fast path):     1.05 ns
-├── Active barriers (slow path):      2.5-2.6 ns
-└── Performance gain:                 2.5x faster when inactive
+Pollchecks emitted by the compiler. The llvm::FilPizlonator compiler pass emits pollchecks often enough that only a bounded amount of progress is possible before a pollcheck happens. The fast path of a pollcheck is just a load-and-branch. The slow path runs a pollcheck callback, which does work for FUGC.
 
-Tricolor Marking (ns/1000 ops):
-├── Set color operations:            ~268 ns
-└── Get color operations:            ~259 ns
-```
+Soft handshakes, which request that a pollcheck callback is run on all threads and then waits for this to happen.
 
-## 🏗️ Architecture
+Enter/exit functionality. This is for allowing threads to block in syscalls or long-running runtime functions without executing pollchecks. Threads that are in the exited state will have pollcheck callbacks executed by the collector itself (when it does the soft handshake). The only way for a Fil-C program to block is either by looping while entered (which means executing a pollcheck at least once per loop iteration, often more) or by calling into the runtime and then exiting.
 
-### Core Components
+Safepointing is essential for supporting threading (Fil-C supports pthreads just fine) while avoiding a large class of race conditions. For example, safepointing means that it's safe to load a pointer from the heap and then use it; the GC cannot possibly delete that memory until the next pollcheck or exit. So, the compiler and runtime just have to ensure that the pointer becomes tracked for stack scanning at some point between when it's loaded and when the next pollcheck/exit happens, and only if the pointer is still live at that point.
 
-#### Write Barriers
+The safepointing functionality also supports stop-the-world, which is currently used to implement fork(2) and for debugging FUGC (if you set the FUGC_STW environment variable to 1 then the collector will stop the world and this is useful for triaging GC bugs; if the bug reproduces in STW then it means it's not due to issues with the store barrier). The safepoint infrastructure also allows safe signal delivery; Fil-C makes it possible to use signal handling in a practical way. Safepointing is a common feature of virtual machines that support multiple threads and accurate garbage collection, though usually, they are only used to stop the world rather than to request asynchronous activity from all threads. See here for a write-up about how OpenJDK does it. The Fil-C implementation is in filc_runtime.c.
 
-```rust
-// Multiple barrier variants for different performance needs
-barrier.write_barrier(&mut slot, new_value);        // Standard API
-barrier.write_barrier_fast(&mut slot, new_value);   // Optimized fast path
-barrier.write_barrier_inline(&mut slot, new_value); // Ultra-fast inline
-```
+Here's the basic flow of the FUGC collector loop:
 
-#### Concurrent Marking
+Wait for the GC trigger.
+Turn on the store barrier, then soft handshake with a no-op callback.
+Turn on black allocation (new objects get allocated marked), then soft handshake with a callback that resets thread-local caches.
+Mark global roots.
+Soft handshake with a callback that requests stack scan and another reset of thread-local caches. If all collector mark stacks are empty after this, go to step 7.
+Tracing: for each object in the mark stack, mark its outgoing references (which may grow the mark stack). Do this until the mark stack is empty. Then go to step 5.
+Turn off the store barrier and prepare for sweeping, then soft handshake to reset thread-local caches again.
+Perform the sweep. During the sweep, objects are allocated black if they happen to be allocated out of not-yet-swept pages, or white if they are allocated out of alraedy-swept pages.
+Victory! Go back to step 1.
+If you're familiar with the literature, FUGC is sort of like the DLG (Doligez-Leroy-Gonthier) collector (published in two papers because they had a serious bug in the first one), except it uses the Dijkstra barrier and a grey stack, which simplifies everything but isn't as academically pure (FUGC fixpoints, theirs doesn't). I first came up with the grey-stack Dijkstra approach when working on Fiji VM's CMR and Schism garbage collectors. The main advantage of FUGC over DLG is that it has a simpler (cheaper) store barrier and it's a slightly more intuitive algorithm. While the fixpoint seems like a disadvantage, in practice it converges after a few iterations.
 
-```rust
-// Full concurrent marking workflow
-let coordinator = ConcurrentMarkingCoordinator::new(heap_base, heap_size, num_workers, thread_registry, global_roots);
-coordinator.start_marking(root_objects);
-coordinator.wait_for_completion();
-```
+Additionally, FUGC relies on a sweeping algorithm based on bitvector SIMD. This makes sweeping insanely fast compared to marking. This is made thanks to the Verse heap config that I added to libpas. FUGC typically spends <5% of its time sweeping.
 
-#### Object Classification
+Bonus Features
+FUGC supports a most of C-style, Java-style, and JavaScript-style memory management. Let's break down what that means.
 
-```rust
-// FUGC-style object categorization
-let classifier = ObjectClassifier::new();
-classifier.classify_object(object, ObjectClass {
-    age: ObjectAge::Young,
-    mutability: ObjectMutability::Mutable,
-    size_class: SizeClass::Small,
-});
-```
+Freeing Objects
+If you call free, the runtime will flag the object as free and all subsequent accesses to the object will trap. Additionally, FUGC will not scan outgoing references from the object (since they cannot be accessed anymore).
 
-### MMTk Integration
+Also, FUGC will redirect all capability pointers (lowers in InvisiCaps jargon) to free objects to point at the free singleton object instead. This allows freed object memory to really be reclaimed.
 
-Fugrip provides complete MMTk VM binding implementation:
+This means that freeing objects can be used to prevent GC-induced leaks. Surprisingly, a program that works fine with malloc/free (no leaks, no crashes) that gets converted to GC the naive way (malloc allocates from the GC and free is a no-op) may end up leaking due to dangling pointers that the program never accesses. Those dangling pointers will be treated as live by the GC. In FUGC, if you freed those pointers, then FUGC will really kill them.
 
-- **VM Binding Traits**: `RustVM`, `RustActivePlan`, `RustReferenceGlue`
-- **Object Model**: `RustObjectModel` with header management
-- **Root Scanning**: `RustScanning` for thread stacks and globals
-- **Allocation**: `MMTkAllocator` and `StubAllocator` implementations
+Finalizers
+FUGC supports finalizer queues using the zgc_finq API in stdfil.h. This feature allows you to implement finalizers in the style of Java, except that you get to set up your own finalizer queues and choose which thread processes them.
 
-## 🔧 Usage Examples
+Weak References
+FUGC supports weak references using the zweak API in stdfil.h. Weak references work just like the weak references in Java, except there are no reference queues. Fil-C does not support phantom or soft references.
 
-### Basic Write Barrier Usage
+Weak Maps
+FUGC supports weak maps using the zweak_map API in stdfil.h. This API works almost exactly like the JavaScript WeakMap, except that Fil-C's weak maps allow you to iterate all of their elements and get a count of elements.
 
-```rust
-use fugrip::concurrent::{WriteBarrier, TricolorMarking, ParallelMarkingCoordinator};
-use mmtk::util::Address;
-use std::sync::Arc;
+Conclusion
+FUGC allows Fil-C to give the strongest possible guarantees on misuse of free:
 
-// Set up GC infrastructure
-let marking = Arc::new(TricolorMarking::new(heap_base, heap_size));
-let coordinator = Arc::new(ParallelMarkingCoordinator::new(4));
-let barrier = WriteBarrier::new(marking, coordinator);
+Freeing an object and then accessing it is guaranteed to result in a trap. Unlike tag-based approaches, which will trap on use after free until until memory reclamation is forced, FUGC means you will trap even after memory is reclaimed (due to lower repointing to the free singleton).
 
-// Use in mutator code
-barrier.activate(); // Enable barriers during marking
-unsafe {
-    barrier.write_barrier(&mut object_slot, new_object_reference);
-}
-```
+Freeing an object twice is guaranteed to result in a trap.
 
-### FUGC Plan Manager Integration
-
-```rust
-use fugrip::plan::FugcPlanManager;
-
-// Initialize FUGC plan manager
-let mut plan_manager = FugcPlanManager::new();
-
-// Access unified coordinator for 8-step protocol
-let coordinator = plan_manager.get_fugc_coordinator();
-
-// Trigger collection through plan manager
-plan_manager.gc();  // Initiates 8-step protocol
-
-// Monitor collection progress
-while plan_manager.is_fugc_collecting() {
-    let phase = plan_manager.fugc_phase();
-    println!("Current phase: {:?}", phase);
-}
-
-// Access performance statistics
-let stats = plan_manager.get_fugc_stats();
-println!("Cycles completed: {}", stats.work_shared);
-```
-
-### Concurrent Marking Workflow
-
-```rust
-// Initialize coordinator through plan manager
-let plan_manager = FugcPlanManager::new();
-let coordinator = plan_manager.get_fugc_coordinator();
-
-// 8-step protocol executes automatically
-coordinator.trigger_gc();
-
-// Mutators continue running with barriers active during Steps 2-6
-// Workers process objects concurrently during marking phases
-
-// Wait for completion
-coordinator.wait_until_idle(Duration::from_millis(500));
-```
-
-## 🎯 FUGC 8-Step Protocol
-
-Fugrip implements the complete FUGC 8-step concurrent collection protocol:
-
-### Protocol Sequencing
-
-1. **Step 1 - Idle State & Trigger**: Collection coordinator waits in idle state until `trigger_gc()` called
-2. **Step 2 - Write Barrier Activation**: Enable Dijkstra write barriers before any marking begins
-3. **Step 3 - Black Allocation**: Switch allocator to black allocation mode during concurrent marking
-4. **Step 4 - Global Root Marking**: Mark all global roots (static variables, VM globals) as grey
-5. **Step 5 - Stack Scanning**: Perform soft handshakes with mutator threads to scan stack roots
-6. **Step 6 - Tracing Termination**: Complete concurrent marking, ensure tricolor invariant satisfied
-7. **Step 7 - Barrier Deactivation**: Disable write barriers and prepare for sweep phase
-8. **Step 8 - Page-Based Sweep**: Sweep unmarked objects and update allocation page colors
-
-### Coordinator APIs
-
-The `FugcCoordinator` exposes these essential APIs for external control:
-
-```rust
-// Collection Control
-coordinator.trigger_gc();                    // Initiate 8-step protocol
-coordinator.wait_until_idle(timeout);        // Block until collection completes
-
-// Phase Monitoring
-coordinator.current_phase();                 // Get current protocol step
-coordinator.is_collecting();                 // Check if collection active
-
-// Statistics & Diagnostics
-coordinator.get_cycle_stats();               // Get collection cycle metrics
-coordinator.get_fugc_stats();                // Get performance statistics
-
-// Soft Handshakes (Internal)
-coordinator.request_handshake(thread_id);    // Request mutator cooperation
-coordinator.complete_handshake(thread_id);   // Signal handshake completion
-```
-
-### Testing Infrastructure Requirements
-
-For realistic testing of the 8-step protocol, the test suite requires:
-
-#### Background Mutator Simulation
-
-```rust
-// Spawns realistic mutator threads that poll safepoints
-fn spawn_mutator(mutator: MutatorThread) -> (JoinHandle<()>, Arc<AtomicBool>) {
-    let handle = thread::spawn(move || {
-        while running.load(Ordering::Relaxed) {
-            worker.poll_safepoint();  // Critical for handshake realism
-            # Using sleeps to paper over logic bugs is unprofessional(Duration::from_millis(1));
-        }
-    });
-}
-```
-
-#### Phase Manager Shim
-
-```rust
-// Lightweight helper for phase transition testing
-impl FugcCoordinator {
-    pub fn advance_to_phase(&self, target_phase: FugcPhase) -> bool {
-        // Used by tests to validate specific protocol steps
-    }
-
-    pub fn wait_for_phase_transition(&self, from: FugcPhase, to: FugcPhase) -> bool {
-        // Ensures tests can observe protocol sequencing
-    }
-}
-```
-
-## 🎯 FUGC Design Principles
-
-Fugrip implements several FUGC-inspired concepts:
-
-1. **Incremental Updates**: Write barriers provide precise tracking of object graph changes
-2. **Concurrent Processing**: Parallel workers minimize pause times
-3. **Color-Abstraction**: Tricolor marking provides clear object states
-4. **Work Stealing**: Dynamic load balancing across marking threads
-5. **Black Allocation**: Reduces redundant barrier operations
-6. **Soft Handshakes**: Cooperative stack scanning without stop-the-world pauses
-
-## 🧪 Testing & Quality
-
-- **56 Comprehensive Tests**: Unit and integration test coverage
-- **Performance Benchmarks**: Criterion-based performance testing
-- **Memory Safety**: Extensive use of Rust's ownership system
-- **Thread Safety**: All concurrent operations properly synchronized
-
-## 📈 Future Enhancements
-
-- **Generational Collection**: Build on current age-based classification
-- **Compaction**: Add moving collection capabilities
-- **NUMA Awareness**: Optimize for multi-socket systems
-- **Custom Allocators**: Specialized allocators for different object types
-
-## 🤝 Contributing
-
-Fugrip welcomes contributions in concurrent GC research, performance optimizations, and MMTk integration improvements.
-
----
-
-_Built with ❤️ for high-performance Rust VMs_
-
-**MMTk Plan Composition:**
-
-```rust
-// Custom plan combining FUGC concepts with MMTk infrastructure
-pub struct RustVMPlan<VM: VMBinding> {
-    common: CommonPlan<VM>,
-    mark_compact: MarkCompact<VM>, // Non-moving as per your plan
-    barrier: DijkstraBarrier<VM>,
-    // FUGC-style generational if needed later
-}
-```
-
-**VM Binding Layer Design:**
-
-- **Object Model**: Define how your VM's objects map to MMTk's expectations
-- **Root Scanning**: Integrate with your thread registry for stack/global roots
-- **Allocation Sites**: Hook MMTk allocators into your VM's allocation points
-
-## libpas vs jemalloc Integration
-
-For a **Rust VM with MMTk**, I'd recommend:
-
-1. **MMTk + jemalloc hybrid**:
-
-   - Let MMTk handle GC heap (managed objects)
-   - Use jemalloc for VM infrastructure (bytecode, JIT code, metadata)
-   - Simpler FFI boundary than libpas
-
-2. **libpas integration** (if you want WebKit's sophistication):
-   - MMTk can delegate to libpas for large object spaces
-   - Good for mixed workloads with varying allocation patterns
-
-## Safepoint Integration
-
-**For a Rust VM specifically:**
-
-```rust
-// At bytecode dispatch/loop headers
-fn execute_bytecode() {
-    loop {
-        if unlikely(safepoint_requested()) {
-            vm_safepoint(); // Includes GC poll
-        }
-        // Execute instruction
-    }
-}
-
-// At allocation sites (already handled by MMTk)
-fn allocate<T>() -> Gc<T> {
-    // MMTk handles safepoint polling internally
-    mmtk_alloc(size_of::<T>())
-}
-```
-
-## Gc<T> API Design for VM
-
-```rust
-// VM-specific wrapper over MMTk's ObjectReference
-pub struct Gc<T> {
-    ptr: ObjectReference, // MMTk's object reference
-    _phantom: PhantomData<T>,
-}
-
-// Barrier integration (MMTk handles the heavy lifting)
-impl<T> Gc<T> {
-    pub fn write(&self, field: &mut Gc<U>, value: Gc<U>) {
-        // MMTk's write barrier
-        mmtk::memory_manager::object_reference_write(
-            self.ptr, field as *mut _ as Address, value.ptr
-        );
-    }
-}
-```
-
-## FUGC-Specific Adaptations
-
-**Incremental Stack Scanning:**
-
-- Use MMTk's concurrent marking with custom stack scanning
-- Implement soft handshakes in your VM's thread management
-
-**Parallel Marking:**
-
-- MMTk provides parallel GC workers out of the box
-- Configure work-stealing for your object graph traversal
-
-## Architecture Recommendations
-
-1. **Start with MMTk's existing concurrent plan** as base
-2. **Customize the write barrier** for FUGC-style incremental marking
-3. **Use jemalloc for non-GC allocations** (simpler than libpas integration initially)
-4. **Design your VM's object layout** to work well with MMTk's tracing
-
-## Key Integration Points
-
-- **Object Headers**: Align with MMTk's metadata requirements
-- **Thread Management**: Your thread registry feeds MMTk's root scanning
-- **JIT Integration**: If you have one, coordinate with MMTk's code space management
-
-The MMTk route will save us months of low-level GC implementation while still allowing FUGC innovations in the higher-level algorithms.
-
-This is an excellent concrete roadmap for implementing a garbage collector in Rust! Let me break down this milestone plan and provide some insights on each phase:
-
-## Phase 1: Library Prototype (Safe Foundation)
-
-Your starting point is solid:
-
-- **`Gc<T>` wrapper + `Trace/Collect` traits**: Smart approach using Rust's type system for safety
-- **Explicit roots management**: Scoped roots are great for stack management, dynamic roots for globals
-- **Thread registry + `pollcheck()` safepoints**: Critical for cooperative collection
-- **Mark/sweep non-moving**: Good starting choice - simpler than moving collectors
-- **libpas integration**: Interesting choice! WebKit's libpas could provide mature heap management
-
-## Phase 2: Concurrent & FUGC-like Features
-
-This is where it gets sophisticated:
-
-- **Parallel grey stacks**: Will significantly improve marking performance
-- **Dijkstra write barrier**: Classic choice for concurrent marking
-- **Black allocation during marking**: Prevents newly allocated objects from being missed
-- **Soft handshakes for incremental stack scans**: Modern approach to reduce pause times
-
-## Phase 3: Performance Optimization
-
-- **Inline barrier fast path**: ✅ **Implemented** - Multiple optimized write barrier variants with relaxed memory ordering and branch prediction hints for maximum performance when barriers are inactive
-- **libpas vs pure-Rust heap benchmark**: Good validation approach
-- Consider also benchmarking against other allocators like `jemalloc`
-
-## Phase 4: Compiler Integration (Advanced)
-
-- **LLVM statepoints**: Would enable precise GC without manual root management
-- **rustc fork**: Ambitious but would provide the cleanest API
-
-## Alternative: MMTk Integration
-
-- **MMTk**: Well-tested framework, could save significant implementation time
-- **VM binding layer**: Much smaller surface area to implement
-
-## Questions to Help Tailor Advice:
-
-1. **What's your target runtime?** (Rust VM, app framework, etc.)
-2. **Performance vs. simplicity trade-off?**
-3. **FFI requirements?** (C interop, etc.)
-4. **Pause time requirements?** (real-time constraints?)
-
-The roadmap shows deep GC knowledge. Starting with the safe prototype and iterating toward concurrency is the right approach.
+Failing to free an object means the object gets reclaimed for you.

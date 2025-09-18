@@ -4,22 +4,25 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-anyhow = { version = "^1.0.99", features = ["backtrace"] }
-crossbeam = { version = "^0.8.4", features = ["crossbeam-epoch"] }
-thiserror = "^2.0.16"
-tracing = { version = "^0.1.41", features = ["log"] }
-libc = "^0.2"
-parking_lot = "^0.12"
-once_cell = "^1.20"
-memoffset = "^0.9"
-thread_local = "^1.1"
-num_cpus = "^1.16"
-bitflags = "^2.6"
-rayon = "^1.10"
-psm = "^0.1"
-stacker = "^0.1"
-mmtk = { version = "^0.31", default-features = false }
-lazy_static = "1.5.0"
+anyhow = { version = ">=1.0.99", features = ["backtrace"] }
+crossbeam = { version = ">=0.8.4", features = ["crossbeam-epoch"] }
+crossbeam-epoch = ">=0.9"
+crossbeam-queue = ">=0.3"
+thiserror = ">=2.0.16"
+tracing = { version = ">=0.1.41", features = ["log"] }
+libc = ">=0.2"
+parking_lot = ">=0.12"
+once_cell = ">=1.20"
+memoffset = ">=0.9"
+thread_local = ">=1.1"
+num_cpus = ">=1.16"
+bitflags = ">=2.6"
+rayon = ">=1.10"
+psm = ">=0.1"
+stacker = ">=0.1"
+mmtk = { version = ">=0.31", default-features = false }
+lazy_static = ">=1.5.0"
+dashmap = "6.1"
 
 # DISABLED: Benchmarks are too aggressive and can crash VMs
 [[bench]]
@@ -30,17 +33,21 @@ harness = false
 name = "cache_benchmarks"
 harness = false
 
+[[bench]]
+name = "synchronization_benchmarks"
+harness = false
+
 # [[bench]]
 # name = "regression_tests"
 # harness = false
 
 [dev-dependencies]
-criterion = "^0.7.0"
-mmtk = "0.31"
-fastrand = "2.0"
-proptest = "1.0"
-quickcheck = "1.0"
-arbitrary = "1.0"
+criterion = ">=0.7.0"
+mmtk = ">=0.31"
+fastrand = ">=2.0"
+proptest = ">=1.0"
+quickcheck = ">=1.0"
+arbitrary = ">=1.0"
 
 [features]
 # Enable lightweight smoke tests that validate high-level GC semantics
@@ -48,3 +55,5 @@ smoke = []
 segment_scan_linux = []
 # Enable cache profiling and hardware performance counter integration
 cache_profiling = []
+# Gate expensive stress suites so they only run when explicitly requested
+stress-tests = []

@@ -1,5 +1,6 @@
 use fugrip::{
-    allocator::{AllocatorInterface, MMTkAllocator, StubAllocator},
+    StubAllocator,
+    allocator::{AllocatorInterface, MMTkAllocator},
     error::GcError,
     thread::MutatorThread,
 };

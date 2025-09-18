@@ -4,15 +4,16 @@
 //! with garbage collection phases through fast load-and-branch
 //! safepoints with bounded progress guarantees.
 
-use fugrip::{pollcheck, SafepointManager, GcSafepointPhase};
+use fugrip::di::DIContainer;
+use fugrip::{GcSafepointPhase, pollcheck};
 use std::thread;
-use std::time::Duration;
 
 fn main() {
     println!("FUGC Safepoint Demo");
     println!("==================");
 
-    let manager = SafepointManager::global();
+    let container = DIContainer::new();
+    let manager = container.safepoint_manager();
 
     // Simulate a mutator thread doing work with regular pollchecks
     println!("\n1. Mutator thread performing work with pollchecks:");
@@ -20,7 +21,7 @@ fn main() {
 
     // Demonstrate GC coordination through safepoints
     println!("\n2. GC coordination through safepoints:");
-    demonstrate_gc_coordination();
+    demonstrate_gc_coordination(&manager);
 
     // Show safepoint statistics
     println!("\n3. Safepoint performance statistics:");
@@ -52,9 +53,7 @@ fn simulate_mutator_work() {
 }
 
 /// Demonstrate garbage collection coordination through safepoints
-fn demonstrate_gc_coordination() {
-    let manager = SafepointManager::global();
-
+fn demonstrate_gc_coordination(manager: &std::sync::Arc<fugrip::safepoint::SafepointManager>) {
     // Phase 1: Root scanning safepoint
     println!("   Requesting root scanning safepoint...");
     manager.request_gc_safepoint(GcSafepointPhase::RootScanning);
@@ -62,7 +61,8 @@ fn demonstrate_gc_coordination() {
     // Simulate work that will trigger the safepoint
     for _ in 0..10 {
         pollcheck(); // This will hit the slow path and execute root scanning
-        # Using sleeps to paper over logic bugs is unprofessional(Duration::from_millis(1));
+
+        //(Duration::from_millis(1));
     }
     manager.clear_safepoint();
     println!("   ✓ Root scanning completed");
@@ -73,7 +73,8 @@ fn demonstrate_gc_coordination() {
 
     for _ in 0..10 {
         pollcheck(); // Activates write barriers
-        # Using sleeps to paper over logic bugs is unprofessional(Duration::from_millis(1));
+
+        //(Duration::from_millis(1));
     }
     manager.clear_safepoint();
     println!("   ✓ Barriers activated");
@@ -84,7 +85,8 @@ fn demonstrate_gc_coordination() {
 
     for _ in 0..10 {
         pollcheck(); // Coordinates marking work
-        # Using sleeps to paper over logic bugs is unprofessional(Duration::from_millis(1));
+
+        //(Duration::from_millis(1));
     }
     manager.clear_safepoint();
     println!("   ✓ Marking handshake completed");
@@ -95,7 +97,8 @@ fn demonstrate_gc_coordination() {
 
     for _ in 0..10 {
         pollcheck(); // Prepares for sweep
-        # Using sleeps to paper over logic bugs is unprofessional(Duration::from_millis(1));
+
+        //(Duration::from_millis(1));
     }
     manager.clear_safepoint();
     println!("   ✓ Sweep preparation completed");
@@ -119,7 +122,8 @@ fn do_some_work(iteration: usize) {
 fn demonstrate_multithreaded_safepoints() {
     println!("\n4. Multi-threaded safepoint coordination:");
 
-    let manager = SafepointManager::global();
+    let container = DIContainer::new();
+    let manager = container.safepoint_manager();
     let handles: Vec<_> = (0..4)
         .map(|thread_id| {
             thread::spawn(move || {
@@ -130,7 +134,7 @@ fn demonstrate_multithreaded_safepoints() {
                     pollcheck(); // All threads will hit safepoints
 
                     // Simulate thread-specific work
-                    # Using sleeps to paper over logic bugs is unprofessional(Duration::from_micros(100 * (thread_id + 1) as u64));
+                    //(Duration::from_micros(100 * (thread_id + 1) as u64));
 
                     if i % 50 == 0 {
                         println!("   Thread {} at iteration {}", thread_id, i);
@@ -143,12 +147,12 @@ fn demonstrate_multithreaded_safepoints() {
         .collect();
 
     // While threads are working, request a safepoint
-    # Using sleeps to paper over logic bugs is unprofessional(Duration::from_millis(10));
+    //(Duration::from_millis(10));
     println!("   Requesting coordinated safepoint for all threads...");
     manager.request_gc_safepoint(GcSafepointPhase::RootScanning);
 
     // Wait briefly for coordination
-    # Using sleeps to paper over logic bugs is unprofessional(Duration::from_millis(50));
+    //(Duration::from_millis(50));
     manager.clear_safepoint();
 
     // Wait for all threads to complete

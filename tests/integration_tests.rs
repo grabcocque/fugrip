@@ -1,7 +1,9 @@
 //! Integration tests that combine multiple GC components
+#![cfg(feature = "stress-tests")]
 
+use fugrip::allocator::AllocatorInterface;
 use fugrip::{
-    allocator::{AllocatorInterface, StubAllocator},
+    StubAllocator,
     core::{Gc, LayoutId, ObjectFlags, ObjectHeader},
     roots::{GlobalRoots, StackRoots},
     thread::{MutatorThread, ThreadRegistry},

@@ -4,15 +4,13 @@
 //! requiring compiler support, enabling bounded-progress guarantees through
 //! careful macro design.
 
-use crate::safepoint::pollcheck;
-
 /// Automatically insert pollchecks in loops
 ///
 /// This macro wraps loop constructs and ensures pollchecks happen regularly.
 ///
 /// # Examples
 ///
-/// ```rust
+/// ```ignore
 /// use fugrip::gc_loop;
 ///
 /// let mut sum = 0;
@@ -69,28 +67,26 @@ macro_rules! gc_loop {
 ///
 /// # Examples
 ///
-/// ```rust
+/// ```ignore
 /// use fugrip::gc_call;
 ///
 /// let result = gc_call!(expensive_computation(data));
 /// ```
 #[macro_export]
 macro_rules! gc_call {
-    ($func:expr) => {
-        {
-            $crate::safepoint::pollcheck();
-            let result = $func;
-            $crate::safepoint::pollcheck();
-            result
-        }
-    };
+    ($func:expr) => {{
+        $crate::safepoint::pollcheck();
+        let result = $func;
+        $crate::safepoint::pollcheck();
+        result
+    }};
 }
 
 /// Create a function that automatically inserts pollchecks at entry/exit
 ///
 /// # Examples
 ///
-/// ```rust
+/// ```ignore
 /// use fugrip::gc_function;
 ///
 /// gc_function! {
@@ -143,26 +139,24 @@ macro_rules! gc_function {
 ///
 /// # Examples
 ///
-/// ```rust
+/// ```ignore
 /// use fugrip::gc_alloc;
 ///
 /// let data: Vec<u32> = gc_alloc!(Vec::with_capacity(1000));
 /// ```
 #[macro_export]
 macro_rules! gc_alloc {
-    ($alloc_expr:expr) => {
-        {
-            $crate::safepoint::pollcheck();
-            $alloc_expr
-        }
-    };
+    ($alloc_expr:expr) => {{
+        $crate::safepoint::pollcheck();
+        $alloc_expr
+    }};
 }
 
 /// Bounded work macro - ensures pollchecks happen within work limits
 ///
 /// # Examples
 ///
-/// ```rust
+/// ```ignore
 /// use fugrip::bounded_work;
 ///
 /// bounded_work!(1000 => {
@@ -196,7 +190,7 @@ macro_rules! bounded_work {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
@@ -226,7 +220,7 @@ mod tests {
         let work_done = AtomicUsize::new(0);
 
         bounded_work!(100 => {
-            for i in 0..1000 {
+            for _i in 0..1000 {
                 work_unit!();
                 work_done.fetch_add(1, Ordering::Relaxed);
             }

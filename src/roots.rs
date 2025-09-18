@@ -8,6 +8,7 @@ use mmtk::{
 use crate::binding::RustVM;
 use crate::core::{ObjectModel, RustObjectModel};
 use crate::thread::{MutatorThread, ThreadRegistry};
+use parking_lot::Mutex;
 use std::sync::Arc;
 
 /// Stack-based root references for garbage collection
@@ -107,11 +108,11 @@ impl RootSet {
 
 #[derive(Default)]
 pub struct RustScanning {
-    pub registry: ThreadRegistry,
+    pub registry: Arc<ThreadRegistry>,
 }
 
 impl RustScanning {
-    pub fn new(registry: ThreadRegistry) -> Self {
+    pub fn new(registry: Arc<ThreadRegistry>) -> Self {
         Self { registry }
     }
 
@@ -207,11 +208,10 @@ impl Scanning<RustVM> for RustScanning {
         mut factory: impl RootsWorkFactory<<RustVM as VMBinding>::VMSlot>,
     ) {
         // Use a thread-safe global roots registry
-        use std::sync::Mutex;
         static GLOBAL_ROOTS: std::sync::OnceLock<Mutex<GlobalRoots>> = std::sync::OnceLock::new();
 
         let global_roots = GLOBAL_ROOTS.get_or_init(|| Mutex::new(GlobalRoots::default()));
-        let roots = global_roots.lock().unwrap();
+        let roots = global_roots.lock();
 
         // Process all global root handles
         let slots: Vec<mmtk::vm::slot::SimpleSlot> = roots
@@ -229,16 +229,13 @@ impl Scanning<RustVM> for RustScanning {
 
     fn notify_initial_thread_scan_complete(partial_scan: bool, _tls: VMWorkerThread) {
         let coordinator = {
-            let manager = crate::binding::FUGC_PLAN_MANAGER.lock().unwrap();
+            let manager = crate::binding::FUGC_PLAN_MANAGER.lock();
             Arc::clone(manager.get_fugc_coordinator())
         };
 
         // FUGC coordinator handles root scanning through its 8-step protocol
-        if partial_scan {
-            coordinator.trigger_gc();
-        } else {
-            coordinator.trigger_gc();
-        }
+        let _ = partial_scan;
+        coordinator.trigger_gc();
     }
 
     fn supports_return_barrier() -> bool {
@@ -247,11 +244,112 @@ impl Scanning<RustVM> for RustScanning {
 
     fn prepare_for_roots_re_scanning() {
         let coordinator = {
-            let manager = crate::binding::FUGC_PLAN_MANAGER.lock().unwrap();
+            let manager = crate::binding::FUGC_PLAN_MANAGER.lock();
             Arc::clone(manager.get_fugc_coordinator())
         };
         // FUGC coordinator resets are handled internally during collection cycles
         // No explicit reset needed here
         let _ = coordinator; // Avoid unused variable warning
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_stack_roots() {
+        let mut stack_roots = StackRoots::default();
+
+        // Initially empty
+        assert_eq!(stack_roots.iter().count(), 0);
+
+        // Add some roots
+        let ptr1 = 0x1000 as *mut u8;
+        let ptr2 = 0x2000 as *mut u8;
+        let ptr3 = 0x3000 as *mut u8;
+
+        stack_roots.push(ptr1);
+        stack_roots.push(ptr2);
+        stack_roots.push(ptr3);
+
+        // Check iteration
+        let roots: Vec<*mut u8> = stack_roots.iter().collect();
+        assert_eq!(roots.len(), 3);
+        assert_eq!(roots[0], ptr1);
+        assert_eq!(roots[1], ptr2);
+        assert_eq!(roots[2], ptr3);
+
+        // Clear roots
+        stack_roots.clear();
+        assert_eq!(stack_roots.iter().count(), 0);
+    }
+
+    #[test]
+    fn test_global_roots() {
+        let mut global_roots = GlobalRoots::default();
+
+        // Initially empty
+        assert_eq!(global_roots.iter().count(), 0);
+
+        // Register global roots
+        let global_ptr1 = 0x10000 as *mut u8;
+        let global_ptr2 = 0x20000 as *mut u8;
+
+        global_roots.register(global_ptr1);
+        global_roots.register(global_ptr2);
+
+        // Check iteration
+        let roots: Vec<*mut u8> = global_roots.iter().collect();
+        assert_eq!(roots.len(), 2);
+        assert_eq!(roots[0], global_ptr1);
+        assert_eq!(roots[1], global_ptr2);
+    }
+
+    #[test]
+    fn test_root_set() {
+        let mut root_set = RootSet::new();
+
+        // Test stack roots in root set
+        let stack_ptr = 0x5000 as *mut u8;
+        root_set.stacks.push(stack_ptr);
+
+        // Test global roots in root set
+        let global_ptr = 0x6000 as *mut u8;
+        root_set.globals.register(global_ptr);
+
+        assert_eq!(root_set.stacks.iter().count(), 1);
+        assert_eq!(root_set.globals.iter().count(), 1);
+    }
+
+    #[test]
+    fn test_rust_scanning() {
+        let registry = Arc::new(ThreadRegistry::new());
+        let scanning = RustScanning::new(Arc::clone(&registry));
+
+        // Register some mutator threads
+        let mutator1 = MutatorThread::new(1);
+        let mutator2 = MutatorThread::new(2);
+
+        registry.register(mutator1.clone());
+        registry.register(mutator2.clone());
+
+        // Test for_each_mutator
+        let mut count = 0;
+        scanning.for_each_mutator(|_mutator| {
+            count += 1;
+        });
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn test_supports_return_barrier() {
+        assert!(!RustScanning::supports_return_barrier());
+    }
+
+    #[test]
+    fn test_prepare_for_roots_re_scanning() {
+        // This should not panic
+        RustScanning::prepare_for_roots_re_scanning();
     }
 }

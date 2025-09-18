@@ -2,6 +2,7 @@ use fugrip::{
     core::{Gc, LayoutId, ObjectFlags},
     weak::{WeakRef, WeakRefHeader, WeakRefRegistry},
 };
+use mmtk::vm::Finalizable;
 
 #[test]
 fn weak_ref_creation_and_upgrade() {
@@ -113,4 +114,51 @@ fn weak_ref_default() {
     let weak_ref = WeakRef::<u32>::default();
     assert!(!weak_ref.is_alive());
     assert!(weak_ref.upgrade().is_none());
+}
+
+#[test]
+fn weak_ref_header_finalizable_get_reference() {
+    use mmtk::util::Address;
+    use mmtk::util::ObjectReference;
+
+    let mut header = WeakRefHeader::new(LayoutId(1), 64);
+
+    // Test with no target (should return dummy)
+    let ref_obj = Finalizable::get_reference(&header);
+    let dummy_addr = unsafe { Address::from_usize(0xDEADBEE8) }; // Match source
+    assert_eq!(ref_obj.to_raw_address(), dummy_addr);
+
+    // Set a valid target
+    let valid_addr = unsafe { Address::from_usize(0x10000000) };
+    let valid_obj = ObjectReference::from_raw_address(valid_addr).unwrap();
+    header.set_reference(valid_obj);
+
+    // Now get_reference should return the valid object
+    let got_ref = Finalizable::get_reference(&header);
+    assert_eq!(got_ref, valid_obj);
+}
+
+#[test]
+fn weak_ref_header_finalizable_set_reference() {
+    use mmtk::util::{Address, ObjectReference};
+
+    let mut header = WeakRefHeader::new(LayoutId(1), 64);
+
+    // Set valid reference
+    let valid_addr = unsafe { Address::from_usize(0x10000000) };
+    let valid_obj = ObjectReference::from_raw_address(valid_addr).unwrap();
+    Finalizable::set_reference(&mut header, valid_obj);
+
+    // Verify target set
+    let target = header.get_target();
+    assert_eq!(target as usize, valid_addr.as_usize());
+
+    // Set dummy (clear)
+    let dummy =
+        ObjectReference::from_raw_address(unsafe { Address::from_usize(0xDEADBEE8) }).unwrap(); // Match source dummy
+    Finalizable::set_reference(&mut header, dummy);
+
+    // Should be set to dummy target
+    let dummy_ptr = unsafe { Address::from_usize(0xDEADBEE8).to_mut_ptr::<u8>() };
+    assert_eq!(header.get_target(), dummy_ptr);
 }

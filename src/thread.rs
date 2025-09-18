@@ -1,270 +1,390 @@
-//! Thread registry and mutator state used by the runtime.
+//! Thread management and coordination for FUGC garbage collection.
 //!
-//! This module provides thread management infrastructure for the FUGC garbage collector,
-//! including mutator thread tracking and safepoint coordination.
-//!
-//! # Examples
-//!
-//! ```
-//! use fugrip::thread::{MutatorThread, ThreadRegistry};
-//!
-//! // Create and register a mutator thread
-//! let thread = MutatorThread::new(1);
-//! let registry = ThreadRegistry::new();
-//! registry.register(thread.clone());
-//!
-//! // Poll for safepoint
-//! thread.poll_safepoint();
-//!
-//! // Get all registered threads
-//! let threads = registry.iter();
-//! assert_eq!(threads.len(), 1);
-//! assert_eq!(threads[0].id(), 1);
-//! ```
+//! This module provides lock-free thread coordination using atomic state machines
+//! and crossbeam channels. Invalid states are unrepresentable by design.
 
+use crate::handshake::{
+    HandshakeCompletion, HandshakeCoordinator, HandshakeError, HandshakeType,
+    MutatorHandshakeHandler,
+};
+use crossbeam::channel::{self, Receiver, Sender};
+use parking_lot::{Mutex, RwLock};
 use std::{
+    collections::HashMap,
     fmt,
-    sync::{
-        Arc, Condvar, Mutex, OnceLock,
-        atomic::{AtomicBool, Ordering},
-    },
-    thread,
+    sync::{Arc, OnceLock},
+    time::Duration,
 };
 
-#[derive(Default, Debug)]
-struct MutatorInner {
-    id: usize,
-    safepoint_requested: AtomicBool,
-    parked: AtomicBool,
-    lock: Mutex<()>,
-    cv: Condvar,
-    stack_roots: Mutex<Vec<usize>>,
+/// Represents a mutator thread backed by a `MutatorHandshakeHandler`.
+#[derive(Clone)]
+pub struct MutatorThread {
+    pub(crate) id: usize,
+    pub(crate) handler: Arc<MutatorHandshakeHandler>,
 }
 
-impl MutatorInner {
-    fn new(id: usize) -> Self {
-        Self {
+impl MutatorThread {
+    /// Create a new standalone mutator thread and return it together with
+    /// the `Receiver<HandshakeRequest>` that a coordinator should use to
+    /// deliver requests to this thread. This is useful for tests and
+    /// for initializing the handler before registering with a coordinator.
+    pub fn new_with_channels(
+        id: usize,
+    ) -> (
+        Self,
+        Receiver<crate::handshake::HandshakeRequest>,
+        Sender<HandshakeCompletion>,
+        Arc<Receiver<u64>>,
+    ) {
+        let (_request_tx, request_rx) = channel::bounded(1);
+        let (completion_tx, _completion_rx) = channel::unbounded();
+        let (_release_tx, release_rx_inner) = channel::unbounded();
+        let release_rx = Arc::new(release_rx_inner);
+
+        let handler = Arc::new(MutatorHandshakeHandler::new(
             id,
-            safepoint_requested: AtomicBool::new(false),
-            parked: AtomicBool::new(false),
-            lock: Mutex::new(()),
-            cv: Condvar::new(),
-            stack_roots: Mutex::new(Vec::new()),
-        }
+            request_rx.clone(),
+            completion_tx.clone(),
+            Arc::clone(&release_rx),
+        ));
+
+        (Self { id, handler }, request_rx, completion_tx, release_rx)
     }
 
-    fn request_safepoint(&self) {
-        self.safepoint_requested.store(true, Ordering::SeqCst);
+    /// Convenience constructor for simple cases (not wired to a central coordinator).
+    pub fn new(id: usize) -> Self {
+        let (thread, _req_rx, _completion_tx, _release_rx) = Self::new_with_channels(id);
+        thread
     }
 
-    fn clear_safepoint(&self) {
-        self.safepoint_requested.store(false, Ordering::SeqCst);
-        self.cv.notify_all();
+    pub fn id(&self) -> usize {
+        self.id
     }
 
-    fn wait_until_parked(&self) {
-        while !self.parked.load(Ordering::SeqCst) {
-            thread::yield_now();
-        }
+    /// Poll for safepoint requests (non-blocking). Call periodically from
+    /// the mutator loop.
+    pub fn poll_safepoint(&self) {
+        self.handler.poll_safepoint();
     }
 
-    fn register_root(&self, handle: *mut u8) {
+    pub fn register_stack_root(&self, handle: *mut u8) {
         if handle.is_null() {
             return;
         }
-        let mut roots = self.stack_roots.lock().unwrap();
-        if !roots.contains(&(handle as usize)) {
-            roots.push(handle as usize);
-        }
+        self.handler.add_stack_root(handle as usize);
     }
 
-    fn clear_roots(&self) {
-        self.stack_roots.lock().unwrap().clear();
+    pub fn clear_stack_roots(&self) {
+        self.handler.clear_stack_roots();
     }
 
-    fn snapshot_roots(&self) -> Vec<*mut u8> {
-        self.stack_roots
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|addr| *addr as *mut u8)
+    pub fn is_at_safepoint(&self) -> bool {
+        matches!(
+            self.handler.get_state(),
+            crate::handshake::HandshakeState::AtSafepoint
+        )
+    }
+
+    /// Get current stack roots - for backwards compatibility return empty
+    pub fn stack_roots(&self) -> Vec<*mut u8> {
+        self.handler
+            .get_stack_roots()
+            .into_iter()
+            .map(|addr| addr as *mut u8)
             .collect()
     }
 }
 
-/// Represents a mutator thread in the FUGC garbage collector.
-///
-/// # Examples
-///
-/// ```
-/// use fugrip::thread::MutatorThread;
-///
-/// // Create a new mutator thread
-/// let thread = MutatorThread::new(42);
-/// assert_eq!(thread.id(), 42);
-///
-/// // Test safepoint polling
-/// thread.poll_safepoint();
-///
-/// // Clone for sharing across contexts
-/// let thread_clone = thread.clone();
-/// assert_eq!(thread_clone.id(), 42);
-/// ```
-pub struct MutatorThread {
-    inner: Arc<MutatorInner>,
-}
-
-impl MutatorThread {
-    pub fn new(id: usize) -> Self {
-        Self {
-            inner: Arc::new(MutatorInner::new(id)),
-        }
-    }
-
-    fn from_inner(inner: Arc<MutatorInner>) -> Self {
-        Self { inner }
-    }
-
-    pub fn id(&self) -> usize {
-        self.inner.id
-    }
-
-    pub fn poll_safepoint(&self) {
-        if self.inner.safepoint_requested.load(Ordering::SeqCst) {
-            let mut guard = self.inner.lock.lock().unwrap();
-            self.inner.parked.store(true, Ordering::SeqCst);
-            while self.inner.safepoint_requested.load(Ordering::SeqCst) {
-                guard = self.inner.cv.wait(guard).unwrap();
-            }
-            self.inner.parked.store(false, Ordering::SeqCst);
-        }
-    }
-
-    /// Register a stack root handle that should be treated as a GC root while
-    /// the mutator is parked for collection.
-    pub fn register_stack_root(&self, handle: *mut u8) {
-        self.inner.register_root(handle);
-    }
-
-    /// Clear all tracked stack roots for this mutator.
-    pub fn clear_stack_roots(&self) {
-        self.inner.clear_roots();
-    }
-
-    /// Snapshot all current stack roots.
-    pub fn stack_roots(&self) -> Vec<*mut u8> {
-        self.inner.snapshot_roots()
-    }
-
-    pub(crate) fn request_safepoint(&self) {
-        self.inner.request_safepoint();
-    }
-
-    pub(crate) fn clear_safepoint(&self) {
-        self.inner.clear_safepoint();
-    }
-
-    pub(crate) fn wait_until_parked(&self) {
-        self.inner.wait_until_parked();
-    }
-}
-
-impl Clone for MutatorThread {
-    fn clone(&self) -> Self {
-        Self {
-            inner: Arc::clone(&self.inner),
-        }
-    }
-}
-
-impl Default for MutatorThread {
-    fn default() -> Self {
-        Self::new(0)
-    }
-}
-
-impl fmt::Debug for MutatorThread {
+impl std::fmt::Debug for MutatorThread {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("MutatorThread").field(&self.id()).finish()
+        f.debug_struct("MutatorThread")
+            .field("id", &self.id)
+            .finish()
     }
 }
 
-/// Registry for tracking all mutator threads in the FUGC garbage collector.
-///
-/// # Examples
-///
-/// ```
-/// use fugrip::thread::{ThreadRegistry, MutatorThread};
-///
-/// // Create a registry and threads
-/// let registry = ThreadRegistry::new();
-/// let thread1 = MutatorThread::new(1);
-/// let thread2 = MutatorThread::new(2);
-///
-/// // Register threads
-/// registry.register(thread1);
-/// registry.register(thread2);
-///
-/// // Iterate over registered threads
-/// let threads = registry.iter();
-/// assert_eq!(threads.len(), 2);
-///
-/// // Access global registry
-/// let global_registry = ThreadRegistry::global();
-/// ```
-#[derive(Clone, Default, Debug)]
+/// Registry for tracking all mutator threads and coordinating handshakes.
 pub struct ThreadRegistry {
-    mutators: Arc<Mutex<Vec<Arc<MutatorInner>>>>,
+    threads: RwLock<HashMap<usize, MutatorThread>>,
+    coordinator: Mutex<HandshakeCoordinator>,
+    completion_tx: Sender<HandshakeCompletion>,
+    release_rx: Arc<Receiver<u64>>,
 }
 
 impl ThreadRegistry {
     pub fn new() -> Self {
+        let (coordinator, completion_tx, release_rx_inner) = HandshakeCoordinator::new();
+        let release_rx = Arc::new(release_rx_inner);
         Self {
-            mutators: Arc::new(Mutex::new(Vec::new())),
+            threads: RwLock::new(HashMap::new()),
+            coordinator: Mutex::new(coordinator),
+            completion_tx,
+            release_rx,
         }
     }
 
-    /// Global registry accessor used by the VM binding.
-    pub fn global() -> &'static ThreadRegistry {
-        static GLOBAL: OnceLock<ThreadRegistry> = OnceLock::new();
-        GLOBAL.get_or_init(ThreadRegistry::new)
+    pub fn register(&self, mutator: MutatorThread) {
+        let id = mutator.id();
+
+        // Register the thread with the coordinator and get the request receiver
+        let req_rx = {
+            let mut coord = self.coordinator.lock();
+            coord.register_thread(id)
+        };
+
+        // Replace the handler's request_rx by constructing a new handler that uses
+        // the coordinator-provided receiver. This keeps the same handler type
+        // semantics while wiring to the central coordinator.
+        let new_handler = Arc::new(MutatorHandshakeHandler::new(
+            id,
+            req_rx,
+            self.completion_tx.clone(),
+            Arc::clone(&self.release_rx),
+        ));
+
+        let mut map = self.threads.write();
+        map.insert(
+            id,
+            MutatorThread {
+                id,
+                handler: new_handler,
+            },
+        );
     }
 
-    pub fn register(&self, thread: MutatorThread) {
-        let mut mutators = self.mutators.lock().unwrap();
-        if mutators
-            .iter()
-            .any(|existing| existing.id == thread.inner.id)
-        {
-            return;
-        }
-        mutators.push(thread.inner.clone());
+    pub fn unregister(&self, id: usize) {
+        self.threads.write().remove(&id);
+        let mut coord = self.coordinator.lock();
+        coord.unregister_thread(id);
     }
 
     pub fn iter(&self) -> Vec<MutatorThread> {
-        self.mutators
-            .lock()
-            .unwrap()
-            .iter()
-            .cloned()
-            .map(MutatorThread::from_inner)
-            .collect()
+        self.threads.read().values().cloned().collect()
     }
 
-    /// Remove a mutator from the registry.
-    pub fn unregister(&self, id: usize) {
-        let mut mutators = self.mutators.lock().unwrap();
-        mutators.retain(|inner| inner.id != id);
+    pub fn len(&self) -> usize {
+        self.threads.read().len()
     }
 
-    /// Lookup a mutator by identifier.
+    pub fn is_empty(&self) -> bool {
+        self.threads.read().is_empty()
+    }
+
     pub fn get(&self, id: usize) -> Option<MutatorThread> {
-        self.mutators
-            .lock()
-            .unwrap()
-            .iter()
-            .find(|inner| inner.id == id)
-            .cloned()
-            .map(MutatorThread::from_inner)
+        self.threads.read().get(&id).cloned()
+    }
+
+    pub fn perform_handshake(
+        &self,
+        handshake_type: HandshakeType,
+        timeout: Duration,
+    ) -> Result<Vec<HandshakeCompletion>, HandshakeError> {
+        let coord = self.coordinator.lock();
+        coord.perform_handshake(handshake_type, timeout)
+    }
+}
+
+impl Default for ThreadRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl fmt::Debug for ThreadRegistry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ThreadRegistry")
+            .field("thread_count", &self.len())
+            .finish()
+    }
+}
+
+/// Global thread registry accessor - needed for backwards compatibility
+pub fn global() -> &'static ThreadRegistry {
+    static GLOBAL: OnceLock<ThreadRegistry> = OnceLock::new();
+    GLOBAL.get_or_init(ThreadRegistry::new)
+}
+
+/// Alternative name for compatibility
+pub fn global_thread_registry() -> &'static ThreadRegistry {
+    global()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{sync::Arc, thread, time::Duration};
+
+    #[test]
+    fn test_mutator_thread_creation() {
+        let thread = MutatorThread::new(42);
+        assert_eq!(thread.id(), 42);
+    }
+
+    #[test]
+    fn test_thread_registry_register_unregister() {
+        let registry = ThreadRegistry::new();
+        let (mutator, _req_rx, _completion_tx, _release_rx) = MutatorThread::new_with_channels(1);
+        registry.register(mutator);
+        assert_eq!(registry.len(), 1);
+        registry.unregister(1);
+        assert_eq!(registry.len(), 0);
+    }
+
+    #[test]
+    fn test_thread_registry_registration() {
+        let registry = ThreadRegistry::new();
+        let thread = MutatorThread::new(1);
+
+        assert_eq!(registry.len(), 0);
+        registry.register(thread.clone());
+        assert_eq!(registry.len(), 1);
+
+        let threads = registry.iter();
+        assert_eq!(threads.len(), 1);
+        assert_eq!(threads[0].id(), 1);
+    }
+
+    #[test]
+    fn test_thread_registry_unregister() {
+        let registry = ThreadRegistry::new();
+        let thread = MutatorThread::new(1);
+
+        registry.register(thread);
+        assert_eq!(registry.len(), 1);
+
+        registry.unregister(1);
+        assert_eq!(registry.len(), 0);
+    }
+
+    #[test]
+    fn test_thread_registry_duplicate_registration() {
+        let registry = ThreadRegistry::new();
+        let thread1 = MutatorThread::new(1);
+        let thread2 = MutatorThread::new(1);
+
+        registry.register(thread1);
+        registry.register(thread2);
+
+        // Should replace the first registration
+        assert_eq!(registry.len(), 1);
+    }
+
+    #[test]
+    fn test_thread_registry_clear() {
+        let registry = ThreadRegistry::new();
+        for i in 1..=5 {
+            registry.register(MutatorThread::new(i));
+        }
+        assert_eq!(registry.len(), 5);
+
+        for i in 1..=5 {
+            registry.unregister(i);
+        }
+        assert_eq!(registry.len(), 0);
+    }
+
+    #[test]
+    fn test_mutator_thread_safepoint() {
+        let thread = MutatorThread::new(1);
+
+        // Should not panic - lock-free implementation
+        thread.poll_safepoint();
+    }
+
+    #[test]
+    fn test_mutator_thread_stack_roots() {
+        let thread = MutatorThread::new(2);
+
+        let mut value = 42u32;
+        let handle = &mut value as *mut u32 as *mut u8;
+
+        thread.register_stack_root(handle);
+        thread.clear_stack_roots();
+    }
+
+    #[test]
+    fn test_poll_safepoint_loop() {
+        let (mutator, _req_rx, _completion_tx, _release_rx) = MutatorThread::new_with_channels(2);
+
+        // Spawn a thread which polls safepoint until a small duration
+        let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let running_clone = running.clone();
+        let handler_clone = mutator.clone();
+
+        let handle = thread::spawn(move || {
+            while running_clone.load(std::sync::atomic::Ordering::Relaxed) {
+                handler_clone.poll_safepoint();
+                thread::yield_now();
+            }
+        });
+
+        // Let it run briefly and then stop
+        thread::sleep(Duration::from_millis(10));
+        running.store(false, std::sync::atomic::Ordering::Relaxed);
+        handle.join().unwrap();
+
+        // Ensure basic stack root registration works
+        let mut value = 5u8;
+        let ptr = &mut value as *mut u8;
+        mutator.register_stack_root(ptr);
+        mutator.clear_stack_roots();
+    }
+
+    #[test]
+    fn test_mutator_thread_thread_safe() {
+        let registry = Arc::new(ThreadRegistry::new());
+        let mut handles = Vec::new();
+
+        for i in 0..4 {
+            let registry_clone = Arc::clone(&registry);
+            let handle = thread::spawn(move || {
+                let mutator = MutatorThread::new(i);
+                registry_clone.register(mutator.clone());
+
+                // Poll safepoints in parallel
+                for _ in 0..100 {
+                    mutator.poll_safepoint();
+                    thread::yield_now();
+                }
+
+                registry_clone.unregister(i);
+            });
+            handles.push(handle);
+        }
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        assert_eq!(registry.len(), 0);
+    }
+
+    #[test]
+    fn test_thread_registry_concurrent_access() {
+        let registry = Arc::new(ThreadRegistry::new());
+        let mut handles = Vec::new();
+
+        // Spawn threads that register/unregister concurrently
+        for i in 0..8 {
+            let registry_clone = Arc::clone(&registry);
+            let handle = thread::spawn(move || {
+                for j in 0..10 {
+                    let thread_id = i * 10 + j;
+                    let mutator = MutatorThread::new(thread_id);
+                    registry_clone.register(mutator);
+
+                    thread::sleep(Duration::from_millis(1));
+
+                    registry_clone.unregister(thread_id);
+                }
+            });
+            handles.push(handle);
+        }
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        assert_eq!(registry.len(), 0);
     }
 }

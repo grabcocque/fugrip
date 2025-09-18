@@ -9,7 +9,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use fugrip::cache_optimization::CacheOptimizedMarking;
-use fugrip::concurrent::{ConcurrentMarkingCoordinator, ObjectColor, TricolorMarking};
+use fugrip::concurrent::{ObjectColor, TricolorMarking};
+use fugrip::test_utils::TestFixture;
 
 /// Generate valid object references for testing
 fn arb_valid_object_ref() -> impl Strategy<Value = ObjectReference> {
@@ -352,17 +353,12 @@ proptest! {
         worker_count in 1usize..9,
         operation_count in 10usize..100
     ) {
-        let heap_base = unsafe { Address::from_usize(0x10000000) };
-        let thread_registry = Arc::new(fugrip::thread::ThreadRegistry::new());
-        let global_roots = Arc::new(std::sync::Mutex::new(fugrip::roots::GlobalRoots::default()));
-
-        let coordinator = ConcurrentMarkingCoordinator::new(
-            heap_base,
+        let fixture = TestFixture::new_with_config(
+            0x10000000,
             64 * 1024 * 1024,
             worker_count,
-            thread_registry,
-            global_roots,
         );
+        let coordinator = &fixture.coordinator;
 
         // Create test objects
         let mut objects = Vec::new();
@@ -387,14 +383,14 @@ proptest! {
 
             // Verify all objects in batch are marked
             for &obj in batch {
-                let color = coordinator.tricolor_marking.get_color(obj);
+                let color = coordinator.tricolor_marking().get_color(obj);
                 prop_assert_ne!(color, ObjectColor::White,
                                "Object should be marked after processing");
             }
         }
 
         // Verify final statistics are reasonable
-        let stats = coordinator.get_stats();
+        let stats = coordinator.get_marking_stats();
         prop_assert!(stats.work_stolen < operation_count * 10);
         prop_assert!(stats.work_shared < operation_count * 10);
     }

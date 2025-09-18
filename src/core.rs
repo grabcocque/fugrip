@@ -58,7 +58,7 @@ use crate::binding::RustVM;
 /// assert_eq!(header.body_size, 128);
 /// ```
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq)]
 pub struct ObjectHeader {
     pub flags: ObjectFlags,
     pub layout_id: LayoutId,
@@ -97,10 +97,12 @@ bitflags! {
     /// assert!(!unpinned.contains(ObjectFlags::PINNED));
     /// assert!(unpinned.contains(ObjectFlags::MARKED));
     /// ```
-    #[derive(Default, Debug, Clone, Copy)]
+    #[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
     pub struct ObjectFlags: u16 {
         const MARKED = 0b0001;
         const HAS_WEAK_REFS = 0b0010;
+        /// PINNED flag for epoch pinning synergy: Objects marked PINNED can be treated as pinned to the current epoch during GC operations,
+        /// ensuring safe reclamation. This hybridizes with crossbeam-epoch Guards for invariant enforcement without full pinning overhead.
         const PINNED = 0b0100;
     }
 }
@@ -352,5 +354,215 @@ impl MMTkObjectModel<RustVM> for RustObjectModel {
 
     fn dump_object(_object: ObjectReference) {
         // Debug object dumping
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_object_flags() {
+        let flags = ObjectFlags::MARKED | ObjectFlags::PINNED;
+        assert!(flags.contains(ObjectFlags::MARKED));
+        assert!(flags.contains(ObjectFlags::PINNED));
+        assert!(!flags.contains(ObjectFlags::HAS_WEAK_REFS));
+
+        let default_flags = ObjectFlags::default();
+        assert!(!default_flags.contains(ObjectFlags::MARKED));
+    }
+
+    #[test]
+    fn test_layout_id() {
+        let id1 = LayoutId(42);
+        let id2 = LayoutId(42);
+        let id3 = LayoutId(100);
+
+        assert_eq!(id1, id2);
+        assert_ne!(id1, id3);
+
+        let default_id = LayoutId::default();
+        assert_eq!(default_id, LayoutId(0));
+    }
+
+    #[test]
+    fn test_object_header() {
+        let header = ObjectHeader {
+            flags: ObjectFlags::MARKED,
+            layout_id: LayoutId(1),
+            body_size: 64,
+            vtable: std::ptr::null(),
+        };
+
+        assert!(header.flags.contains(ObjectFlags::MARKED));
+        assert_eq!(header.layout_id, LayoutId(1));
+        assert_eq!(header.body_size, 64);
+        assert_eq!(header.vtable, std::ptr::null());
+
+        let default_header = ObjectHeader::default();
+        assert_eq!(default_header.body_size, 0);
+    }
+
+    #[test]
+    fn test_gc_creation() {
+        let gc1 = Gc::<u32>::new();
+        assert!(gc1.is_null());
+
+        let gc2 = Gc::<u32>::default();
+        assert!(gc2.is_null());
+
+        let ptr = 0x1000 as *mut u32;
+        let gc3 = Gc::from_raw(ptr);
+        assert!(!gc3.is_null());
+        assert_eq!(gc3.as_ptr(), ptr);
+    }
+
+    #[test]
+    fn test_gc_trace() {
+        let gc_null = Gc::<u32>::new();
+        let mut visits = Vec::new();
+        gc_null.trace(&mut |ptr| visits.push(ptr));
+        assert!(visits.is_empty());
+
+        let gc_valid = Gc::from_raw(0x2000 as *mut u32);
+        visits.clear();
+        gc_valid.trace(&mut |ptr| visits.push(ptr));
+        assert_eq!(visits.len(), 1);
+        assert_eq!(visits[0], 0x2000 as *mut u8);
+    }
+
+    #[test]
+    fn test_gc_to_object_reference() {
+        let gc = Gc::from_raw(0x3000 as *mut u32);
+        let obj_ref = gc.to_object_reference();
+        assert_eq!(obj_ref.to_raw_address().as_usize(), 0x3000);
+    }
+
+    #[test]
+    fn test_rust_object_model_header() {
+        let header = ObjectHeader {
+            flags: ObjectFlags::MARKED,
+            layout_id: LayoutId(5),
+            body_size: 128,
+            vtable: std::ptr::null(),
+        };
+
+        let mut buffer = [0u8; 256];
+        let ptr = buffer.as_mut_ptr();
+
+        unsafe {
+            ptr.cast::<ObjectHeader>().write(header);
+        }
+
+        let retrieved = RustObjectModel::header(ptr);
+        assert_eq!(retrieved.flags, ObjectFlags::MARKED);
+        assert_eq!(retrieved.layout_id, LayoutId(5));
+        assert_eq!(retrieved.body_size, 128);
+    }
+
+    #[test]
+    fn test_rust_object_model_size() {
+        let header = ObjectHeader {
+            flags: ObjectFlags::empty(),
+            layout_id: LayoutId(0),
+            body_size: 64,
+            vtable: std::ptr::null(),
+        };
+
+        let mut buffer = [0u8; 256];
+        let ptr = buffer.as_mut_ptr();
+
+        unsafe {
+            ptr.cast::<ObjectHeader>().write(header);
+        }
+
+        let size = RustObjectModel::size(ptr);
+        assert_eq!(size, std::mem::size_of::<ObjectHeader>() + 64);
+    }
+
+    #[test]
+    fn test_rust_object_model_weak_ref() {
+        let model = RustObjectModel;
+
+        // Object without weak refs
+        let header_no_weak = ObjectHeader {
+            flags: ObjectFlags::MARKED,
+            layout_id: LayoutId(0),
+            body_size: 32,
+            vtable: std::ptr::null(),
+        };
+
+        let mut buffer1 = [0u8; 256];
+        unsafe {
+            buffer1
+                .as_mut_ptr()
+                .cast::<ObjectHeader>()
+                .write(header_no_weak);
+        }
+
+        let obj_ref1 = unsafe {
+            ObjectReference::from_raw_address_unchecked(mmtk::util::Address::from_mut_ptr(
+                buffer1.as_mut_ptr(),
+            ))
+        };
+
+        assert!(model.get_weak_ref_header(obj_ref1).is_none());
+
+        // Object with weak refs
+        let header_with_weak = ObjectHeader {
+            flags: ObjectFlags::HAS_WEAK_REFS,
+            layout_id: LayoutId(0),
+            body_size: 32,
+            vtable: std::ptr::null(),
+        };
+
+        let mut buffer2 = [0u8; 256];
+        unsafe {
+            buffer2
+                .as_mut_ptr()
+                .cast::<ObjectHeader>()
+                .write(header_with_weak);
+        }
+
+        let obj_ref2 = unsafe {
+            ObjectReference::from_raw_address_unchecked(mmtk::util::Address::from_mut_ptr(
+                buffer2.as_mut_ptr(),
+            ))
+        };
+
+        assert!(model.get_weak_ref_header(obj_ref2).is_some());
+    }
+
+    #[test]
+    fn test_mmtk_object_model_functions() {
+        let obj_ref = unsafe {
+            ObjectReference::from_raw_address_unchecked(mmtk::util::Address::from_usize(0x4000))
+        };
+
+        // Test alignment functions
+        assert_eq!(RustObjectModel::get_align_when_copied(obj_ref), 8);
+        assert_eq!(RustObjectModel::get_align_offset_when_copied(obj_ref), 0);
+
+        // Test reference functions
+        let new_addr = unsafe { mmtk::util::Address::from_usize(0x5000) };
+        let new_ref = RustObjectModel::get_reference_when_copied_to(obj_ref, new_addr);
+        assert_eq!(new_ref.to_raw_address(), new_addr);
+
+        // Test type descriptor
+        let type_desc = RustObjectModel::get_type_descriptor(obj_ref);
+        assert!(!type_desc.is_empty());
+
+        // Test address functions
+        assert_eq!(
+            RustObjectModel::ref_to_object_start(obj_ref),
+            obj_ref.to_raw_address()
+        );
+        assert_eq!(
+            RustObjectModel::ref_to_header(obj_ref),
+            obj_ref.to_raw_address()
+        );
+
+        // Test dump (should not panic)
+        RustObjectModel::dump_object(obj_ref);
     }
 }
