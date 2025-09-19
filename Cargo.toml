@@ -34,7 +34,15 @@ name = "cache_benchmarks"
 harness = false
 
 [[bench]]
-name = "synchronization_benchmarks"
+name = "cache_and_memory_benchmarks"
+harness = false
+
+[[bench]]
+name = "gc_coordination_benchmarks"
+harness = false
+
+[[bench]]
+name = "simd_and_hybrid_benchmarks"
 harness = false
 
 # [[bench]]

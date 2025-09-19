@@ -24,6 +24,7 @@ pub mod safepoint;
 pub mod simd_sweep;
 pub mod test_utils;
 pub mod thread;
+pub mod verse_style_optimizations;
 pub mod weak;
 
 pub use allocator::{AllocatorInterface, MMTkAllocator};

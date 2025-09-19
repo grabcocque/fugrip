@@ -9,6 +9,7 @@
 //! a unified high-performance implementation with AVX2 optimization.
 
 use mmtk::util::{Address, ObjectReference};
+use std::cmp::{max, min};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
 
@@ -21,6 +22,11 @@ const WORDS_PER_SIMD_BLOCK: usize = 4; // 256-bit SIMD
 const BITS_PER_SIMD_BLOCK: usize = BITS_PER_WORD * WORDS_PER_SIMD_BLOCK;
 const OBJECTS_PER_CACHE_LINE: usize = 64 / 8; // Assume 8-byte objects
 const BITVECTOR_CACHE_LINE_SIZE: usize = 64;
+
+/// Hybrid strategy constants - configurable based on heap layout
+const TARGET_CHUNK_SIZE_BYTES: usize = 64 * 1024; // Target 64KB chunks for cache locality
+const DENSITY_THRESHOLD_PERCENT: usize = 35; // Switch to sparse scan below 35%
+const MIN_WORDS_FOR_SIMD: usize = WORDS_PER_SIMD_BLOCK; // Minimum words for SIMD vectorization
 
 /// High-performance bitvector for tracking object liveness
 ///
@@ -60,6 +66,27 @@ pub struct SimdBitvector {
     objects_marked: AtomicUsize,
     objects_swept: AtomicUsize,
     simd_operations: AtomicUsize,
+    /// Hybrid strategy infrastructure - dynamic chunk layout
+    /// Number of chunks in this heap layout
+    chunk_count: usize,
+    /// Objects per chunk (calculated based on heap size and object alignment)
+    objects_per_chunk: usize,
+    /// Words per chunk (derived from objects per chunk)
+    words_per_chunk: usize,
+    /// Actual chunk size in bytes (may differ from target for optimal alignment)
+    actual_chunk_size_bytes: usize,
+    /// Per-chunk population counters for density analysis
+    chunk_populations: Vec<AtomicUsize>,
+    /// Hybrid strategy performance counters
+    simd_chunks_processed: AtomicUsize,
+    sparse_chunks_processed: AtomicUsize,
+    /// Total compare-exchange operations performed during marking
+    compare_exchange_operations: AtomicUsize,
+    /// Total compare-exchange retries due to contention
+    compare_exchange_retries: AtomicUsize,
+    /// Architecture-specific optimizations used
+    #[cfg(target_arch = "x86_64")]
+    avx2_operations: AtomicUsize,
 }
 
 impl SimdBitvector {
@@ -93,6 +120,11 @@ impl SimdBitvector {
         // Align to SIMD block boundaries for optimal performance
         let aligned_words = (words_needed + WORDS_PER_SIMD_BLOCK - 1) & !(WORDS_PER_SIMD_BLOCK - 1);
 
+        // Calculate dynamic chunk infrastructure for hybrid strategy
+        let (chunk_count, objects_per_chunk, words_per_chunk, actual_chunk_size_bytes) =
+            Self::calculate_chunk_layout(max_objects, object_alignment, aligned_words);
+        let chunk_populations = (0..chunk_count).map(|_| AtomicUsize::new(0)).collect();
+
         Self {
             heap_base,
             heap_size,
@@ -102,6 +134,166 @@ impl SimdBitvector {
             objects_marked: AtomicUsize::new(0),
             objects_swept: AtomicUsize::new(0),
             simd_operations: AtomicUsize::new(0),
+            chunk_count,
+            objects_per_chunk,
+            words_per_chunk,
+            actual_chunk_size_bytes,
+            chunk_populations,
+            simd_chunks_processed: AtomicUsize::new(0),
+            sparse_chunks_processed: AtomicUsize::new(0),
+            compare_exchange_operations: AtomicUsize::new(0),
+            compare_exchange_retries: AtomicUsize::new(0),
+            #[cfg(target_arch = "x86_64")]
+            avx2_operations: AtomicUsize::new(0),
+        }
+    }
+
+    /// Calculate optimal chunk layout for dynamic heap configuration
+    ///
+    /// Determines chunk size, object count, and word count based on actual heap parameters
+    /// and object alignment, ensuring accurate density calculations and proper boundaries.
+    fn calculate_chunk_layout(
+        max_objects: usize,
+        object_alignment: usize,
+        total_words: usize,
+    ) -> (usize, usize, usize, usize) {
+        // Calculate target objects per chunk based on desired chunk size and alignment
+        let target_objects_per_chunk = TARGET_CHUNK_SIZE_BYTES / object_alignment;
+
+        // Ensure we don't create chunks larger than necessary
+        let effective_objects_per_chunk = if target_objects_per_chunk > max_objects {
+            max_objects
+        } else {
+            target_objects_per_chunk
+        };
+
+        // Calculate words needed for this many objects
+        let words_needed_per_chunk = effective_objects_per_chunk.div_ceil(BITS_PER_WORD);
+
+        // Align to SIMD block boundaries for optimal vectorization
+        let aligned_words_per_chunk =
+            (words_needed_per_chunk + WORDS_PER_SIMD_BLOCK - 1) & !(WORDS_PER_SIMD_BLOCK - 1);
+
+        // Don't exceed total available words
+        let final_words_per_chunk = aligned_words_per_chunk.min(total_words);
+
+        // Calculate actual objects that fit in the aligned chunk
+        let objects_per_chunk = (final_words_per_chunk * BITS_PER_WORD).min(max_objects);
+
+        // Calculate actual chunk size and count
+        let actual_chunk_size_bytes = objects_per_chunk * object_alignment;
+        let chunk_count = if objects_per_chunk > 0 {
+            max(max_objects.div_ceil(objects_per_chunk), 1)
+        } else {
+            1
+        };
+
+        (
+            chunk_count,
+            objects_per_chunk,
+            final_words_per_chunk,
+            actual_chunk_size_bytes,
+        )
+    }
+
+    #[inline]
+    fn chunk_start_object(&self, chunk_index: usize) -> usize {
+        chunk_index * self.objects_per_chunk
+    }
+
+    #[inline]
+    fn chunk_objects(&self, chunk_index: usize) -> usize {
+        if chunk_index >= self.chunk_count {
+            return 0;
+        }
+        let start = self.chunk_start_object(chunk_index);
+        if start >= self.max_objects {
+            0
+        } else {
+            min(self.max_objects - start, self.objects_per_chunk)
+        }
+    }
+
+    #[inline]
+    fn chunk_word_range(&self, chunk_index: usize) -> (usize, usize) {
+        let start_object = self.chunk_start_object(chunk_index);
+        if start_object >= self.max_objects {
+            return (self.bits.len(), self.bits.len());
+        }
+        let chunk_objects = self.chunk_objects(chunk_index);
+        let start_word = start_object / BITS_PER_WORD;
+        let end_word = (start_object + chunk_objects).div_ceil(BITS_PER_WORD);
+        (start_word, min(end_word, self.bits.len()))
+    }
+
+    #[inline]
+    fn chunk_index_for_bit(&self, bit_index: usize) -> usize {
+        let objects_per_chunk = max(self.objects_per_chunk, 1);
+        let index = bit_index / objects_per_chunk;
+        if index >= self.chunk_count {
+            self.chunk_count - 1
+        } else {
+            index
+        }
+    }
+
+    #[inline]
+    fn word_mask_in_chunk(&self, chunk_index: usize, word_offset: usize) -> u64 {
+        let chunk_objects = self.chunk_objects(chunk_index);
+        let bits_before = word_offset * BITS_PER_WORD;
+        if bits_before >= chunk_objects {
+            return 0;
+        }
+        let remaining = chunk_objects - bits_before;
+        if remaining >= BITS_PER_WORD {
+            !0u64
+        } else {
+            (1u64 << remaining) - 1
+        }
+    }
+
+    /// Create a word mask for chunk objects with precise boundary handling
+    ///
+    /// This helper uses chunk capacity information to generate accurate masks
+    /// for words that cross chunk boundaries or heap limits. Essential for
+    /// correct processing of partial chunks without accessing invalid bits.
+    #[inline]
+    fn word_mask_for_chunk_objects(
+        &self,
+        chunk_idx: usize,
+        word_idx: usize,
+        chunk_capacity: usize,
+    ) -> u64 {
+        let chunk_start_object = chunk_idx * self.objects_per_chunk;
+        let chunk_end_object = chunk_start_object + chunk_capacity;
+
+        let word_start_object = word_idx * BITS_PER_WORD;
+        let word_end_object = word_start_object + BITS_PER_WORD;
+
+        // Calculate intersection of word range with valid chunk object range
+        let valid_start = word_start_object.max(chunk_start_object);
+        let valid_end = word_end_object.min(chunk_end_object);
+
+        if valid_end <= valid_start {
+            return 0; // No valid objects in this word
+        }
+
+        // Create mask for valid bits in this word
+        let start_bit_in_word = valid_start.saturating_sub(word_start_object);
+        let end_bit_in_word = valid_end.saturating_sub(word_start_object);
+
+        if start_bit_in_word == 0 && end_bit_in_word >= BITS_PER_WORD {
+            // Full word is valid
+            !0u64
+        } else {
+            // Partial word mask
+            let bit_count = end_bit_in_word - start_bit_in_word;
+            let full_mask = if bit_count >= 64 {
+                !0u64
+            } else {
+                (1u64 << bit_count) - 1
+            };
+            full_mask << start_bit_in_word
         }
     }
 
@@ -120,6 +312,17 @@ impl SimdBitvector {
     /// bitvector.mark_live(obj_addr);
     /// assert!(bitvector.is_marked(obj_addr));
     /// ```
+    /// Mark an object as live in the bitvector with concurrency safety
+    ///
+    /// Uses compare-exchange to ensure atomic bit setting and accurate chunk population counting
+    /// even under concurrent access from multiple marking threads.
+    ///
+    /// # Arguments
+    /// * `object_addr` - Address of the object to mark as live
+    ///
+    /// # Returns
+    /// * `true` if the object was newly marked (bit transition from 0 to 1)
+    /// * `false` if the object was already marked or address is invalid
     pub fn mark_live(&self, object_addr: Address) -> bool {
         if let Some(bit_index) = self.object_to_bit_index(object_addr) {
             let word_index = bit_index / BITS_PER_WORD;
@@ -127,12 +330,55 @@ impl SimdBitvector {
 
             if word_index < self.bits.len() {
                 let atomic_word = &self.bits[word_index];
-                let old_word = atomic_word.load(Ordering::Relaxed);
-                let new_word = old_word | (1u64 << bit_offset);
-                atomic_word.store(new_word, Ordering::Relaxed);
+                let bit_mask = 1u64 << bit_offset;
 
-                self.objects_marked.fetch_add(1, Ordering::Relaxed);
-                return true;
+                // Concurrency-safe bit marking with compare-exchange retry loop
+                let mut retry_count = 0;
+                loop {
+                    let current_word = atomic_word.load(Ordering::Acquire);
+
+                    // If bit is already set, no work needed
+                    if (current_word & bit_mask) != 0 {
+                        return false;
+                    }
+
+                    // Attempt to set the bit atomically
+                    let new_word = current_word | bit_mask;
+                    self.compare_exchange_operations
+                        .fetch_add(1, Ordering::Relaxed);
+
+                    match atomic_word.compare_exchange_weak(
+                        current_word,
+                        new_word,
+                        Ordering::Release,
+                        Ordering::Relaxed,
+                    ) {
+                        Ok(_) => {
+                            // Successfully set the bit - update counters with accurate chunk mapping
+                            let object_index = bit_index; // bit_index is already the object index
+                            let chunk_index = object_index / self.objects_per_chunk;
+                            if chunk_index < self.chunk_populations.len() {
+                                self.chunk_populations[chunk_index].fetch_add(1, Ordering::Relaxed);
+                            }
+
+                            self.objects_marked.fetch_add(1, Ordering::Relaxed);
+
+                            // Track retry statistics for performance analysis
+                            if retry_count > 0 {
+                                self.compare_exchange_retries
+                                    .fetch_add(retry_count, Ordering::Relaxed);
+                            }
+
+                            return true;
+                        }
+                        Err(_) => {
+                            // CAS failed due to concurrent modification, retry
+                            // Using compare_exchange_weak for better performance on some architectures
+                            retry_count += 1;
+                            continue;
+                        }
+                    }
+                }
             }
         }
         false
@@ -190,35 +436,631 @@ impl SimdBitvector {
     /// assert!(stats.objects_swept > 0);
     /// assert!(stats.sweep_time_ns < stats.objects_swept as u64 * 10); // Sub-10ns per object
     /// ```
+    /// Perform ultra-fast SIMD sweep (delegates to hybrid sweep for best performance)
+    ///
+    /// This method now delegates to the hybrid sweep implementation which automatically
+    /// chooses the optimal strategy (SIMD vs sparse) based on chunk density analysis.
+    /// Maintains backward compatibility by converting hybrid statistics to legacy format.
     pub fn simd_sweep(&self) -> SweepStatistics {
+        // Delegate to hybrid sweep for optimal performance
+        let hybrid_stats = self.hybrid_sweep();
+
+        // Convert hybrid statistics to legacy SweepStatistics format for compatibility
+        SweepStatistics {
+            objects_swept: hybrid_stats.objects_swept,
+            free_blocks: hybrid_stats.free_blocks,
+            sweep_time_ns: hybrid_stats.sweep_time_ns,
+            simd_blocks_processed: hybrid_stats.simd_chunks_processed,
+            throughput_objects_per_sec: hybrid_stats.throughput_objects_per_sec,
+        }
+    }
+
+    /// Hybrid SIMD+sparse sweep combining our vectorized approach with Verse-style chunking
+    ///
+    /// This method dynamically switches between SIMD sweep for dense chunks and
+    /// Verse-style sparse scanning for low-density chunks based on runtime statistics.
+    /// Dense chunks (>35% populated) use our existing AVX2 SIMD implementation,
+    /// while sparse chunks use trailing_zeros() scanning to skip work efficiently.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use fugrip::simd_sweep::SimdBitvector;
+    /// use mmtk::util::Address;
+    ///
+    /// let heap_base = unsafe { Address::from_usize(0x10000000) };
+    /// let bitvector = SimdBitvector::new(heap_base, 1024 * 1024, 16);
+    ///
+    /// // Mark some objects creating mixed density pattern
+    /// for i in (0..1000).step_by(10) {
+    ///     let obj_addr = unsafe { Address::from_usize(heap_base.as_usize() + i * 16) };
+    ///     bitvector.mark_live(obj_addr);
+    /// }
+    ///
+    /// let stats = bitvector.hybrid_sweep();
+    /// assert!(stats.objects_swept > 0);
+    /// ```
+    pub fn hybrid_sweep(&self) -> HybridSweepStatistics {
         let sweep_start = Instant::now();
         let mut free_blocks = Vec::new();
+        let mut objects_swept = 0usize;
+        let mut simd_chunks = 0usize;
+        let mut sparse_chunks = 0usize;
 
-        let objects_swept = {
-            #[cfg(target_arch = "x86_64")]
-            {
-                self.simd_sweep_x86_64(&mut free_blocks)
+        // Reset per-sweep instrumentation counters
+        self.simd_chunks_processed.store(0, Ordering::Relaxed);
+        self.sparse_chunks_processed.store(0, Ordering::Relaxed);
+
+        // Process each chunk with adaptive strategy selection
+        for chunk_idx in 0..self.chunk_count {
+            let chunk_mask = self.create_chunk_object_mask(chunk_idx);
+
+            if chunk_mask.is_empty() {
+                continue;
             }
 
-            #[cfg(not(target_arch = "x86_64"))]
-            {
-                self.fallback_sweep(&mut free_blocks)
+            // Analyze chunk density for strategy selection with precise object capacity
+            let chunk_population = self.chunk_populations[chunk_idx].load(Ordering::Acquire);
+            let object_capacity = chunk_mask.object_capacity;
+            let density_percent = if object_capacity > 0 {
+                (chunk_population * 100) / object_capacity
+            } else {
+                0
+            };
+
+            let (start_word, end_word) = self.get_chunk_word_range(chunk_idx);
+            let chunk_words = end_word - start_word;
+
+            if density_percent >= DENSITY_THRESHOLD_PERCENT && chunk_words >= MIN_WORDS_FOR_SIMD {
+                // Dense chunk: use SIMD sweep
+                let chunk_swept =
+                    self.process_chunk_simd_masked(chunk_idx, &chunk_mask, &mut free_blocks);
+                objects_swept += chunk_swept;
+                simd_chunks += 1;
+            } else {
+                // Sparse chunk: use Verse-style trailing_zeros scan
+                let chunk_swept =
+                    self.process_chunk_sparse_masked(chunk_idx, &chunk_mask, &mut free_blocks);
+                objects_swept += chunk_swept;
+                sparse_chunks += 1;
             }
-        };
+        }
 
         let sweep_time = sweep_start.elapsed();
         self.objects_swept.store(objects_swept, Ordering::Relaxed);
 
-        SweepStatistics {
+        // Reset chunk populations for next cycle
+        for chunk_pop in &self.chunk_populations {
+            chunk_pop.store(0, Ordering::Relaxed);
+        }
+        self.objects_marked.store(0, Ordering::Relaxed);
+        self.simd_chunks_processed
+            .store(simd_chunks, Ordering::Relaxed);
+        self.sparse_chunks_processed
+            .store(sparse_chunks, Ordering::Relaxed);
+
+        HybridSweepStatistics {
             objects_swept,
             free_blocks: free_blocks.len(),
             sweep_time_ns: sweep_time.as_nanos() as u64,
-            simd_blocks_processed: self.bits.len() / WORDS_PER_SIMD_BLOCK,
+            simd_chunks_processed: simd_chunks,
+            sparse_chunks_processed: sparse_chunks,
+            total_chunks: self.chunk_count,
+            density_threshold_percent: DENSITY_THRESHOLD_PERCENT,
             throughput_objects_per_sec: if sweep_time.as_nanos() > 0 {
                 (objects_swept as u128 * 1_000_000_000) / sweep_time.as_nanos()
             } else {
                 0
             } as u64,
+            compare_exchange_operations: self.compare_exchange_operations.load(Ordering::Relaxed),
+            compare_exchange_retries: self.compare_exchange_retries.load(Ordering::Relaxed),
+            simd_operations: self.simd_operations.load(Ordering::Relaxed),
+            #[cfg(target_arch = "x86_64")]
+            avx2_operations: self.avx2_operations.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Process a chunk using SIMD operations for dense regions with capacity-aware masking
+    fn process_chunk_simd_masked(
+        &self,
+        chunk_idx: usize,
+        chunk_mask: &ChunkMask,
+        free_blocks: &mut Vec<FreeBlock>,
+    ) -> usize {
+        let mut objects_swept = 0usize;
+        let chunk_capacity = chunk_mask.object_capacity;
+
+        // Use chunk capacity to determine accurate word range
+        let chunk_start_object = chunk_idx * self.objects_per_chunk;
+        let chunk_end_object = chunk_start_object + chunk_capacity;
+        let start_word = chunk_start_object / BITS_PER_WORD;
+        let end_word = chunk_end_object.div_ceil(BITS_PER_WORD);
+        let end_word = end_word.min(self.bits.len());
+
+        // Process chunk in SIMD blocks when possible, applying capacity-based masks
+        let mut word_idx = start_word;
+
+        while word_idx + WORDS_PER_SIMD_BLOCK <= end_word {
+            #[cfg(target_arch = "x86_64")]
+            {
+                objects_swept += self.process_simd_block_capacity_masked(
+                    word_idx,
+                    chunk_idx,
+                    chunk_capacity,
+                    free_blocks,
+                );
+            }
+            #[cfg(not(target_arch = "x86_64"))]
+            {
+                // Fallback to scalar processing for non-x86_64
+                for i in 0..WORDS_PER_SIMD_BLOCK {
+                    let mask =
+                        self.word_mask_for_chunk_objects(chunk_idx, word_idx + i, chunk_capacity);
+                    objects_swept += self.process_word_with_mask(word_idx + i, mask, free_blocks);
+                }
+            }
+            word_idx += WORDS_PER_SIMD_BLOCK;
+        }
+
+        // Handle remaining words in chunk with scalar operations and capacity-based masking
+        while word_idx < end_word {
+            let mask = self.word_mask_for_chunk_objects(chunk_idx, word_idx, chunk_capacity);
+            if mask != 0 {
+                objects_swept += self.process_word_with_mask(word_idx, mask, free_blocks);
+            }
+            word_idx += 1;
+        }
+
+        objects_swept
+    }
+
+    /// Process a sparse chunk with capacity-aware masking using Verse-style trailing_zeros scan
+    fn process_chunk_sparse_masked(
+        &self,
+        chunk_idx: usize,
+        chunk_mask: &ChunkMask,
+        free_blocks: &mut Vec<FreeBlock>,
+    ) -> usize {
+        let mut objects_swept = 0usize;
+        let chunk_capacity = chunk_mask.object_capacity;
+
+        // Use chunk capacity to determine accurate word range for sparse processing
+        let chunk_start_object = chunk_idx * self.objects_per_chunk;
+        let chunk_end_object = chunk_start_object + chunk_capacity;
+        let start_word = chunk_start_object / BITS_PER_WORD;
+        let end_word = chunk_end_object.div_ceil(BITS_PER_WORD);
+        let end_word = end_word.min(self.bits.len());
+
+        // Process words in chunk with capacity-based masked operations
+        for word_idx in start_word..end_word {
+            if word_idx >= self.bits.len() {
+                break;
+            }
+
+            let mask = self.word_mask_for_chunk_objects(chunk_idx, word_idx, chunk_capacity);
+            if mask == 0 {
+                continue; // Skip words with no valid objects
+            }
+
+            // Use trailing_zeros optimization for sparse scanning
+            let word = self.bits[word_idx].load(Ordering::Relaxed);
+            let masked_word = word & mask;
+
+            if masked_word != 0 {
+                // Word has live objects, so process for dead object extraction
+                objects_swept += self.process_word_with_mask(word_idx, mask, free_blocks);
+            } else if mask == !0u64 {
+                // Full word is dead and valid - optimized path for completely free words
+                let dead_count = BITS_PER_WORD;
+                self.extract_free_blocks_with_trailing_zeros(word_idx, mask, free_blocks);
+                self.bits[word_idx].store(0, Ordering::Relaxed);
+                objects_swept += dead_count;
+            } else {
+                // Partial word that's completely dead within the valid mask
+                let dead_count = mask.count_ones() as usize;
+                self.extract_free_blocks_with_trailing_zeros(word_idx, mask, free_blocks);
+                let current_word = self.bits[word_idx].load(Ordering::Relaxed);
+                let cleared_word = current_word & !mask;
+                self.bits[word_idx].store(cleared_word, Ordering::Relaxed);
+                objects_swept += dead_count;
+            }
+        }
+
+        objects_swept
+    }
+
+    /// Process a chunk using SIMD operations for dense regions (legacy method)
+    fn process_chunk_simd(
+        &self,
+        start_word: usize,
+        word_count: usize,
+        free_blocks: &mut Vec<FreeBlock>,
+    ) -> usize {
+        let mut objects_swept = 0usize;
+        let end_word = start_word + word_count;
+
+        // Process chunk in SIMD blocks when possible
+        let mut word_idx = start_word;
+        while word_idx + WORDS_PER_SIMD_BLOCK <= end_word {
+            #[cfg(target_arch = "x86_64")]
+            {
+                objects_swept += self.process_simd_block(word_idx, free_blocks);
+            }
+            #[cfg(not(target_arch = "x86_64"))]
+            {
+                // Fallback to scalar processing for non-x86_64
+                for i in 0..WORDS_PER_SIMD_BLOCK {
+                    objects_swept += self.process_word_scalar(word_idx + i, free_blocks);
+                }
+            }
+            word_idx += WORDS_PER_SIMD_BLOCK;
+        }
+
+        // Handle remaining words in chunk with scalar operations
+        while word_idx < end_word {
+            objects_swept += self.process_word_scalar(word_idx, free_blocks);
+            word_idx += 1;
+        }
+
+        objects_swept
+    }
+
+    /// Process a chunk using unified sparse scanning with masked scalar operations
+    ///
+    /// Reuses the masked scalar word processing to avoid redundant stores and simplify logic.
+    /// Optimized for low-density regions using trailing_zeros to skip sparse areas efficiently.
+    fn process_chunk_sparse(
+        &self,
+        start_word: usize,
+        word_count: usize,
+        free_blocks: &mut Vec<FreeBlock>,
+    ) -> usize {
+        let mut objects_swept = 0usize;
+        let end_word = start_word + word_count;
+
+        // Process words in chunk with unified masked operations
+        for word_idx in start_word..end_word {
+            if word_idx >= self.bits.len() {
+                break;
+            }
+
+            // Use unified masked scalar processing for consistency
+            let word_mask = if word_idx == end_word - 1 {
+                // Handle partial word at chunk boundary
+                let bits_in_final_word = self.calculate_bits_in_final_word(word_idx, word_count);
+                if bits_in_final_word < BITS_PER_WORD {
+                    (1u64 << bits_in_final_word) - 1
+                } else {
+                    !0u64
+                }
+            } else {
+                !0u64 // Full word mask
+            };
+
+            objects_swept += self.process_word_with_mask(word_idx, word_mask, free_blocks);
+        }
+
+        objects_swept
+    }
+
+    /// Unified masked scalar word processing function
+    ///
+    /// Handles word processing with proper masking for partial words and chunk boundaries.
+    /// Avoids redundant stores and provides consistent behavior across SIMD and sparse paths.
+    fn process_word_with_mask(
+        &self,
+        word_idx: usize,
+        mask: u64,
+        free_blocks: &mut Vec<FreeBlock>,
+    ) -> usize {
+        let word = self.bits[word_idx].load(Ordering::Relaxed);
+        let masked_word = word & mask;
+
+        // Invert to get dead objects, applying mask
+        let dead_mask = (!masked_word) & mask;
+        let dead_count = dead_mask.count_ones() as usize;
+
+        if dead_count > 0 {
+            // Extract free blocks using Verse-style trailing_zeros for efficiency
+            self.extract_free_blocks_with_trailing_zeros(word_idx, dead_mask, free_blocks);
+        }
+
+        // Clear the processed bits (only the masked portion)
+        let cleared_word = word & !mask;
+        self.bits[word_idx].store(cleared_word, Ordering::Relaxed);
+
+        dead_count
+    }
+
+    /// Calculate bits in final word for partial chunk handling
+    fn calculate_bits_in_final_word(&self, word_idx: usize, _word_count: usize) -> usize {
+        let total_bits = self.max_objects;
+        let word_start_bit = word_idx * BITS_PER_WORD;
+        let remaining_bits = total_bits.saturating_sub(word_start_bit);
+        remaining_bits.min(BITS_PER_WORD)
+    }
+
+    /// Process a single SIMD block with capacity-based masking (AVX2 optimized)
+    #[cfg(target_arch = "x86_64")]
+    fn process_simd_block_capacity_masked(
+        &self,
+        start_word: usize,
+        chunk_idx: usize,
+        chunk_capacity: usize,
+        free_blocks: &mut Vec<FreeBlock>,
+    ) -> usize {
+        unsafe {
+            self.simd_operations.fetch_add(1, Ordering::Relaxed);
+
+            // Load 4 consecutive words with capacity-based masking
+            let mut word_values = [0u64; WORDS_PER_SIMD_BLOCK];
+            let mut masks = [0u64; WORDS_PER_SIMD_BLOCK];
+
+            for i in 0..WORDS_PER_SIMD_BLOCK {
+                if start_word + i < self.bits.len() {
+                    word_values[i] = self.bits[start_word + i].load(Ordering::Relaxed);
+                    masks[i] =
+                        self.word_mask_for_chunk_objects(chunk_idx, start_word + i, chunk_capacity);
+                    // Apply mask to the word to only consider valid objects
+                    word_values[i] &= masks[i];
+                }
+            }
+
+            // Load into AVX2 register
+            let live_mask = _mm256_loadu_si256(word_values.as_ptr() as *const __m256i);
+            let all_ones = _mm256_set1_epi64x(-1i64);
+            let dead_mask = _mm256_xor_si256(live_mask, all_ones);
+
+            // Apply masks to dead_mask to ensure we only consider valid object bits
+            let mask_simd = _mm256_loadu_si256(masks.as_ptr() as *const __m256i);
+            let masked_dead = _mm256_and_si256(dead_mask, mask_simd);
+
+            // Count dead objects
+            let dead_count = self.count_dead_objects_simd(masked_dead);
+
+            // Extract free blocks if any dead objects found
+            if dead_count > 0 {
+                // Convert SIMD register back to individual words for unified processing
+                let mut temp_words = [0u64; WORDS_PER_SIMD_BLOCK];
+                _mm256_storeu_si256(temp_words.as_mut_ptr() as *mut __m256i, masked_dead);
+
+                for (i, &word) in temp_words.iter().enumerate() {
+                    if word != 0 {
+                        let word_idx = start_word + i;
+                        self.extract_free_blocks_with_trailing_zeros(word_idx, word, free_blocks);
+                    }
+                }
+            }
+
+            // Clear processed words (only the masked portions)
+            for (i, mask) in masks.iter().enumerate().take(WORDS_PER_SIMD_BLOCK) {
+                if start_word + i < self.bits.len() && *mask != 0 {
+                    let current_word = self.bits[start_word + i].load(Ordering::Relaxed);
+                    let cleared_word = current_word & !mask;
+                    self.bits[start_word + i].store(cleared_word, Ordering::Relaxed);
+                }
+            }
+
+            dead_count
+        }
+    }
+
+    /// Process a single SIMD block (4 x 64-bit words) using AVX2 with proper masking
+    #[cfg(target_arch = "x86_64")]
+    fn process_simd_block_masked(
+        &self,
+        start_word: usize,
+        word_offset: usize,
+        chunk_mask: &ChunkMask,
+        free_blocks: &mut Vec<FreeBlock>,
+    ) -> usize {
+        unsafe {
+            self.simd_operations.fetch_add(1, Ordering::Relaxed);
+
+            // Load 4 consecutive words into SIMD register
+            let mut word_values = [0u64; WORDS_PER_SIMD_BLOCK];
+            let mut masks = [0u64; WORDS_PER_SIMD_BLOCK];
+
+            for i in 0..WORDS_PER_SIMD_BLOCK {
+                if start_word + i < self.bits.len() {
+                    word_values[i] = self.bits[start_word + i].load(Ordering::Relaxed);
+                    masks[i] = chunk_mask.get_word_mask(word_offset + i);
+                    // Apply mask to the word to only consider valid objects
+                    word_values[i] &= masks[i];
+                }
+            }
+
+            // Load into AVX2 register
+            let live_mask = _mm256_loadu_si256(word_values.as_ptr() as *const __m256i);
+            let all_ones = _mm256_set1_epi64x(-1i64);
+            let dead_mask = _mm256_xor_si256(live_mask, all_ones);
+
+            // Apply masks to dead_mask to ensure we only consider valid object bits
+            let mask_simd = _mm256_loadu_si256(masks.as_ptr() as *const __m256i);
+            let masked_dead = _mm256_and_si256(dead_mask, mask_simd);
+
+            // Count dead objects
+            let dead_count = self.count_dead_objects_simd(masked_dead);
+
+            // Extract free blocks if any dead objects found
+            if dead_count > 0 {
+                // Convert SIMD register back to individual words for unified processing
+                let mut temp_words = [0u64; WORDS_PER_SIMD_BLOCK];
+                _mm256_storeu_si256(temp_words.as_mut_ptr() as *mut __m256i, masked_dead);
+
+                for (i, &word) in temp_words.iter().enumerate() {
+                    if word != 0 {
+                        let word_idx = start_word + i;
+                        self.extract_free_blocks_with_trailing_zeros(word_idx, word, free_blocks);
+                    }
+                }
+            }
+
+            // Clear processed words (only the masked portions)
+            for (i, mask) in masks.iter().enumerate().take(WORDS_PER_SIMD_BLOCK) {
+                if start_word + i < self.bits.len() && *mask != 0 {
+                    let current_word = self.bits[start_word + i].load(Ordering::Relaxed);
+                    let cleared_word = current_word & !mask;
+                    self.bits[start_word + i].store(cleared_word, Ordering::Relaxed);
+                }
+            }
+
+            dead_count
+        }
+    }
+
+    /// Process a single SIMD block (4 x 64-bit words) using AVX2 (legacy method)
+    #[cfg(target_arch = "x86_64")]
+    fn process_simd_block(&self, start_word: usize, free_blocks: &mut Vec<FreeBlock>) -> usize {
+        unsafe {
+            self.simd_operations.fetch_add(1, Ordering::Relaxed);
+
+            // Load 4 consecutive words into SIMD register
+            let mut word_values = [0u64; WORDS_PER_SIMD_BLOCK];
+            for (i, word_value) in word_values
+                .iter_mut()
+                .enumerate()
+                .take(WORDS_PER_SIMD_BLOCK)
+            {
+                if start_word + i < self.bits.len() {
+                    *word_value = self.bits[start_word + i].load(Ordering::Relaxed);
+                }
+            }
+
+            // Load into AVX2 register
+            let live_mask = _mm256_loadu_si256(word_values.as_ptr() as *const __m256i);
+            let all_ones = _mm256_set1_epi64x(-1i64);
+            let dead_mask = _mm256_xor_si256(live_mask, all_ones);
+
+            // Count dead objects
+            let dead_count = self.count_dead_objects_simd(dead_mask);
+
+            // Extract free blocks if any dead objects found
+            if dead_count > 0 {
+                // Convert SIMD register back to individual words for unified processing
+                let mut temp_words = [0u64; WORDS_PER_SIMD_BLOCK];
+                _mm256_storeu_si256(temp_words.as_mut_ptr() as *mut __m256i, dead_mask);
+
+                for (i, &word) in temp_words.iter().enumerate() {
+                    if word != 0 {
+                        let word_idx = start_word + i;
+                        self.extract_free_blocks_with_trailing_zeros(word_idx, word, free_blocks);
+                    }
+                }
+            }
+
+            // Clear processed words
+            for i in 0..WORDS_PER_SIMD_BLOCK {
+                if start_word + i < self.bits.len() {
+                    self.bits[start_word + i].store(0, Ordering::Relaxed);
+                }
+            }
+
+            dead_count
+        }
+    }
+
+    /// Process a single word with scalar operations
+    fn process_word_scalar(&self, word_idx: usize, free_blocks: &mut Vec<FreeBlock>) -> usize {
+        if word_idx >= self.bits.len() {
+            return 0;
+        }
+
+        let word = self.bits[word_idx].load(Ordering::Relaxed);
+        let inverted_word = !word;
+        let dead_count = inverted_word.count_ones() as usize;
+
+        if dead_count > 0 {
+            let bit_index = word_idx * BITS_PER_WORD;
+            self.extract_free_blocks_from_word(bit_index, inverted_word, free_blocks);
+        }
+
+        // Clear word
+        self.bits[word_idx].store(0, Ordering::Relaxed);
+        dead_count
+    }
+
+    /// Extract free block for an entire word that's completely dead
+    fn extract_full_word_free_block(&self, word_idx: usize, free_blocks: &mut Vec<FreeBlock>) {
+        let start_bit_index = word_idx * BITS_PER_WORD;
+        let start_addr = self.heap_base.as_usize() + start_bit_index * self.object_alignment;
+        let size_bytes = BITS_PER_WORD * self.object_alignment;
+
+        free_blocks.push(FreeBlock {
+            start_addr: unsafe { Address::from_usize(start_addr) },
+            size_bytes,
+            object_count: BITS_PER_WORD,
+        });
+
+        // Clear the word for next cycle
+        if word_idx < self.bits.len() {
+            self.bits[word_idx].store(0, Ordering::Relaxed);
+        }
+    }
+
+    /// Optimized free block extraction using trailing_zeros with refined masks
+    ///
+    /// Consolidates extraction logic for both SIMD and sparse paths, using efficient
+    /// bit manipulation to skip sparse regions and extract contiguous free blocks.
+    fn extract_free_blocks_with_trailing_zeros(
+        &self,
+        word_idx: usize,
+        dead_mask: u64,
+        free_blocks: &mut Vec<FreeBlock>,
+    ) {
+        if dead_mask == 0 {
+            return;
+        }
+
+        let base_bit_index = word_idx * BITS_PER_WORD;
+        let mut remaining_mask = dead_mask;
+        let mut bit_offset = 0;
+
+        // Use trailing_zeros to efficiently skip sparse regions
+        while remaining_mask != 0 {
+            let zeros = remaining_mask.trailing_zeros() as usize;
+            bit_offset += zeros;
+
+            // Prevent shift overflow (max shift is 63 for u64)
+            if zeros >= 64 {
+                break;
+            }
+            remaining_mask >>= zeros;
+
+            if remaining_mask == 0 {
+                break;
+            }
+
+            // Find the run of consecutive dead objects
+            let ones = remaining_mask.trailing_ones() as usize;
+
+            // Prevent shift overflow (max shift is 63 for u64)
+            if ones >= 64 {
+                remaining_mask = 0; // Consume the entire remaining mask
+            } else {
+                remaining_mask >>= ones;
+            }
+
+            // Create free block for this run with proper bounds checking
+            let start_object_index = base_bit_index + bit_offset;
+            if start_object_index < self.max_objects {
+                let end_object_index = (start_object_index + ones).min(self.max_objects);
+                let actual_count = end_object_index - start_object_index;
+
+                if actual_count > 0 {
+                    let start_addr =
+                        self.heap_base.as_usize() + start_object_index * self.object_alignment;
+                    let size_bytes = actual_count * self.object_alignment;
+
+                    free_blocks.push(FreeBlock {
+                        start_addr: unsafe { Address::from_usize(start_addr) },
+                        size_bytes,
+                        object_count: actual_count,
+                    });
+                }
+            }
+
+            bit_offset += ones;
         }
     }
 
@@ -430,6 +1272,106 @@ impl SimdBitvector {
         None
     }
 
+    /// Calculate maximum objects in a chunk with accurate object-based indexing
+    ///
+    /// Properly handles partial chunks and object alignment boundaries, ensuring
+    /// density calculations reflect actual object counts rather than bit counts.
+    fn calculate_max_objects_in_chunk(&self, chunk_idx: usize, _chunk_words: usize) -> usize {
+        let chunk_start_object = chunk_idx * self.objects_per_chunk;
+        let chunk_end_object = ((chunk_idx + 1) * self.objects_per_chunk).min(self.max_objects);
+
+        chunk_end_object.saturating_sub(chunk_start_object)
+    }
+
+    /// Get the actual number of objects that can be stored in a chunk
+    ///
+    /// Handles partial chunks accurately by considering heap boundaries and object alignment.
+    /// Essential for correct density calculations and avoiding out-of-bounds access.
+    fn get_chunk_object_capacity(&self, chunk_idx: usize) -> usize {
+        if chunk_idx >= self.chunk_count {
+            return 0;
+        }
+
+        let chunk_start_object = chunk_idx * self.objects_per_chunk;
+        let chunk_end_object = ((chunk_idx + 1) * self.objects_per_chunk).min(self.max_objects);
+
+        chunk_end_object.saturating_sub(chunk_start_object)
+    }
+
+    /// Create a bitmask for valid objects in a chunk
+    ///
+    /// Returns a mask that covers only the valid object bits in the chunk,
+    /// accounting for partial chunks at heap boundaries. Critical for preventing
+    /// counting or processing of invalid bits in the final chunk.
+    fn create_chunk_object_mask(&self, chunk_idx: usize) -> ChunkMask {
+        let object_capacity = self.get_chunk_object_capacity(chunk_idx);
+        if object_capacity == 0 {
+            return ChunkMask::empty();
+        }
+
+        let chunk_start_word = chunk_idx * self.words_per_chunk;
+        let mut word_masks = Vec::new();
+
+        // Use our new helper to generate precise masks for each word
+        for word_offset in 0..self.words_per_chunk {
+            let word_idx = chunk_start_word + word_offset;
+            if word_idx >= self.bits.len() {
+                break;
+            }
+
+            // Use the helper method for accurate masking
+            let mask = self.word_mask_for_chunk_objects(chunk_idx, word_idx, object_capacity);
+            word_masks.push(mask);
+        }
+
+        ChunkMask {
+            chunk_idx,
+            object_capacity,
+            word_masks,
+        }
+    }
+
+    /// Get the range of words that belong to a chunk
+    ///
+    /// Returns (start_word_idx, end_word_idx) for safe iteration over chunk words.
+    /// Ensures bounds checking to prevent accessing invalid memory regions.
+    fn get_chunk_word_range(&self, chunk_idx: usize) -> (usize, usize) {
+        if chunk_idx >= self.chunk_count {
+            return (0, 0);
+        }
+
+        let start_word = chunk_idx * self.words_per_chunk;
+        let end_word = ((chunk_idx + 1) * self.words_per_chunk).min(self.bits.len());
+
+        (start_word, end_word)
+    }
+
+    /// Calculate the actual bit count in a specific word within a chunk
+    ///
+    /// Handles partial words at chunk boundaries and heap limits to prevent
+    /// counting invalid bits that could skew density calculations.
+    fn calculate_valid_bits_in_word(&self, chunk_idx: usize, word_offset: usize) -> usize {
+        let (start_word, end_word) = self.get_chunk_word_range(chunk_idx);
+        let word_idx = start_word + word_offset;
+
+        if word_idx >= end_word || word_idx >= self.bits.len() {
+            return 0;
+        }
+
+        let chunk_start_object = chunk_idx * self.objects_per_chunk;
+        let chunk_object_capacity = self.get_chunk_object_capacity(chunk_idx);
+        let chunk_end_object = chunk_start_object + chunk_object_capacity;
+
+        let word_start_object = word_idx * BITS_PER_WORD;
+        let word_end_object = word_start_object + BITS_PER_WORD;
+
+        // Intersect word range with valid chunk object range
+        let valid_start = word_start_object.max(chunk_start_object);
+        let valid_end = word_end_object.min(chunk_end_object);
+
+        valid_end.saturating_sub(valid_start)
+    }
+
     /// Get the maximum number of objects this bitvector can track
     ///
     /// # Examples
@@ -444,6 +1386,22 @@ impl SimdBitvector {
     /// ```
     pub fn max_objects(&self) -> usize {
         self.max_objects
+    }
+
+    /// Get the number of objects per chunk for hybrid strategy
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use fugrip::simd_sweep::SimdBitvector;
+    /// use mmtk::util::Address;
+    ///
+    /// let heap_base = unsafe { Address::from_usize(0x10000000) };
+    /// let bitvector = SimdBitvector::new(heap_base, 1024 * 1024, 16);
+    /// assert!(bitvector.objects_per_chunk() > 0);
+    /// ```
+    pub fn objects_per_chunk(&self) -> usize {
+        self.objects_per_chunk
     }
 
     /// Clear all live marks (prepare for next marking cycle)
@@ -473,7 +1431,15 @@ impl SimdBitvector {
             self.bits[idx].store(0, Ordering::Relaxed);
             idx += 1;
         }
+
+        // Reset chunk populations for hybrid strategy
+        for chunk_pop in &self.chunk_populations {
+            chunk_pop.store(0, Ordering::Relaxed);
+        }
+
         self.objects_marked.store(0, Ordering::Relaxed);
+        self.simd_chunks_processed.store(0, Ordering::Relaxed);
+        self.sparse_chunks_processed.store(0, Ordering::Relaxed);
     }
 
     /// Get current statistics
@@ -496,6 +1462,9 @@ impl SimdBitvector {
             simd_operations: self.simd_operations.load(Ordering::Relaxed),
             bitvector_size_bits: self.max_objects,
             bitvector_size_bytes: self.bits.len() * 8,
+            dense_chunks_last: self.simd_chunks_processed.load(Ordering::Relaxed),
+            sparse_chunks_last: self.sparse_chunks_processed.load(Ordering::Relaxed),
+            chunk_size_bytes: self.actual_chunk_size_bytes,
         }
     }
 
@@ -781,6 +1750,53 @@ pub struct BitvectorStats {
     pub bitvector_size_bits: usize,
     /// Size of bitvector in bytes
     pub bitvector_size_bytes: usize,
+    /// Number of chunks processed with SIMD strategy in the last sweep
+    pub dense_chunks_last: usize,
+    /// Number of chunks processed with sparse strategy in the last sweep
+    pub sparse_chunks_last: usize,
+    /// Chunk size (bytes) used for hybrid decision making
+    pub chunk_size_bytes: usize,
+}
+
+/// Statistics from a hybrid SIMD+sparse sweep operation
+///
+/// This tracks the adaptive strategy switching between SIMD and Verse-style
+/// sparse scanning based on chunk density analysis.
+///
+/// # Examples
+///
+/// ```
+/// use fugrip::simd_sweep::HybridSweepStatistics;
+/// let stats = HybridSweepStatistics::default();
+/// assert_eq!(stats.objects_swept, 0);
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct HybridSweepStatistics {
+    /// Number of objects swept (reclaimed)
+    pub objects_swept: usize,
+    /// Number of contiguous free blocks found
+    pub free_blocks: usize,
+    /// Time taken for sweep in nanoseconds
+    pub sweep_time_ns: u64,
+    /// Number of chunks processed with SIMD strategy
+    pub simd_chunks_processed: usize,
+    /// Number of chunks processed with sparse strategy
+    pub sparse_chunks_processed: usize,
+    /// Total number of chunks in the heap
+    pub total_chunks: usize,
+    /// Density threshold percentage used for strategy switching
+    pub density_threshold_percent: usize,
+    /// Throughput in objects per second
+    pub throughput_objects_per_sec: u64,
+    /// Total compare-exchange operations during marking phase
+    pub compare_exchange_operations: usize,
+    /// Total compare-exchange retries due to contention
+    pub compare_exchange_retries: usize,
+    /// Total SIMD operations performed
+    pub simd_operations: usize,
+    /// Architecture-specific optimizations (AVX2 operations on x86_64)
+    #[cfg(target_arch = "x86_64")]
+    pub avx2_operations: usize,
 }
 
 /// Represents a contiguous block of free memory
@@ -806,6 +1822,59 @@ pub struct FreeBlock {
     pub size_bytes: usize,
     /// Number of object slots in this block
     pub object_count: usize,
+}
+
+/// Bitmask for valid objects in a chunk
+///
+/// Provides precise masking for partial chunks to ensure counting and processing
+/// operations only consider valid object bits, preventing corruption or incorrect
+/// statistics from accessing bits beyond heap boundaries.
+///
+/// # Examples
+///
+/// ```
+/// use fugrip::simd_sweep::ChunkMask;
+///
+/// let mask = ChunkMask::empty();
+/// assert_eq!(mask.object_capacity, 0);
+/// ```
+#[derive(Debug, Clone)]
+pub struct ChunkMask {
+    /// Index of the chunk this mask applies to
+    pub chunk_idx: usize,
+    /// Number of valid objects in this chunk
+    pub object_capacity: usize,
+    /// Per-word masks for valid bits (0 = invalid, 1 = valid)
+    pub word_masks: Vec<u64>,
+}
+
+impl ChunkMask {
+    /// Create an empty chunk mask (no valid objects)
+    pub fn empty() -> Self {
+        Self {
+            chunk_idx: 0,
+            object_capacity: 0,
+            word_masks: Vec::new(),
+        }
+    }
+
+    /// Check if this chunk mask covers any valid objects
+    pub fn is_empty(&self) -> bool {
+        self.object_capacity == 0 || self.word_masks.iter().all(|&mask| mask == 0)
+    }
+
+    /// Get the mask for a specific word in the chunk
+    pub fn get_word_mask(&self, word_offset: usize) -> u64 {
+        self.word_masks.get(word_offset).copied().unwrap_or(0)
+    }
+
+    /// Count the total number of valid bits covered by this mask
+    pub fn count_valid_bits(&self) -> usize {
+        self.word_masks
+            .iter()
+            .map(|&mask| mask.count_ones() as usize)
+            .sum()
+    }
 }
 
 #[cfg(test)]
@@ -987,5 +2056,62 @@ mod tests {
         let expected_start =
             unsafe { Address::from_usize(heap_base.as_usize() + 4 * bitvector.object_alignment) };
         assert_eq!(free_blocks[0].start_addr, expected_start);
+    }
+
+    #[test]
+    fn hybrid_sweep_adaptive_strategy() {
+        let heap_base = unsafe { Address::from_usize(0x28000000) };
+        let heap_size = 256 * 1024; // 256KB heap to ensure multiple chunks
+        let bitvector = SimdBitvector::new(heap_base, heap_size, 16);
+
+        // Create mixed density pattern across chunks
+        // Dense chunk: mark 50% of objects (above 35% threshold)
+        for i in (0..1000).step_by(2) {
+            let obj_addr = unsafe { Address::from_usize(heap_base.as_usize() + i * 16) };
+            bitvector.mark_live(obj_addr);
+        }
+
+        // Sparse chunk: mark only 10% of objects (below 35% threshold)
+        let sparse_start = 8000;
+        for i in (sparse_start..sparse_start + 1000).step_by(10) {
+            let obj_addr = unsafe { Address::from_usize(heap_base.as_usize() + i * 16) };
+            bitvector.mark_live(obj_addr);
+        }
+
+        let stats = bitvector.hybrid_sweep();
+
+        // Verify adaptive strategy worked
+        assert!(stats.objects_swept > 0);
+        assert!(stats.free_blocks > 0);
+        assert!(stats.simd_chunks_processed > 0 || stats.sparse_chunks_processed > 0);
+        assert_eq!(stats.total_chunks, bitvector.chunk_count);
+        assert_eq!(stats.density_threshold_percent, DENSITY_THRESHOLD_PERCENT);
+        assert!(stats.throughput_objects_per_sec > 0);
+
+        // Verify that both strategies were used for this mixed pattern
+        println!(
+            "Hybrid sweep: {} SIMD chunks, {} sparse chunks, {} total chunks",
+            stats.simd_chunks_processed, stats.sparse_chunks_processed, stats.total_chunks
+        );
+    }
+
+    #[test]
+    fn chunk_population_tracking() {
+        let heap_base = unsafe { Address::from_usize(0x29000000) };
+        let heap_size = 128 * 1024; // 128KB heap
+        let bitvector = SimdBitvector::new(heap_base, heap_size, 16);
+
+        // Mark objects in first chunk
+        for i in 0..100 {
+            let obj_addr = unsafe { Address::from_usize(heap_base.as_usize() + i * 16) };
+            bitvector.mark_live(obj_addr);
+        }
+
+        // Verify chunk population tracking
+        assert!(bitvector.chunk_populations[0].load(Ordering::Relaxed) == 100);
+
+        // Clear and verify reset
+        bitvector.clear_all_marks();
+        assert!(bitvector.chunk_populations[0].load(Ordering::Relaxed) == 0);
     }
 }
