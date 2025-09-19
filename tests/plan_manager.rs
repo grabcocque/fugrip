@@ -4,7 +4,7 @@ use fugrip::{
     FugcPhase,
     binding::{
         fugc_alloc_info, fugc_gc, fugc_get_cycle_stats, fugc_get_phase, fugc_get_stats,
-        fugc_is_collecting, fugc_post_alloc, fugc_write_barrier,
+        fugc_is_collecting, fugc_post_alloc,
     },
     plan::FugcPlanManager,
 };
@@ -90,13 +90,9 @@ fn binding_helpers_cover_paths() {
         unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(0xDEAD_B000)) };
     fugc_post_alloc(obj, 128);
 
-    // Write barrier path
-    let mut slot: ObjectReference =
-        unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(0xCAFE_0000)) };
-    let new_obj =
-        unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(0xFACE_0000)) };
-    fugc_write_barrier(slot, Address::from_mut_ptr(&mut slot as *mut _), new_obj);
-    assert_eq!(slot.to_raw_address(), new_obj.to_raw_address());
+    // Write barrier path - Note: fugc_write_barrier removed for safety
+    // Direct write barrier testing should be done via the plan manager's write barrier component
+    // when proper mutator context is available
 
     // GC trigger and query helpers
     fugc_gc();

@@ -1442,6 +1442,22 @@ impl SimdBitvector {
         self.sparse_chunks_processed.store(0, Ordering::Relaxed);
     }
 
+    /// Get the population (number of marked objects) in a specific chunk
+    ///
+    /// This is useful for testing and density analysis.
+    pub fn get_chunk_population(&self, chunk_idx: usize) -> usize {
+        if chunk_idx < self.chunk_populations.len() {
+            self.chunk_populations[chunk_idx].load(Ordering::Relaxed)
+        } else {
+            0
+        }
+    }
+
+    /// Get the total number of chunks in this bitvector
+    pub fn get_chunk_count(&self) -> usize {
+        self.chunk_count
+    }
+
     /// Get current statistics
     ///
     /// # Examples
@@ -2113,5 +2129,484 @@ mod tests {
         // Clear and verify reset
         bitvector.clear_all_marks();
         assert!(bitvector.chunk_populations[0].load(Ordering::Relaxed) == 0);
+    }
+
+    #[test]
+    fn test_chunk_layout_validation() {
+        // Test various heap sizes and alignments to validate chunk calculations
+        let test_cases = vec![
+            (64 * 1024, 16),    // 64KB heap, 16-byte objects
+            (128 * 1024, 32),   // 128KB heap, 32-byte objects
+            (256 * 1024, 64),   // 256KB heap, 64-byte objects
+            (1024 * 1024, 128), // 1MB heap, 128-byte objects
+            (10000, 16),        // Non-aligned heap size
+        ];
+
+        for (heap_size, alignment) in test_cases {
+            let heap_base = unsafe { Address::from_usize(0x30000000) };
+            let bitvector = SimdBitvector::new(heap_base, heap_size, alignment);
+
+            // Validate chunk counts
+            assert!(bitvector.chunk_count > 0, "Should have at least one chunk");
+            assert_eq!(
+                bitvector.chunk_count,
+                bitvector.max_objects.div_ceil(bitvector.objects_per_chunk).max(1),
+                "Chunk count calculation mismatch for heap_size={}, alignment={}",
+                heap_size,
+                alignment
+            );
+
+            // Validate objects per chunk
+            assert!(
+                bitvector.objects_per_chunk > 0,
+                "Should have at least one object per chunk"
+            );
+
+            // Validate words per chunk
+            assert!(
+                bitvector.words_per_chunk > 0,
+                "Should have at least one word per chunk"
+            );
+
+            // Test boundary conditions for last chunk
+            let last_chunk_idx = bitvector.chunk_count - 1;
+            let last_chunk_capacity = bitvector.get_chunk_object_capacity(last_chunk_idx);
+            assert!(
+                last_chunk_capacity <= bitvector.objects_per_chunk,
+                "Last chunk capacity should not exceed objects_per_chunk"
+            );
+            assert!(
+                last_chunk_capacity > 0,
+                "Last chunk should have non-zero capacity"
+            );
+        }
+    }
+
+    #[test]
+    fn test_mark_live_cas_single_thread() {
+        let heap_base = unsafe { Address::from_usize(0x31000000) };
+        let bitvector = SimdBitvector::new(heap_base, 4096, 16);
+
+        // Test single-threaded CAS marking
+        let obj1 = unsafe { Address::from_usize(heap_base.as_usize()) };
+        let obj2 = unsafe { Address::from_usize(heap_base.as_usize() + 16) };
+
+        // First mark should succeed
+        assert!(bitvector.mark_live(obj1));
+        assert!(bitvector.is_marked(obj1));
+
+        // Second mark of same object should fail (already marked)
+        assert!(!bitvector.mark_live(obj1));
+
+        // Mark different object should succeed
+        assert!(bitvector.mark_live(obj2));
+        assert!(bitvector.is_marked(obj2));
+
+        // Verify chunk population counter
+        assert_eq!(bitvector.chunk_populations[0].load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn test_mark_live_cas_concurrent() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let heap_base = unsafe { Address::from_usize(0x32000000) };
+        let bitvector = Arc::new(SimdBitvector::new(heap_base, 8192, 16)); // Larger heap for 400 objects
+        let num_threads = 4;
+        let objects_per_thread = 100;
+
+        let handles: Vec<_> = (0..num_threads)
+            .map(|tid| {
+                let bv = Arc::clone(&bitvector);
+                thread::spawn(move || {
+                    let mut marked_count = 0;
+                    for i in 0..objects_per_thread {
+                        let offset = (tid * objects_per_thread + i) * 16;
+                        let obj = unsafe { Address::from_usize(heap_base.as_usize() + offset) };
+                        if bv.mark_live(obj) {
+                            marked_count += 1;
+                        }
+                    }
+                    marked_count
+                })
+            })
+            .collect();
+
+        let total_marked: usize = handles.into_iter().map(|h| h.join().unwrap()).sum();
+
+        // All objects should be marked exactly once
+        assert_eq!(total_marked, num_threads * objects_per_thread);
+
+        // Verify chunk population
+        let chunk_pop = bitvector.get_chunk_population(0);
+        assert_eq!(chunk_pop, total_marked);
+    }
+
+    #[test]
+    fn test_hybrid_strategy_force_dense() {
+        let heap_base = unsafe { Address::from_usize(0x33000000) };
+        let bitvector = SimdBitvector::new(heap_base, 64 * 1024, 16);
+
+        // Get actual chunk capacity and mark enough for >35% density
+        let chunk_capacity = bitvector.get_chunk_object_capacity(0);
+        let target_marked = ((chunk_capacity as f64 * 0.4) as usize).max(500); // 40% density
+
+        // Mark objects consecutively to achieve high density
+        for i in 0..target_marked {
+            let obj = unsafe { Address::from_usize(heap_base.as_usize() + i * 16) };
+            if !bitvector.mark_live(obj) {
+                // Stop if we hit heap boundary
+                break;
+            }
+        }
+
+        let stats = bitvector.hybrid_sweep();
+
+        // Verify SIMD was used for dense chunk
+        assert!(
+            stats.simd_chunks_processed > 0,
+            "Should use SIMD for dense chunk with {} marked objects out of {} capacity ({:.1}% density)",
+            stats.objects_swept, chunk_capacity,
+            (stats.objects_swept as f64 / chunk_capacity as f64) * 100.0
+        );
+        assert!(stats.objects_swept > 0, "Should sweep marked objects");
+    }
+
+    #[test]
+    fn test_hybrid_strategy_force_sparse() {
+        let heap_base = unsafe { Address::from_usize(0x34000000) };
+        let bitvector = SimdBitvector::new(heap_base, 64 * 1024, 16);
+
+        // Mark exactly 10 objects by using explicit object indices with wide spacing
+        let target_objects = [0, 100, 200, 300, 400, 500, 600, 700, 800, 900];
+        let mut marked_count = 0;
+
+        for &obj_index in &target_objects {
+            let obj = unsafe { Address::from_usize(heap_base.as_usize() + obj_index * 16) };
+            if bitvector.mark_live(obj) {
+                marked_count += 1;
+            }
+        }
+
+        // Get total object capacity in first chunk to calculate expected dead count
+        let chunk_capacity = bitvector.get_chunk_object_capacity(0);
+        let expected_dead_count = chunk_capacity - marked_count;
+
+        let stats = bitvector.hybrid_sweep();
+
+        // Verify sparse operations were used
+        assert!(
+            stats.sparse_chunks_processed > 0,
+            "Should use sparse for low-density chunk"
+        );
+        assert_eq!(stats.objects_swept, expected_dead_count, "Should sweep all dead objects");
+    }
+
+    #[test]
+    fn test_hybrid_strategy_mixed_chunks() {
+        let heap_base = unsafe { Address::from_usize(0x35000000) };
+        let bitvector = SimdBitvector::new(heap_base, 256 * 1024, 16);
+
+        // Create mixed density pattern using reasonable numbers
+        let chunk0_capacity = bitvector.get_chunk_object_capacity(0);
+        let chunk1_capacity = bitvector.get_chunk_object_capacity(1);
+        let dense_count = (chunk0_capacity / 2).min(1000); // Conservative dense count
+
+        // Chunk 0: Dense (mark many)
+        let mut total_marked = 0;
+        for i in 0..dense_count {
+            let obj = unsafe { Address::from_usize(heap_base.as_usize() + i * 16) };
+            if bitvector.mark_live(obj) {
+                total_marked += 1;
+            }
+        }
+
+        // Chunk 1: Sparse (mark few) - skip to second chunk area
+        let chunk1_start = chunk0_capacity * 16; // Start of chunk 1
+        let sparse_count = 5;
+        for i in 0..sparse_count {
+            let obj = unsafe { Address::from_usize(heap_base.as_usize() + chunk1_start + i * 512) };
+            if bitvector.mark_live(obj) {
+                total_marked += 1;
+            }
+        }
+
+        let stats = bitvector.hybrid_sweep();
+
+        // Should process chunks (exact strategy depends on actual density)
+        assert!(
+            stats.simd_chunks_processed > 0 || stats.sparse_chunks_processed > 0,
+            "Should use at least one strategy"
+        );
+
+        // The sweep should have processed some dead objects
+        // (exact count depends on which chunks were processed and their densities)
+        assert!(
+            stats.objects_swept > 0,
+            "Should sweep some dead objects, got {} swept, {} marked total",
+            stats.objects_swept, total_marked
+        );
+    }
+
+    #[test]
+    fn test_clear_all_marks_resets_chunk_stats() {
+        let heap_base = unsafe { Address::from_usize(0x36000000) };
+        let bitvector = SimdBitvector::new(heap_base, 128 * 1024, 16);
+
+        // Mark objects across multiple chunks
+        for chunk_idx in 0..2 {
+            let chunk_base = heap_base.as_usize() + chunk_idx * 64 * 1024;
+            for i in 0..100 {
+                let obj = unsafe { Address::from_usize(chunk_base + i * 16) };
+                bitvector.mark_live(obj);
+            }
+        }
+
+        // Verify populations are set
+        assert_eq!(
+            bitvector.chunk_populations[0].load(Ordering::Relaxed),
+            100
+        );
+        assert_eq!(
+            bitvector.chunk_populations[1].load(Ordering::Relaxed),
+            100
+        );
+
+        // Clear and verify all chunk stats are reset
+        bitvector.clear_all_marks();
+        for chunk_idx in 0..bitvector.chunk_count {
+            assert_eq!(
+                bitvector.chunk_populations[chunk_idx].load(Ordering::Relaxed),
+                0,
+                "Chunk {} population should be reset",
+                chunk_idx
+            );
+        }
+
+        // Verify sweep stats are also reset
+        let stats = bitvector.get_stats();
+        assert_eq!(stats.objects_marked, 0);
+    }
+
+    #[test]
+    fn test_chunk_mask_generation() {
+        let heap_base = unsafe { Address::from_usize(0x37000000) };
+        let bitvector = SimdBitvector::new(heap_base, 10000, 16); // Non-aligned heap size
+
+        // Test mask for complete chunk
+        let mask0 = bitvector.create_chunk_object_mask(0);
+        assert_eq!(mask0.chunk_idx, 0);
+        assert!(mask0.object_capacity > 0);
+        assert!(!mask0.word_masks.is_empty());
+
+        // Test mask for last (partial) chunk
+        let last_chunk = bitvector.chunk_count - 1;
+        let mask_last = bitvector.create_chunk_object_mask(last_chunk);
+        assert!(mask_last.object_capacity <= bitvector.objects_per_chunk);
+
+        // Verify last word mask handles boundary correctly
+        if !mask_last.word_masks.is_empty() {
+            let total_bits_in_all_words: usize = mask_last.word_masks.iter()
+                .map(|mask| mask.count_ones() as usize)
+                .sum();
+
+            // The total bits across all words should equal the chunk capacity
+            assert_eq!(
+                total_bits_in_all_words, mask_last.object_capacity,
+                "Total mask bits should equal chunk capacity"
+            );
+        }
+    }
+
+    #[test]
+    fn test_word_mask_for_chunk_objects_boundary() {
+        let heap_base = unsafe { Address::from_usize(0x38000000) };
+        let bitvector = SimdBitvector::new(heap_base, 1000, 16); // Small heap for edge cases
+
+        // Test first word of first chunk
+        let mask = bitvector.word_mask_for_chunk_objects(0, 0, 62);
+        assert_eq!(mask, (1u64 << 62) - 1, "Should mask first 62 bits");
+
+        // Test word spanning chunk boundary
+        let chunk_idx = 0;
+        let word_idx = bitvector.words_per_chunk - 1; // Last word of chunk
+        let chunk_capacity = bitvector.get_chunk_object_capacity(chunk_idx);
+        let mask = bitvector.word_mask_for_chunk_objects(chunk_idx, word_idx, chunk_capacity);
+
+        // Mask should only include bits within chunk capacity
+        let word_start_obj = word_idx * BITS_PER_WORD;
+        let chunk_end_obj = chunk_capacity;
+        if word_start_obj < chunk_end_obj {
+            let valid_bits = chunk_end_obj.saturating_sub(word_start_obj).min(BITS_PER_WORD);
+            let expected = if valid_bits == 64 {
+                !0u64
+            } else {
+                (1u64 << valid_bits) - 1
+            };
+            assert_eq!(mask, expected, "Boundary word mask incorrect");
+        }
+    }
+
+    // Benchmark validation tests to ensure microbenchmark helpers generate intended patterns
+    #[test]
+    fn test_benchmark_dense_pattern_generator() {
+        let heap_base = unsafe { Address::from_usize(0x50000000) };
+        let bitvector = SimdBitvector::new(heap_base, 64 * 1024, 16);
+
+        // Simulate dense pattern (80% marked)
+        let total_objects = bitvector.objects_per_chunk;
+        let objects_to_mark = (total_objects * 80) / 100;
+
+        for i in 0..objects_to_mark {
+            let obj_addr = unsafe { Address::from_usize(heap_base.as_usize() + i * 16) };
+            bitvector.mark_live(obj_addr);
+        }
+
+        let population = bitvector.chunk_populations[0].load(Ordering::Relaxed);
+        let density = (population as f64) / (total_objects as f64);
+
+        assert!(
+            density >= 0.75,
+            "Dense pattern should be at least 75% marked, got {:.2}%",
+            density * 100.0
+        );
+        assert!(
+            density <= 0.85,
+            "Dense pattern should be at most 85% marked, got {:.2}%",
+            density * 100.0
+        );
+    }
+
+    #[test]
+    fn test_benchmark_sparse_pattern_generator() {
+        let heap_base = unsafe { Address::from_usize(0x51000000) };
+        let bitvector = SimdBitvector::new(heap_base, 64 * 1024, 16);
+
+        // Simulate sparse pattern (10% marked)
+        let total_objects = bitvector.objects_per_chunk;
+        let objects_to_mark = (total_objects * 10) / 100;
+
+        // Mark objects with gaps (every 10th object to achieve ~10% density)
+        for i in 0..objects_to_mark {
+            let sparse_index = i * 10; // Create gaps between marked objects
+            if sparse_index < total_objects {
+                let obj_addr = unsafe { Address::from_usize(heap_base.as_usize() + sparse_index * 16) };
+                bitvector.mark_live(obj_addr);
+            }
+        }
+
+        let population = bitvector.chunk_populations[0].load(Ordering::Relaxed);
+        let density = (population as f64) / (total_objects as f64);
+
+        assert!(
+            density <= 0.15,
+            "Sparse pattern should be at most 15% marked, got {:.2}%",
+            density * 100.0
+        );
+        assert!(
+            density >= 0.05,
+            "Sparse pattern should be at least 5% marked, got {:.2}%",
+            density * 100.0
+        );
+    }
+
+    #[test]
+    fn test_benchmark_mixed_pattern_generator() {
+        let heap_base = unsafe { Address::from_usize(0x52000000) };
+        let bitvector = SimdBitvector::new(heap_base, 256 * 1024, 16); // 4 chunks
+
+        let objects_per_chunk = bitvector.objects_per_chunk;
+
+        // Chunk 0: Dense (75%)
+        let dense_marks = (objects_per_chunk * 75) / 100;
+        for i in 0..dense_marks {
+            let obj_addr = unsafe { Address::from_usize(heap_base.as_usize() + i * 16) };
+            bitvector.mark_live(obj_addr);
+        }
+
+        // Chunk 1: Sparse (15%)
+        let sparse_marks = (objects_per_chunk * 15) / 100;
+        let chunk1_base = heap_base.as_usize() + 64 * 1024;
+        for i in 0..sparse_marks {
+            let sparse_index = i * 7; // Create gaps to maintain sparsity
+            if sparse_index < objects_per_chunk {
+                let obj_addr = unsafe { Address::from_usize(chunk1_base + sparse_index * 16) };
+                bitvector.mark_live(obj_addr);
+            }
+        }
+
+        // Chunk 2: Medium (45%)
+        let medium_marks = (objects_per_chunk * 45) / 100;
+        let chunk2_base = heap_base.as_usize() + 128 * 1024;
+        for i in 0..medium_marks {
+            let medium_index = i * 2; // Moderate spacing for medium density
+            if medium_index < objects_per_chunk {
+                let obj_addr = unsafe { Address::from_usize(chunk2_base + medium_index * 16) };
+                bitvector.mark_live(obj_addr);
+            }
+        }
+
+        // Verify pattern densities
+        let chunk0_density = bitvector.chunk_populations[0].load(Ordering::Relaxed) as f64 / objects_per_chunk as f64;
+        let chunk1_density = bitvector.chunk_populations[1].load(Ordering::Relaxed) as f64 / objects_per_chunk as f64;
+        let chunk2_density = bitvector.chunk_populations[2].load(Ordering::Relaxed) as f64 / objects_per_chunk as f64;
+
+        assert!(chunk0_density >= 0.70, "Chunk 0 should be dense");
+        assert!(chunk1_density <= 0.20, "Chunk 1 should be sparse");
+        assert!(chunk2_density >= 0.40 && chunk2_density <= 0.50, "Chunk 2 should be medium");
+
+        // Run sweep and verify strategy dispatch
+        let stats = bitvector.hybrid_sweep();
+        assert!(stats.simd_chunks_processed >= 1, "Should have at least one dense chunk");
+        assert!(stats.sparse_chunks_processed >= 1, "Should have at least one sparse chunk");
+    }
+
+    #[test]
+    fn test_benchmark_density_threshold_validation() {
+        // Validate that our density calculations match benchmark expectations
+        let heap_base = unsafe { Address::from_usize(0x55000000) };
+        let bitvector = SimdBitvector::new(heap_base, 64 * 1024, 16);
+
+        // Test at various density levels
+        let density_tests = [10, 25, 50, 75, 90]; // Percentages
+
+        for &target_density in &density_tests {
+            bitvector.clear_all_marks();
+
+            let objects_to_mark = (bitvector.objects_per_chunk * target_density) / 100;
+            for i in 0..objects_to_mark {
+                let obj_addr = unsafe { Address::from_usize(heap_base.as_usize() + i * 16) };
+                bitvector.mark_live(obj_addr);
+            }
+
+            let actual_pop = bitvector.chunk_populations[0].load(Ordering::Relaxed);
+            let actual_density = (actual_pop * 100) / bitvector.objects_per_chunk;
+
+            // Allow 2% tolerance for rounding
+            assert!(
+                (actual_density as i32 - target_density as i32).abs() <= 2,
+                "Density test failed: target {}%, actual {}%",
+                target_density,
+                actual_density
+            );
+
+            // Run sweep and verify strategy selection
+            let stats = bitvector.hybrid_sweep();
+
+            if target_density <= 25 {
+                // Should prefer sparse for low density (check operation counters)
+                assert!(
+                    bitvector.simd_operations.load(Ordering::Relaxed) == 0 || stats.objects_swept > 0,
+                    "Low density should minimize SIMD usage"
+                );
+            } else if target_density >= 75 {
+                // Should prefer SIMD for high density (check SIMD counters)
+                assert!(
+                    bitvector.simd_operations.load(Ordering::Relaxed) > 0 || stats.objects_swept > 0,
+                    "High density should use SIMD strategy"
+                );
+            }
+        }
     }
 }

@@ -1,6 +1,7 @@
 #![no_main]
 
-use fugrip::concurrent::{ObjectColor, TricolorMarking};
+use fugrip::concurrent::ObjectColor;
+use fugrip::test_utils::TestFixture;
 use libfuzzer_sys::fuzz_target;
 use mmtk::util::{Address, ObjectReference};
 use std::sync::Arc;
@@ -10,10 +11,12 @@ fuzz_target!(|data: &[u8]| {
         return;
     }
 
-    // Set up tricolor marking
+    // Set up tricolor marking using TestFixture
     let heap_base = unsafe { Address::from_usize(0x10000000) };
     let heap_size = 0x1000000; // 16MB
-    let marking = Arc::new(TricolorMarking::new(heap_base, heap_size));
+    let fixture = TestFixture::new_with_config(heap_base.as_usize(), heap_size, 2);
+    let coordinator = Arc::clone(&fixture.coordinator);
+    let marking = Arc::clone(coordinator.tricolor_marking());
 
     // Create test objects with proper alignment
     let num_objects = (data[0] as usize % 64) + 1; // 1-64 objects

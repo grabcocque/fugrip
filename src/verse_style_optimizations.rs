@@ -354,4 +354,257 @@ mod tests {
         assert_eq!(version, 2);
         assert!(!is_iterating);
     }
+
+    #[test]
+    fn test_allocation_tracker_edge_cases() {
+        let tracker = VerseStyleAllocationTracker::new(1024, || {});
+
+        // Test zero allocation
+        tracker.notify_allocation(0);
+        assert_eq!(tracker.get_live_bytes(), 0);
+
+        // Test large allocation
+        tracker.notify_allocation(usize::MAX / 2);
+        assert!(tracker.get_live_bytes() > 0);
+
+        // Test deallocation of more than allocated (sad path)
+        tracker.notify_deallocation(usize::MAX);
+        // Should handle gracefully (may wrap or saturate)
+
+        // Test rapid alternating allocations/deallocations
+        for i in 0..100 {
+            tracker.notify_allocation(i * 64);
+            tracker.notify_deallocation(i * 32);
+        }
+    }
+
+    #[test]
+    fn test_mark_bits_concurrent_operations() {
+        let mark_bits = VerseStyleMarkBits::new(
+            Arc::new(crate::concurrent::TricolorMarking::new(
+                unsafe { mmtk::util::Address::from_usize(0x1000000) },
+                1024 * 1024
+            )),
+            unsafe { mmtk::util::Address::from_usize(0x1000000) },
+            1024 * 1024
+        );
+        let obj1 = unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(0x1001000)) };
+        let obj2 = unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(0x1002000)) };
+
+        // Test rapid marking/unmarking patterns
+        for i in 0..50 {
+            let mark = i % 2 == 0;
+            mark_bits.set_marked_fast(obj1, mark);
+            mark_bits.set_marked_fast(obj2, !mark);
+            assert_eq!(mark_bits.is_marked_fast(obj1), mark);
+            assert_eq!(mark_bits.is_marked_fast(obj2), !mark);
+        }
+    }
+
+    #[test]
+    fn test_batch_marking_operations() {
+        let mark_bits = VerseStyleMarkBits::new(
+            Arc::new(crate::concurrent::TricolorMarking::new(
+                unsafe { mmtk::util::Address::from_usize(0x1000000) },
+                1024 * 1024
+            )),
+            unsafe { mmtk::util::Address::from_usize(0x1000000) },
+            1024 * 1024
+        );
+
+        // Create a batch of objects within the heap range
+        let objects: Vec<ObjectReference> = (0..10)
+            .map(|i| unsafe {
+                ObjectReference::from_raw_address_unchecked(Address::from_usize(0x1000000 + i * 0x100))
+            })
+            .collect();
+
+        // Ensure all objects start unmarked
+        for obj in &objects {
+            mark_bits.set_marked_fast(*obj, false);
+        }
+
+        // Test batch marking
+        let marked_count = mark_bits.mark_batch(&objects, true);
+        assert_eq!(marked_count, 10);
+
+        // Verify all are marked
+        for obj in &objects {
+            assert!(mark_bits.is_marked_fast(*obj));
+        }
+
+        // Test batch unmarking
+        let unmarked_count = mark_bits.mark_batch(&objects, false);
+        assert_eq!(unmarked_count, 10);
+
+        // Verify all are unmarked
+        for obj in &objects {
+            assert!(!mark_bits.is_marked_fast(*obj));
+        }
+    }
+
+    #[test]
+    fn test_iteration_state_concurrent_access() {
+        let state = VerseStyleIterationState::new();
+
+        // Test nested iteration attempts (sad path)
+        let version1 = state.begin_iteration();
+        assert_eq!(version1, 1);
+
+        // Begin iteration while already iterating
+        let version2 = state.begin_iteration();
+        // May allow nested or return error - either is valid
+
+        // End iteration multiple times (sad path)
+        state.end_iteration();
+        state.end_iteration(); // Double end - should handle gracefully
+
+        let (_final_version, is_iterating) = state.get_current_state();
+        assert!(!is_iterating); // Should not be iterating after ends
+    }
+
+    #[test]
+    fn test_verse_style_optimizations_integration() {
+        let optimizer = VerseStyleHeapConfig::new(
+            unsafe { mmtk::util::Address::from_usize(0x1000000) },
+            1024 * 1024,
+            Arc::new(crate::concurrent::TricolorMarking::new(
+                unsafe { mmtk::util::Address::from_usize(0x1000000) },
+                1024 * 1024
+            )),
+            1024
+        );
+
+        // Test combined operations
+        optimizer.notify_allocation(1024);
+        optimizer.notify_allocation(2048);
+
+        let obj = unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(0x3000)) };
+
+        // Mark object
+        assert!(optimizer.set_object_marked(obj, true));
+        assert!(optimizer.is_object_marked(obj));
+
+        // Check stats
+        let (live_bytes, _swept_bytes) = optimizer.get_allocation_stats();
+        assert_eq!(live_bytes, 3072);
+
+        // Deallocate and check
+        optimizer.notify_deallocation(1024);
+        let (live_bytes_after, _) = optimizer.get_allocation_stats();
+        assert_eq!(live_bytes_after, 2048);
+
+        // Unmark object
+        assert!(optimizer.set_object_marked(obj, false));
+        assert!(!optimizer.is_object_marked(obj));
+    }
+
+    #[test]
+    fn test_allocation_tracker_overflow_handling() {
+        let tracker = VerseStyleAllocationTracker::new(1024, || {});
+
+        // Test near-overflow conditions
+        tracker.notify_allocation(usize::MAX - 1000);
+        tracker.notify_allocation(500); // Should cause overflow
+
+        // Verify it handles overflow gracefully
+        let _live_bytes = tracker.get_live_bytes();
+        // May wrap around or saturate - either is acceptable
+
+        // Test sweep tracking with overflow
+        tracker.notify_sweep(1000);
+        let swept_bytes = tracker.get_swept_bytes();
+        assert!(swept_bytes > 0);
+    }
+
+    #[test]
+    fn test_mark_bits_extreme_addresses() {
+        let mark_bits = VerseStyleMarkBits::new(
+            Arc::new(crate::concurrent::TricolorMarking::new(
+                unsafe { mmtk::util::Address::from_usize(0x1000000) },
+                1024 * 1024
+            )),
+            unsafe { mmtk::util::Address::from_usize(0x1000000) },
+            1024 * 1024
+        );
+
+        // Test with various address patterns within heap range
+        let addresses = [
+            0x1000000,        // Heap base
+            0x1008000,        // Higher address within heap
+            0x1080000,        // Even higher within heap
+            0x10F0000,        // Near end of heap
+            0x10FF000,        // Very close to end of heap
+        ];
+
+        for addr in addresses {
+            let obj = unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(addr)) };
+
+            // Test marking at various addresses
+            assert!(!mark_bits.is_marked_fast(obj));
+            assert!(mark_bits.set_marked_fast(obj, true));
+            assert!(mark_bits.is_marked_fast(obj));
+            assert!(mark_bits.set_marked_fast(obj, false));
+            assert!(!mark_bits.is_marked_fast(obj));
+        }
+    }
+
+    #[test]
+    fn test_empty_batch_operations() {
+        let mark_bits = VerseStyleMarkBits::new(
+            Arc::new(crate::concurrent::TricolorMarking::new(
+                unsafe { mmtk::util::Address::from_usize(0x1000000) },
+                1024 * 1024
+            )),
+            unsafe { mmtk::util::Address::from_usize(0x1000000) },
+            1024 * 1024
+        );
+
+        // Test empty batch
+        let empty_objects: Vec<ObjectReference> = vec![];
+        let marked_count = mark_bits.mark_batch(&empty_objects, true);
+        assert_eq!(marked_count, 0);
+
+        // Test single object batch
+        let single_obj = unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(0x4000)) };
+        let single_batch = vec![single_obj];
+        let marked_count = mark_bits.mark_batch(&single_batch, true);
+        assert_eq!(marked_count, 1);
+        assert!(mark_bits.is_marked_fast(single_obj));
+    }
+
+    #[test]
+    fn test_optimization_state_consistency() {
+        let optimizer = VerseStyleHeapConfig::new(
+            unsafe { mmtk::util::Address::from_usize(0x1000000) },
+            1024 * 1024,
+            Arc::new(crate::concurrent::TricolorMarking::new(
+                unsafe { mmtk::util::Address::from_usize(0x1000000) },
+                1024 * 1024
+            )),
+            1024
+        );
+
+        // Test rapid state changes
+        for i in 0..100 {
+            let obj = unsafe {
+                ObjectReference::from_raw_address_unchecked(Address::from_usize(0x5000 + i * 0x10))
+            };
+
+            optimizer.notify_allocation(i * 64);
+            optimizer.set_object_marked(obj, true);
+
+            // Verify consistency
+            assert!(optimizer.is_object_marked(obj));
+
+            if i % 10 == 0 {
+                optimizer.notify_deallocation(i * 32);
+            }
+        }
+
+        // Check final state consistency
+        let (live_bytes, _swept_bytes) = optimizer.get_allocation_stats();
+        assert!(live_bytes > 0);
+        // swept_bytes is usize, so >= 0 check is redundant
+    }
 }

@@ -483,8 +483,8 @@ impl MemoryLayoutOptimizer {
                 return class;
             }
         }
-        // Round up to next power of 2 for large objects
-        size.next_power_of_two()
+        // Round up to next power of 2 for large objects, but handle overflow
+        size.saturating_add(1).next_power_of_two()
     }
 
     /// Record an allocation for statistical tracking.
@@ -560,7 +560,8 @@ impl MemoryLayoutOptimizer {
     /// ```
     pub fn colocate_metadata(&self, object_addr: Address, metadata_size: usize) -> Address {
         let aligned_metadata_size = (metadata_size + 7) & !7; // 8-byte align
-        let metadata_addr = object_addr.as_usize() - aligned_metadata_size;
+        let object_usize = object_addr.as_usize();
+        let metadata_addr = object_usize.saturating_sub(aligned_metadata_size);
         unsafe { Address::from_usize(metadata_addr) }
     }
 }

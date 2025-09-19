@@ -147,6 +147,7 @@ impl AllocatorInterface for MMTkAllocator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::ObjectFlags;
 
     #[test]
     fn test_mmtk_allocator_creation() {
@@ -171,5 +172,119 @@ mod tests {
 
         test_allocator(&MMTkAllocator::new());
         // StubAllocator moved to test_utils.rs for testing purposes
+    }
+
+    #[test]
+    fn test_mmtk_allocator_edge_cases() {
+        let _allocator = MMTkAllocator::new();
+        let _header = ObjectHeader::default();
+
+        // Test zero-byte allocation
+        // Note: This test documents current behavior - zero-byte allocations
+        // get MIN_OBJECT_SIZE bytes due to MMTk requirements
+        let result = std::panic::catch_unwind(|| {
+            // This would require an actual MMTk mutator which we can't easily create in tests
+            // So we test the size calculation logic instead
+            let total_bytes = std::mem::size_of::<ObjectHeader>() + 0;
+            let allocation_size = std::cmp::max(total_bytes, MIN_OBJECT_SIZE);
+            assert!(allocation_size >= MIN_OBJECT_SIZE);
+        });
+        assert!(result.is_ok());
+
+        // Test alignment calculation
+        let align = std::mem::align_of::<usize>().max(std::mem::align_of::<ObjectHeader>());
+        assert!(align >= std::mem::align_of::<ObjectHeader>());
+        assert!(align >= std::mem::align_of::<usize>());
+
+        // Test large allocation size calculation
+        let large_body = 1024 * 1024; // 1MB
+        let total_bytes = std::mem::size_of::<ObjectHeader>() + large_body;
+        let allocation_size = std::cmp::max(total_bytes, MIN_OBJECT_SIZE);
+        assert_eq!(allocation_size, total_bytes); // Should not be clamped to MIN_OBJECT_SIZE
+    }
+
+    #[test]
+    fn test_allocator_interface_safepoint_polling() {
+        let allocator = MMTkAllocator::new();
+
+        // Test with different mutator thread IDs
+        let mutator1 = MutatorThread::new(0);
+        let mutator2 = MutatorThread::new(1);
+        let mutator_max = MutatorThread::new(usize::MAX);
+
+        // These should not panic
+        allocator.poll_safepoint(&mutator1);
+        allocator.poll_safepoint(&mutator2);
+        allocator.poll_safepoint(&mutator_max);
+    }
+
+    #[test]
+    fn test_object_header_handling() {
+        // Test various object header configurations
+        let mut header = ObjectHeader::default();
+
+        // Test with different header states
+        header.flags |= ObjectFlags::MARKED;
+        header.flags |= ObjectFlags::PINNED;
+
+        // Verify header can be written and size calculated correctly
+        let header_size = std::mem::size_of::<ObjectHeader>();
+        assert!(header_size > 0);
+        assert!(header_size <= 64); // Reasonable upper bound
+
+        // Test alignment requirements
+        let header_align = std::mem::align_of::<ObjectHeader>();
+        assert!(header_align.is_power_of_two());
+    }
+
+    #[test]
+    fn test_allocation_size_calculations() {
+        // Test boundary conditions for allocation size calculations
+        let test_cases = [
+            (0, MIN_OBJECT_SIZE),
+            (1, std::mem::size_of::<ObjectHeader>() + 1),
+            (MIN_OBJECT_SIZE, MIN_OBJECT_SIZE),
+            (MIN_OBJECT_SIZE * 2, std::mem::size_of::<ObjectHeader>() + MIN_OBJECT_SIZE * 2),
+        ];
+
+        for (body_bytes, expected_min_total) in test_cases {
+            let total_bytes = std::mem::size_of::<ObjectHeader>() + body_bytes;
+            let allocation_size = std::cmp::max(total_bytes, MIN_OBJECT_SIZE);
+
+            assert!(allocation_size >= expected_min_total);
+            assert!(allocation_size >= MIN_OBJECT_SIZE);
+            assert!(allocation_size >= std::mem::size_of::<ObjectHeader>());
+        }
+    }
+
+    #[test]
+    fn test_mmtk_allocator_constants() {
+        // Test that allocator can be created as const
+        const ALLOCATOR: MMTkAllocator = MMTkAllocator::new();
+        let _runtime_allocator = ALLOCATOR;
+
+        // Test Default implementation
+        let default_allocator = MMTkAllocator::default();
+        // Can't easily compare allocators, but creation should not panic
+        drop(default_allocator);
+    }
+
+    #[test]
+    fn test_error_handling_patterns() {
+        // Test GcError patterns that would be returned
+        let oom_error = GcError::OutOfMemory;
+        match oom_error {
+            GcError::OutOfMemory => {
+                // Test that error can be matched
+            }
+            _ => panic!("Wrong error type"),
+        }
+
+        // Test that GcResult can represent success and failure
+        let success: GcResult<*mut u8> = Ok(std::ptr::null_mut());
+        let failure: GcResult<*mut u8> = Err(GcError::OutOfMemory);
+
+        assert!(success.is_ok());
+        assert!(failure.is_err());
     }
 }

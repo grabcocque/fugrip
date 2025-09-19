@@ -1238,3 +1238,154 @@ fn stress_final_verification() {
     println!("  ✓ Multi-generational promotion under contention");
     println!("  ✓ Generational write barrier stress resilience");
 }
+
+/// Stress test for enhanced SIMD sweep with capacity-aware processing
+#[test]
+fn stress_enhanced_simd_sweep_capacity_aware() {
+    use fugrip::simd_sweep::SimdBitvector;
+
+    let heap_base = unsafe { Address::from_usize(0x80000000) };
+    let heap_size = 2 * 1024 * 1024; // 2MB for multiple chunks
+    let bitvector = Arc::new(SimdBitvector::new(heap_base, heap_size, 16));
+
+    let num_threads = 8;
+    let operations_per_thread = 10000;
+    let stop_flag = Arc::new(AtomicBool::new(false));
+
+    // Stats for verification
+    let objects_marked = Arc::new(AtomicUsize::new(0));
+    let sweeps_completed = Arc::new(AtomicUsize::new(0));
+
+    // Spawn threads to continuously mark and sweep with different patterns
+    let handles: Vec<_> = (0..num_threads)
+        .map(|thread_id| {
+            let bitvector = Arc::clone(&bitvector);
+            let stop_flag = Arc::clone(&stop_flag);
+            let objects_marked = Arc::clone(&objects_marked);
+            let sweeps_completed = Arc::clone(&sweeps_completed);
+
+            thread::spawn(move || {
+                let mut local_marked = 0;
+                let mut local_sweeps = 0;
+
+                for iteration in 0..operations_per_thread {
+                    if stop_flag.load(Ordering::Relaxed) {
+                        break;
+                    }
+
+                    // Create different density patterns per thread
+                    let chunk_index = thread_id % bitvector.get_chunk_count();
+                    let chunk_capacity = bitvector.get_chunk_object_capacity(chunk_index);
+
+                    // Thread-specific density pattern
+                    let density = match thread_id % 4 {
+                        0 => 0.9, // Dense pattern (90%)
+                        1 => 0.5, // Medium pattern (50%)
+                        2 => 0.1, // Sparse pattern (10%)
+                        _ => 0.7, // High pattern (70%)
+                    };
+
+                    let objects_to_mark = (chunk_capacity as f64 * density) as usize;
+                    let chunk_base = heap_base.as_usize() + chunk_index * 64 * 1024;
+
+                    // Mark objects with thread-specific spacing
+                    let spacing = if objects_to_mark > 0 { chunk_capacity / objects_to_mark } else { 1 };
+                    for i in 0..objects_to_mark {
+                        let offset = (i * spacing) * 16;
+                        if offset < 64 * 1024 { // Stay within chunk bounds
+                            let obj = unsafe { Address::from_usize(chunk_base + offset) };
+                            if bitvector.mark_live(obj) {
+                                local_marked += 1;
+                            }
+                        }
+                    }
+
+                    // Periodically trigger sweeps to exercise the hybrid algorithm
+                    if iteration % 100 == 99 {
+                        let sweep_stats = bitvector.hybrid_sweep();
+                        local_sweeps += 1;
+
+                        // Verify sweep processed some objects (dead objects)
+                        assert!(
+                            sweep_stats.objects_swept <= heap_size / 16,
+                            "Sweep count should be reasonable"
+                        );
+
+                        // Verify strategy selection occurred
+                        assert!(
+                            sweep_stats.simd_chunks_processed > 0 ||
+                            sweep_stats.sparse_chunks_processed > 0,
+                            "At least one sweep strategy should be used"
+                        );
+                    }
+
+                    // Cooperative yielding for fair scheduling
+                    if iteration % 10 == 9 {
+                        thread::yield_now();
+                    }
+                }
+
+                objects_marked.fetch_add(local_marked, Ordering::Relaxed);
+                sweeps_completed.fetch_add(local_sweeps, Ordering::Relaxed);
+            })
+        })
+        .collect();
+
+    // Run for a limited time or until work completion
+    let start_time = Instant::now();
+    let max_duration = Duration::from_millis(2000); // 2 seconds max
+
+    loop {
+        if start_time.elapsed() > max_duration {
+            break;
+        }
+
+        // Check if all threads have completed substantial work
+        let total_marked = objects_marked.load(Ordering::Relaxed);
+        let total_sweeps = sweeps_completed.load(Ordering::Relaxed);
+
+        if total_marked > num_threads * 1000 && total_sweeps > num_threads * 10 {
+            break;
+        }
+
+        thread::yield_now();
+    }
+
+    stop_flag.store(true, Ordering::Relaxed);
+
+    // Wait for all threads to complete
+    for handle in handles {
+        handle.join().expect("Worker thread should complete successfully");
+    }
+
+    // Final verification
+    let final_marked = objects_marked.load(Ordering::Relaxed);
+    let final_sweeps = sweeps_completed.load(Ordering::Relaxed);
+
+    println!("Enhanced SIMD sweep stress test completed:");
+    println!("  Objects marked: {}", final_marked);
+    println!("  Sweeps completed: {}", final_sweeps);
+    println!("  Chunk count: {}", bitvector.get_chunk_count());
+
+    // Verify substantial work was done
+    assert!(final_marked > 0, "Should have marked some objects");
+    assert!(final_sweeps > 0, "Should have completed some sweeps");
+
+    // Test the new capacity-aware APIs
+    for chunk_idx in 0..bitvector.get_chunk_count() {
+        let capacity = bitvector.get_chunk_object_capacity(chunk_idx);
+        assert!(capacity > 0, "Each chunk should have positive capacity");
+        assert!(
+            capacity <= heap_size / 16 / bitvector.get_chunk_count(),
+            "Chunk capacity should be reasonable"
+        );
+    }
+
+    // Final sweep to verify everything still works
+    let final_stats = bitvector.hybrid_sweep();
+    println!("  Final sweep: {} objects, {} SIMD chunks, {} sparse chunks",
+        final_stats.objects_swept,
+        final_stats.simd_chunks_processed,
+        final_stats.sparse_chunks_processed
+    );
+}

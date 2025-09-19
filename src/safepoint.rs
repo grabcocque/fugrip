@@ -89,6 +89,14 @@ pub fn clear_thread_safepoint_manager_cache() {
     });
 }
 
+/// Pre-cache a safepoint manager in thread-local storage (useful for tests)
+#[cfg(test)]
+pub fn cache_thread_safepoint_manager(manager: Arc<SafepointManager>) {
+    THREAD_SAFEPOINT_MANAGER.with(|manager_cell| {
+        *manager_cell.borrow_mut() = Some(manager);
+    });
+}
+
 // Thread-local safepoint state for each mutator thread
 thread_local! {
     static THREAD_SAFEPOINT_STATE: std::cell::RefCell<Option<ThreadSafepointState>> =
@@ -1059,5 +1067,204 @@ mod tests {
         manager.request_gc_safepoint(GcSafepointPhase::BarrierActivation);
         pollcheck(); // Should execute barrier activation callback
         manager.clear_safepoint();
+    }
+
+    #[test]
+    fn test_tls_cache_single_thread() {
+        // Clear TLS cache first
+        clear_thread_safepoint_manager_cache();
+
+        // Create DI scope and manager
+        let container = Arc::new(crate::di::DIContainer::new_for_testing());
+        let _scope = crate::di::DIScope::new(Arc::clone(&container));
+        let manager = container.safepoint_manager();
+
+        // Pre-cache the manager to avoid registration issues in pollcheck
+        cache_thread_safepoint_manager(Arc::clone(&manager));
+
+        // Verify manager is cached before polling
+        let cached_manager1 = THREAD_SAFEPOINT_MANAGER.with(|cache| cache.borrow().clone());
+        assert!(cached_manager1.is_some(), "Manager should be cached");
+
+        // First pollcheck should use cached manager
+        pollcheck();
+
+        // Subsequent pollchecks should reuse cached manager
+        pollcheck();
+        pollcheck();
+
+        let cached_manager2 = THREAD_SAFEPOINT_MANAGER.with(|cache| cache.borrow().clone());
+
+        // Compare pointer addresses instead of struct equality
+        match (&cached_manager1, &cached_manager2) {
+            (Some(m1), Some(m2)) => {
+                assert_eq!(Arc::as_ptr(m1), Arc::as_ptr(m2), "Cached manager should be reused");
+            }
+            _ => panic!("Both cached managers should be Some"),
+        }
+
+        // Verify the cached manager matches our manager
+        if let Some(cached) = cached_manager1 {
+            assert_eq!(Arc::as_ptr(&cached), Arc::as_ptr(&manager));
+        }
+    }
+
+    #[test]
+    fn test_tls_cache_multi_thread() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use std::thread;
+
+        // Create shared DI scope
+        let container = Arc::new(crate::di::DIContainer::new_for_testing());
+        let _scope = crate::di::DIScope::new(Arc::clone(&container));
+        let expected_manager = container.safepoint_manager();
+
+        // Track how many threads cached the same manager
+        let cache_hits = Arc::new(AtomicUsize::new(0));
+        let num_threads = 4;
+
+        let expected_manager_for_threads = Arc::clone(&expected_manager);
+
+        let handles: Vec<_> = (0..num_threads)
+            .map(|_| {
+                let hits = Arc::clone(&cache_hits);
+                let expected = Arc::clone(&expected_manager_for_threads);
+
+                thread::spawn(move || {
+                    // Clear thread-local cache
+                    clear_thread_safepoint_manager_cache();
+
+                    // Pre-cache the manager for this thread to avoid registration issues
+                    cache_thread_safepoint_manager(Arc::clone(&expected));
+
+                    // First poll should use cached manager
+                    pollcheck();
+
+                    // Verify cached manager matches expected
+                    let cached = THREAD_SAFEPOINT_MANAGER.with(|cache| cache.borrow().clone());
+                    if let Some(manager) = cached.as_ref() {
+                        if Arc::as_ptr(manager) == Arc::as_ptr(&expected) {
+                            hits.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+
+                    // Multiple polls should reuse cache
+                    for _ in 0..10 {
+                        pollcheck();
+                    }
+
+                    // Verify still cached correctly
+                    let final_cached = THREAD_SAFEPOINT_MANAGER.with(|cache| cache.borrow().clone());
+                    match (&cached, &final_cached) {
+                        (Some(c1), Some(c2)) => {
+                            assert_eq!(Arc::as_ptr(c1), Arc::as_ptr(c2), "Cache should remain stable");
+                        }
+                        _ => panic!("Both cached managers should be Some"),
+                    }
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // All threads should have cached the same manager
+        assert_eq!(
+            cache_hits.load(Ordering::Relaxed),
+            num_threads,
+            "All threads should cache the same manager"
+        );
+    }
+
+    #[test]
+    fn test_tls_cache_updates_with_new_scope() {
+        // Clear TLS cache
+        clear_thread_safepoint_manager_cache();
+
+        // First scope and manager
+        let container1 = Arc::new(crate::di::DIContainer::new_for_testing());
+        {
+            let _scope1 = crate::di::DIScope::new(Arc::clone(&container1));
+            let manager1 = container1.safepoint_manager();
+
+            // Pre-cache the first manager
+            cache_thread_safepoint_manager(Arc::clone(&manager1));
+
+            pollcheck();
+            let cached1 = THREAD_SAFEPOINT_MANAGER.with(|cache| cache.borrow().clone());
+            if let Some(cached) = cached1 {
+                assert_eq!(Arc::as_ptr(&cached), Arc::as_ptr(&manager1));
+            }
+        }
+
+        // New scope with different container
+        let container2 = Arc::new(crate::di::DIContainer::new_for_testing());
+        {
+            let _scope2 = crate::di::DIScope::new(Arc::clone(&container2));
+            let manager2 = container2.safepoint_manager();
+
+            // Simulate cache update by explicitly setting new manager
+            cache_thread_safepoint_manager(Arc::clone(&manager2));
+
+            // Cache should now have new manager
+            pollcheck();
+            let cached2 = THREAD_SAFEPOINT_MANAGER.with(|cache| cache.borrow().clone());
+            if let Some(cached) = cached2 {
+                assert_eq!(Arc::as_ptr(&cached), Arc::as_ptr(&manager2));
+            }
+
+            // Should be different from first manager
+            let manager1_ptr = Arc::as_ptr(&container1.safepoint_manager());
+            let manager2_ptr = Arc::as_ptr(&manager2);
+            assert_ne!(manager2_ptr, manager1_ptr, "New scope should have new manager");
+        }
+    }
+
+    #[test]
+    fn test_safepoint_callback_generation_guard() {
+        // Test that callbacks are not executed multiple times for the same generation
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let container = Arc::new(crate::di::DIContainer::new_for_testing());
+        let _scope = crate::di::DIScope::new(Arc::clone(&container));
+        let manager = container.safepoint_manager();
+
+        // Pre-cache manager to avoid registration issues
+        cache_thread_safepoint_manager(Arc::clone(&manager));
+
+        let callback_count = Arc::new(AtomicUsize::new(0));
+        let count_clone = Arc::clone(&callback_count);
+
+        // Request safepoint with callback
+        manager.request_safepoint(Box::new(move || {
+            count_clone.fetch_add(1, Ordering::Relaxed);
+        }));
+
+        // First poll should execute callback
+        pollcheck();
+        assert_eq!(callback_count.load(Ordering::Relaxed), 1);
+
+        // Clear safepoint to stop further executions
+        manager.clear_safepoint();
+
+        // Subsequent polls without safepoint should not execute callback
+        pollcheck();
+        pollcheck();
+        assert_eq!(callback_count.load(Ordering::Relaxed), 1, "Callback should not execute after clearing");
+
+        // Clear and request new safepoint
+        manager.clear_safepoint();
+
+        let count_clone2 = Arc::clone(&callback_count);
+        manager.request_safepoint(Box::new(move || {
+            count_clone2.fetch_add(1, Ordering::Relaxed);
+        }));
+
+        // New generation should execute callback
+        pollcheck();
+        assert_eq!(callback_count.load(Ordering::Relaxed), 2, "New generation should execute");
     }
 }

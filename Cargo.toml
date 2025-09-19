@@ -24,30 +24,11 @@ mmtk = { version = ">=0.31", default-features = false }
 lazy_static = ">=1.5.0"
 dashmap = "6.1"
 
-# DISABLED: Benchmarks are too aggressive and can crash VMs
+# Consolidated benchmark suite covering all FUGC performance aspects
 [[bench]]
-name = "gc_benchmarks"
+name = "comprehensive_gc_benchmarks"
 harness = false
 
-[[bench]]
-name = "cache_benchmarks"
-harness = false
-
-[[bench]]
-name = "cache_and_memory_benchmarks"
-harness = false
-
-[[bench]]
-name = "gc_coordination_benchmarks"
-harness = false
-
-[[bench]]
-name = "simd_and_hybrid_benchmarks"
-harness = false
-
-# [[bench]]
-# name = "regression_tests"
-# harness = false
 
 [dev-dependencies]
 criterion = ">=0.7.0"
@@ -65,3 +46,31 @@ segment_scan_linux = []
 cache_profiling = []
 # Gate expensive stress suites so they only run when explicitly requested
 stress-tests = []
+# Gate nondeterministic performance tests that can fail due to system load
+performance-tests = []
+
+# Coverage configuration
+[profile.coverage]
+inherits = "dev"
+debug = true
+opt-level = 0
+debug-assertions = true
+overflow-checks = true
+
+# Tarpaulin configuration
+[package.metadata.tarpaulin]
+# Basic configuration
+out = ["Html", "Xml", "Json"]
+output-dir = "./coverage"
+exclude-files = [
+    "benches/*",
+    "tests/benchmark_*",
+    "target/*",
+    "*/target/*"
+]
+# Coverage thresholds
+fail-under = 70.0
+ignore-panics = true
+# Run with smoke tests by default
+run-types = ["Tests"]
+features = ["smoke"]

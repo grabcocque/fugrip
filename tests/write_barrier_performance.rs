@@ -34,6 +34,7 @@ mod tests {
 
     /// Benchmark inactive write barrier (common case)
     #[test]
+    #[cfg(feature = "performance-tests")]
     fn bench_write_barrier_inactive() {
         let (barrier, objects) = setup_write_barrier();
 
@@ -79,12 +80,16 @@ mod tests {
 
         // Fast path should be at least as fast as standard
         // Debug builds have different optimization characteristics
-        let margin = if cfg!(debug_assertions) { 200 } else { 110 };
-        assert!(fast_duration <= standard_duration * margin / 100);
+        #[cfg(feature = "performance-tests")]
+        {
+            let margin = if cfg!(debug_assertions) { 200 } else { 110 };
+            assert!(fast_duration <= standard_duration * margin / 100);
+        }
     }
 
     /// Benchmark active write barrier (slow path)
     #[test]
+    #[cfg(feature = "performance-tests")]
     fn bench_write_barrier_active() {
         let (barrier, objects) = setup_write_barrier();
 
@@ -127,6 +132,7 @@ mod tests {
 
     /// Benchmark bulk write barrier operations
     #[test]
+    #[cfg(feature = "performance-tests")]
     fn bench_bulk_write_barrier() {
         let (barrier, objects) = setup_write_barrier();
 
@@ -166,6 +172,7 @@ mod tests {
 
     /// Benchmark array write barrier operations
     #[test]
+    #[cfg(feature = "performance-tests")]
     fn bench_array_write_barrier() {
         let (barrier, objects) = setup_write_barrier();
 
@@ -223,6 +230,7 @@ mod tests {
         );
 
         // Array barrier should be competitive with regular barrier
+        #[cfg(feature = "performance-tests")]
         assert!(array_duration <= regular_duration * 140 / 100); // Allow 40% margin
     }
 
@@ -261,6 +269,7 @@ mod tests {
 
     /// Stress test with many concurrent write barrier operations
     #[test]
+    #[cfg(feature = "performance-tests")]
     fn stress_test_write_barriers() {
         let (barrier, objects) = setup_write_barrier();
 

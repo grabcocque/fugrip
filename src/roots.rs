@@ -356,4 +356,185 @@ mod tests {
         // This should not panic
         RustScanning::prepare_for_roots_re_scanning();
     }
+
+    #[test]
+    fn test_stack_roots_edge_cases() {
+        let mut stack_roots = StackRoots::default();
+
+        // Test empty stack roots
+        assert_eq!(stack_roots.iter().count(), 0);
+
+        // Test multiple registrations
+        let ptrs = [
+            0x1000 as *mut u8,
+            0x2000 as *mut u8,
+            0x3000 as *mut u8,
+            std::ptr::null_mut(),
+        ];
+
+        for ptr in ptrs {
+            stack_roots.push(ptr);
+        }
+
+        assert_eq!(stack_roots.iter().count(), 4);
+
+        // Test clearing
+        stack_roots.clear();
+        assert_eq!(stack_roots.iter().count(), 0);
+    }
+
+    #[test]
+    fn test_global_roots_thread_safety() {
+        use std::sync::Mutex;
+        let global_roots = Arc::new(Mutex::new(GlobalRoots::default()));
+
+        // Test concurrent access
+        let handles: Vec<_> = (0..4)
+            .map(|i| {
+                let roots = Arc::clone(&global_roots);
+                std::thread::spawn(move || {
+                    for j in 0..10 {
+                        let ptr = ((i * 100 + j) * 0x1000) as *mut u8;
+                        roots.lock().unwrap().register(ptr);
+                    }
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // Should have 40 total registrations
+        assert_eq!(global_roots.lock().unwrap().iter().count(), 40);
+    }
+
+    #[test]
+    fn test_global_roots_edge_cases() {
+        let mut global_roots = GlobalRoots::default();
+
+        // Test null pointer registration
+        global_roots.register(std::ptr::null_mut());
+        assert_eq!(global_roots.iter().count(), 1);
+
+        // Test maximum address
+        global_roots.register(usize::MAX as *mut u8);
+        assert_eq!(global_roots.iter().count(), 2);
+
+        // Test duplicate registration (should add both)
+        let ptr = 0x5000 as *mut u8;
+        global_roots.register(ptr);
+        global_roots.register(ptr);
+        assert_eq!(global_roots.iter().count(), 4);
+
+        // GlobalRoots doesn't have a clear method, so we'll test other operations
+        assert_eq!(global_roots.iter().count(), 4);
+    }
+
+    #[test]
+    fn test_rust_scanning_error_conditions() {
+        let registry = Arc::new(ThreadRegistry::new());
+        let scanning = RustScanning::new(Arc::clone(&registry));
+
+        // Test with no registered threads
+        let mut count = 0;
+        scanning.for_each_mutator(|_mutator| {
+            count += 1;
+        });
+        assert_eq!(count, 0);
+
+        // Test with maximum thread ID
+        let mutator_max = MutatorThread::new(usize::MAX);
+        registry.register(mutator_max);
+
+        let mut max_id_found = false;
+        scanning.for_each_mutator(|mutator| {
+            if mutator.id() == usize::MAX {
+                max_id_found = true;
+            }
+        });
+        assert!(max_id_found);
+    }
+
+    #[test]
+    fn test_root_set_complex_scenarios() {
+        let registry = Arc::new(ThreadRegistry::new());
+        let mut root_set = RootSet::new();
+
+        // Test mixed registrations
+        let stack_ptrs = [0x1000 as *mut u8, 0x2000 as *mut u8];
+        let global_ptrs = [0x3000 as *mut u8, 0x4000 as *mut u8, 0x5000 as *mut u8];
+
+        for ptr in stack_ptrs {
+            root_set.stacks.push(ptr);
+        }
+
+        for ptr in global_ptrs {
+            root_set.globals.register(ptr);
+        }
+
+        assert_eq!(root_set.stacks.iter().count(), 2);
+        assert_eq!(root_set.globals.iter().count(), 3);
+
+        // Test partial clearing
+        root_set.stacks.clear();
+        assert_eq!(root_set.stacks.iter().count(), 0);
+        assert_eq!(root_set.globals.iter().count(), 3); // Should remain unchanged
+    }
+
+    #[test]
+    fn test_mutator_thread_integration() {
+        let registry = Arc::new(ThreadRegistry::new());
+        let scanning = RustScanning::new(Arc::clone(&registry));
+
+        // Test thread lifecycle
+        let mutators = [
+            MutatorThread::new(0),
+            MutatorThread::new(1),
+            MutatorThread::new(100),
+        ];
+
+        // Register threads
+        for mutator in &mutators {
+            registry.register(mutator.clone());
+        }
+
+        // Verify all are registered
+        let mut found_ids = Vec::new();
+        scanning.for_each_mutator(|mutator| {
+            found_ids.push(mutator.id());
+        });
+
+        assert_eq!(found_ids.len(), 3);
+        assert!(found_ids.contains(&0));
+        assert!(found_ids.contains(&1));
+        assert!(found_ids.contains(&100));
+    }
+
+    #[test]
+    fn test_memory_safety_invariants() {
+        let mut global_roots = GlobalRoots::default();
+
+        // Test that pointers can be safely stored and retrieved
+        let test_addrs = [
+            0x1000 as *mut u8,
+            0x10000 as *mut u8,
+            0x100000 as *mut u8,
+        ];
+
+        for addr in test_addrs {
+            global_roots.register(addr);
+        }
+
+        // Verify all addresses are retrievable
+        let mut retrieved_addrs = Vec::new();
+        for ptr in global_roots.iter() {
+            retrieved_addrs.push(ptr as usize);
+        }
+
+        assert_eq!(retrieved_addrs.len(), 3);
+        assert!(retrieved_addrs.contains(&0x1000));
+        assert!(retrieved_addrs.contains(&0x10000));
+        assert!(retrieved_addrs.contains(&0x100000));
+    }
 }
