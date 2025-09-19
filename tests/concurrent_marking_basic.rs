@@ -125,7 +125,7 @@ fn parallel_marking_work_distribution() {
                 let mut total_work = 0;
 
                 for _ in 0..10 {
-                    let stolen = coordinator.steal_work(5);
+                    let stolen = coordinator.steal_work(0, 5);
                     total_work += stolen.len();
 
                     if !stolen.is_empty() {

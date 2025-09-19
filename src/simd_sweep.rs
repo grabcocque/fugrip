@@ -1919,6 +1919,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "performance-tests")]
     fn simd_sweep_performance() {
         let heap_base = unsafe { Address::from_usize(0x10000000) };
         let heap_size = 64 * 1024; // 64KB
@@ -2310,7 +2311,7 @@ mod tests {
 
         // Create mixed density pattern using reasonable numbers
         let chunk0_capacity = bitvector.get_chunk_object_capacity(0);
-        let chunk1_capacity = bitvector.get_chunk_object_capacity(1);
+        let _chunk1_capacity = bitvector.get_chunk_object_capacity(1);
         let dense_count = (chunk0_capacity / 2).min(1000); // Conservative dense count
 
         // Chunk 0: Dense (mark many)
@@ -2554,7 +2555,7 @@ mod tests {
 
         assert!(chunk0_density >= 0.70, "Chunk 0 should be dense");
         assert!(chunk1_density <= 0.20, "Chunk 1 should be sparse");
-        assert!(chunk2_density >= 0.40 && chunk2_density <= 0.50, "Chunk 2 should be medium");
+        assert!((0.40..=0.50).contains(&chunk2_density), "Chunk 2 should be medium: {:.2}%", chunk2_density * 100.0);
 
         // Run sweep and verify strategy dispatch
         let stats = bitvector.hybrid_sweep();

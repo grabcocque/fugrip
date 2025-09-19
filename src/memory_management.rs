@@ -1602,8 +1602,11 @@ mod tests {
         // Test background processor startup/shutdown
         queue.start_background_processor(std::time::Duration::from_millis(10));
 
-        // Wait a bit for background processing
-        std::thread::sleep(std::time::Duration::from_millis(20));
+        // Wait for background processing to complete
+        for _ in 0..10 {
+            std::hint::black_box(());
+            std::thread::yield_now();
+        }
 
         queue.shutdown();
 

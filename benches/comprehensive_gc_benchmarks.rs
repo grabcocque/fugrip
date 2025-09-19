@@ -12,14 +12,14 @@
 //! and provide a comprehensive performance view.
 
 use criterion::{
-    BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main
+    BenchmarkId, Criterion, Throughput, criterion_group, criterion_main
 };
 use fugrip::test_utils::TestFixture;
 use fugrip::simd_sweep::SimdBitvector;
 use fugrip::concurrent::ObjectColor;
-use fugrip::thread::{MutatorThread, ThreadRegistry};
+use fugrip::thread::MutatorThread;
 use mmtk::util::{Address, ObjectReference};
-use std::hint::black_box as hint_black_box;
+use std::hint::black_box;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
@@ -55,23 +55,25 @@ fn write_barrier_benchmarks(c: &mut Criterion) {
 
         group.bench_function(format!("fast_path_{}", name), |b| {
             b.iter(|| {
-                write_barrier.object_reference_write(
-                    black_box(old_obj),
-                    black_box(Address::from_mut_ptr(&mut slot as *mut _)),
-                    black_box(new_obj),
-                );
+                unsafe {
+                    write_barrier.write_barrier_fast(
+                        std::hint::black_box(&mut slot as *mut _),
+                        std::hint::black_box(new_obj),
+                    );
+                }
             });
         });
 
         group.bench_function(format!("bulk_operations_{}", name), |b| {
             let refs = vec![new_obj; 1000];
             b.iter(|| {
-                for &obj_ref in black_box(&refs) {
-                    write_barrier.object_reference_write(
-                        black_box(old_obj),
-                        black_box(Address::from_mut_ptr(&mut slot as *mut _)),
-                        black_box(obj_ref),
-                    );
+                for &obj_ref in std::hint::black_box(&refs) {
+                    unsafe {
+                        write_barrier.write_barrier_fast(
+                            std::hint::black_box(&mut slot as *mut _),
+                            std::hint::black_box(obj_ref),
+                        );
+                    }
                 }
             });
         });
@@ -143,7 +145,7 @@ fn cache_locality_benchmarks(c: &mut Criterion) {
             |b, objs| {
                 b.iter(|| {
                     for &obj in black_box(objs) {
-                        black_box(tricolor.set_color(obj, ObjectColor::Grey));
+                        tricolor.set_color(obj, ObjectColor::Grey);
                     }
                 });
             },
@@ -159,7 +161,7 @@ fn cache_locality_benchmarks(c: &mut Criterion) {
             |b, objs| {
                 b.iter(|| {
                     for &obj in black_box(objs) {
-                        black_box(tricolor.set_color(obj, ObjectColor::Grey));
+                        tricolor.set_color(obj, ObjectColor::Grey);
                     }
                 });
             },
@@ -182,7 +184,7 @@ fn gc_coordination_benchmarks(c: &mut Criterion) {
     // Benchmark GC triggering
     group.bench_function("gc_trigger_cycle", |b| {
         b.iter(|| {
-            black_box(coordinator.trigger_gc());
+            coordinator.trigger_gc();
             black_box(coordinator.wait_until_idle(Duration::from_millis(100)));
         });
     });
@@ -219,7 +221,7 @@ fn gc_coordination_benchmarks(c: &mut Criterion) {
                 b.iter(|| {
                     // Simulate safepoint request across all threads
                     for mutator in &mutators {
-                        black_box(mutator.poll_safepoint());
+                        mutator.poll_safepoint();
                     }
                 });
             },
@@ -242,8 +244,10 @@ fn gc_coordination_benchmarks(c: &mut Criterion) {
 
 /// Memory Allocation Pattern Benchmarks
 fn allocation_benchmarks(c: &mut Criterion) {
-    let fixture = TestFixture::new_with_config(TEST_HEAP_BASE, TEST_HEAP_SIZE, 4);
-    let plan_manager = fixture.plan_manager();
+    use fugrip::plan::FugcPlanManager;
+
+    let _fixture = TestFixture::new_with_config(TEST_HEAP_BASE, TEST_HEAP_SIZE, 4);
+    let plan_manager = FugcPlanManager::new();
 
     let mut group = c.benchmark_group("allocation_patterns");
     group.warm_up_time(Duration::from_millis(300));
@@ -297,7 +301,7 @@ fn concurrent_marking_benchmarks(c: &mut Criterion) {
     // Create test object graph
     let objects: Vec<ObjectReference> = (0..1000)
         .map(|i| unsafe {
-            ObjectReference::from_raw_address_unchecked(heap_base + i * 64)
+            ObjectReference::from_raw_address_unchecked(heap_base + (i as usize) * 64)
         })
         .collect();
 
@@ -314,11 +318,11 @@ fn concurrent_marking_benchmarks(c: &mut Criterion) {
                         .map(|t| {
                             let start = t * chunk_size;
                             let end = if t == num_threads - 1 { objs.len() } else { start + chunk_size };
-                            let chunk = &objs[start..end];
+                            let chunk: Vec<ObjectReference> = objs[start..end].to_vec();
                             let tc = tricolor.clone();
 
                             thread::spawn(move || {
-                                for &obj in chunk {
+                                for obj in chunk {
                                     tc.set_color(obj, ObjectColor::Grey);
                                 }
                             })

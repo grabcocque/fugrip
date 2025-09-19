@@ -254,7 +254,7 @@ fn parallel_marking_work_stealing_simulation() {
 
                 // Each worker tries to steal work multiple times
                 for _ in 0..20 {
-                    let stolen = coordinator.steal_work(10);
+                    let stolen = coordinator.steal_work(0, 10);
                     total_stolen += stolen.len();
 
                     if !stolen.is_empty() {

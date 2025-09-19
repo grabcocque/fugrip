@@ -518,6 +518,7 @@ dependencies = [
  "bitflags",
  "criterion",
  "crossbeam",
+ "crossbeam-deque",
  "crossbeam-epoch",
  "crossbeam-queue",
  "dashmap",

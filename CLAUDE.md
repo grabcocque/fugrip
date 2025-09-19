@@ -4,7 +4,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is a Rust implementation of FUGC (Fil's Unbelievable Garbage Collector), a parallel concurrent on-the-fly grey-stack Dijkstra accurate non-moving garbage collector originally designed for the Verse programming language. The project implements a lock-free handshake protocol and integrates with MMTk (Memory Management Toolkit) for production-ready garbage collection.
+**Fugrip** is a Rust implementation of FUGC (Fil's Unbelievable Garbage Collector), a sophisticated parallel concurrent on-the-fly grey-stack Dijkstra accurate non-moving garbage collector originally designed for the Verse programming language. The project implements a deadlock-impossible lock-free handshake protocol and integrates with MMTk (Memory Management Toolkit) for production-ready garbage collection.
+
+**Key FUGC Features:**
+- **Parallel**: Marking and sweeping across multiple threads
+- **Concurrent**: Collection happens on dedicated threads, mutators continue running
+- **On-the-fly**: Uses "soft handshakes" instead of global stop-the-world pauses
+- **Grey-stack**: Rescans thread stacks to fixpoint, eliminating load barriers
+- **Dijkstra**: Simple store barrier with compare-and-swap on slow path
+- **Accurate**: Precise pointer tracking via compiler integration
+- **Non-moving**: Objects don't move, simplifying concurrency
+- **Advancing wavefront**: Mutators cannot create new work during collection
 
 ## Build & Development Commands
 
@@ -39,8 +49,10 @@ cargo fmt
 cargo clippy
 
 # Run specific benchmarks (disabled by default)
-cargo bench --bench gc_benchmarks
-cargo bench --bench cache_benchmarks
+cargo bench --bench comprehensive_gc_benchmarks
+
+# Run coverage analysis (optimal configuration)
+cargo llvm-cov --all-targets --all-features --jobs 32
 ```
 
 ## Current Implementation Status
@@ -60,6 +72,7 @@ cargo bench --bench cache_benchmarks
 - Some coordinator integration issues remain (7 failing tests)
 
 **📊 Test Health: 97.3% pass rate (252/259 tests)**
+**🚨 7 failing tests due to coordinator integration issues**
 
 ## Architecture
 

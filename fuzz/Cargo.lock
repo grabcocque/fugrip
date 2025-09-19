@@ -360,6 +360,7 @@ dependencies = [
  "anyhow",
  "bitflags",
  "crossbeam",
+ "crossbeam-deque",
  "crossbeam-epoch",
  "crossbeam-queue",
  "dashmap",

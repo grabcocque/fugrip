@@ -72,7 +72,7 @@ fuzz_target!(|data: &[u8]| {
                 if data_idx < data.len() {
                     let steal_size = (data[data_idx] as usize % 16) + 1;
                     data_idx += 1;
-                    let _stolen = parallel.steal_work(steal_size);
+                    let _stolen = parallel.steal_work(0, steal_size);
                 }
             }
             2 => {

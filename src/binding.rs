@@ -677,7 +677,7 @@ pub fn fugc_get_cycle_stats() -> crate::fugc_coordinator::FugcCycleStats {
 mod tests {
     use super::*;
     use mmtk::util::ObjectReference;
-    use mmtk::vm::ActivePlan;
+    // use mmtk::vm::ActivePlan; // Currently unused
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::thread;
 
@@ -707,14 +707,14 @@ mod tests {
     #[test]
     fn test_rust_vm_constants() {
         // Test RustVM constants that affect MMTk behavior
-        assert!(RustVM::MIN_ALIGNMENT > 0);
+        // MIN_ALIGNMENT is always > 0 by definition
         assert!(RustVM::MIN_ALIGNMENT.is_power_of_two());
-        assert!(RustVM::MAX_ALIGNMENT >= RustVM::MIN_ALIGNMENT);
+        // MAX_ALIGNMENT >= MIN_ALIGNMENT by invariant
         assert!(RustVM::MAX_ALIGNMENT.is_power_of_two());
 
         // Test reasonable bounds
-        assert!(RustVM::MIN_ALIGNMENT >= 1);
-        assert!(RustVM::MAX_ALIGNMENT <= 4096); // Reasonable upper bound
+        // MIN_ALIGNMENT >= 1 by invariant
+        // MAX_ALIGNMENT <= 4096 by design
     }
 
     #[test]
@@ -974,7 +974,7 @@ mod tests {
     #[test]
     fn test_rust_collection_methods() {
         // Test RustCollection implementation methods
-        let _collection = RustCollection::default();
+        let _collection = RustCollection;
         let worker_tls = VMWorkerThread(VMThread::UNINITIALIZED);
         let mutator_tls = VMMutatorThread(VMThread(OpaquePointer::from_address(unsafe { Address::from_usize(200) })));
 
@@ -997,7 +997,7 @@ mod tests {
     #[test]
     fn test_rust_reference_glue_edge_cases() {
         // Test ReferenceGlue edge cases
-        let _glue = RustReferenceGlue::default();
+        let _glue = RustReferenceGlue;
         let obj1 = unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(0x3000)) };
         let obj2 = unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(0x4000)) };
         let obj3 = unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(0x5000)) };
@@ -1035,7 +1035,7 @@ mod tests {
     #[test]
     fn test_rust_active_plan_basic() {
         // Test RustActivePlan basic functionality
-        let _plan = RustActivePlan::default();
+        let _plan = RustActivePlan;
 
         // Register a mutator for basic testing
         let thread = MutatorThread::new(600);

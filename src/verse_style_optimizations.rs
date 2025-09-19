@@ -452,7 +452,7 @@ mod tests {
         assert_eq!(version1, 1);
 
         // Begin iteration while already iterating
-        let version2 = state.begin_iteration();
+        let _version2 = state.begin_iteration();
         // May allow nested or return error - either is valid
 
         // End iteration multiple times (sad path)

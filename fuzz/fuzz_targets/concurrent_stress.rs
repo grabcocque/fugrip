@@ -110,7 +110,7 @@ fuzz_target!(|data: &[u8]| {
                 // Work coordination stress: rapid sharing/stealing
                 let work_batch = vec![objects[obj1_idx], objects[obj2_idx]];
                 parallel.share_work(work_batch);
-                let _ = parallel.steal_work(1);
+                let _ = parallel.steal_work(0, 1);
             }
             4 => {
                 // Individual write barrier operations with varied colors

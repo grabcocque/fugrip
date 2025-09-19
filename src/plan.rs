@@ -707,7 +707,7 @@ mod tests {
         // May fail in test environment if MMTk is not properly initialized
         // Just verify the function exists and handles errors properly
         match result {
-            Ok(options) => {
+            Ok(_options) => {
                 // If successful, verify some basic properties
                 // Note: We can't test internal state easily due to MMTk's design
             },
@@ -741,12 +741,12 @@ mod tests {
         let plan_manager = FugcPlanManager::new();
 
         // Create valid object references for testing
-        let src = unsafe {
+        let _src = unsafe {
             mmtk::util::ObjectReference::from_raw_address_unchecked(
                 mmtk::util::Address::from_usize(0x1000)
             )
         };
-        let target = unsafe {
+        let _target = unsafe {
             mmtk::util::ObjectReference::from_raw_address_unchecked(
                 mmtk::util::Address::from_usize(0x2000)
             )

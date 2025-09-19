@@ -104,7 +104,7 @@ fn test_mixed_density_pattern() {
     let chunk3_density = bitvector.get_chunk_population(3) as f64 / objects_per_chunk as f64;
 
     assert!(chunk0_density >= 0.85, "Chunk 0 should be dense: {:.2}%", chunk0_density * 100.0);
-    assert!(chunk1_density >= 0.40 && chunk1_density <= 0.60, "Chunk 1 should be medium: {:.2}%", chunk1_density * 100.0);
+    assert!((0.40..=0.60).contains(&chunk1_density), "Chunk 1 should be medium: {:.2}%", chunk1_density * 100.0);
     assert!(chunk2_density <= 0.10, "Chunk 2 should be sparse: {:.2}%", chunk2_density * 100.0);
     assert_eq!(chunk3_density, 0.0, "Chunk 3 should be empty");
 }

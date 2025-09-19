@@ -458,7 +458,7 @@ mod tests {
 
     #[test]
     fn test_root_set_complex_scenarios() {
-        let registry = Arc::new(ThreadRegistry::new());
+        let _registry = Arc::new(ThreadRegistry::new());
         let mut root_set = RootSet::new();
 
         // Test mixed registrations

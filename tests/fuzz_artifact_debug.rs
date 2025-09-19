@@ -121,7 +121,7 @@ fn reproduce_concurrent_stress_artifact() {
                 let work_batch = vec![objects[obj1_idx], objects[obj2_idx]];
                 coordinator.share_work(work_batch);
 
-                let _stolen = coordinator.steal_work(1);
+                let _stolen = coordinator.steal_work(0, 1);
             }
             4 => {
                 // Bulk operation stress

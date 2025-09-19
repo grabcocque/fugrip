@@ -185,7 +185,7 @@ mod tests {
         let result = std::panic::catch_unwind(|| {
             // This would require an actual MMTk mutator which we can't easily create in tests
             // So we test the size calculation logic instead
-            let total_bytes = std::mem::size_of::<ObjectHeader>() + 0;
+            let total_bytes = std::mem::size_of::<ObjectHeader>();
             let allocation_size = std::cmp::max(total_bytes, MIN_OBJECT_SIZE);
             assert!(allocation_size >= MIN_OBJECT_SIZE);
         });
@@ -264,9 +264,9 @@ mod tests {
         let _runtime_allocator = ALLOCATOR;
 
         // Test Default implementation
-        let default_allocator = MMTkAllocator::default();
+        let _default_allocator = MMTkAllocator;
         // Can't easily compare allocators, but creation should not panic
-        drop(default_allocator);
+        // Test default creation
     }
 
     #[test]
