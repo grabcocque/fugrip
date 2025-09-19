@@ -18,7 +18,8 @@ fn test_gc_loop_automatic_pollchecks() {
     println!("🔄 Testing automatic pollcheck insertion in loops");
 
     let _fixture = TestFixture::minimal();
-    let manager = current_container().safepoint_manager();
+    let container = current_container();
+    let manager = container.safepoint_manager();
     manager.clear_safepoint();
 
     // Reset statistics
@@ -67,7 +68,8 @@ fn test_gc_function_boundary_pollchecks() {
         }
     }
 
-    let manager = current_container().safepoint_manager();
+    let container = current_container();
+    let manager = container.safepoint_manager();
     manager.clear_safepoint();
     let initial_polls = manager.get_stats().total_polls;
 
@@ -94,7 +96,8 @@ fn test_gc_function_boundary_pollchecks() {
 fn test_bounded_work_enforcement() {
     println!("⚡ Testing bounded work enforcement");
 
-    let manager = current_container().safepoint_manager();
+    let container = current_container();
+    let manager = container.safepoint_manager();
     manager.clear_safepoint();
     let initial_polls = manager.get_stats().total_polls;
 
@@ -129,7 +132,8 @@ fn test_bounded_work_enforcement() {
 fn test_macro_pollchecks_with_safepoints() {
     println!("🛡️ Testing macro pollchecks with safepoint callbacks");
 
-    let manager = current_container().safepoint_manager();
+    let container = current_container();
+    let manager = container.safepoint_manager();
     let callback_executed = Arc::new(AtomicBool::new(false));
     let callback_clone = Arc::clone(&callback_executed);
 
@@ -163,7 +167,8 @@ fn test_macro_pollchecks_with_safepoints() {
 fn test_bounded_progress_under_load() {
     println!("🚀 Testing bounded progress under concurrent load");
 
-    let manager = current_container().safepoint_manager();
+    let container = current_container();
+    let manager = container.safepoint_manager();
     let all_threads_started = Arc::new(AtomicBool::new(false));
     let stop_threads = Arc::new(AtomicBool::new(false));
     let threads_completed = Arc::new(AtomicUsize::new(0));
@@ -266,7 +271,8 @@ fn test_bounded_progress_under_load() {
 fn test_allocation_pollchecks() {
     println!("💾 Testing allocation pollchecks");
 
-    let manager = current_container().safepoint_manager();
+    let container = current_container();
+    let manager = container.safepoint_manager();
     manager.clear_safepoint();
     let initial_polls = manager.get_stats().total_polls;
 
@@ -332,7 +338,8 @@ fn test_real_world_usage_pattern() {
         }
     }
 
-    let manager = current_container().safepoint_manager();
+    let container = current_container();
+    let manager = container.safepoint_manager();
     manager.clear_safepoint();
     let initial_polls = manager.get_stats().total_polls;
 

@@ -78,8 +78,8 @@ fn multiple_coordinators_share_components() {
     let fixture2 =
         fugrip::test_utils::TestFixture::new_with_config(0x20000000, 32 * 1024 * 1024, 2);
 
-    let coordinator1 = fixture1.coordinator;
-    let coordinator2 = fixture2.coordinator;
+    let coordinator1 = Arc::clone(&fixture1.coordinator);
+    let coordinator2 = Arc::clone(&fixture2.coordinator);
 
     assert_eq!(coordinator1.current_phase(), FugcPhase::Idle);
     assert_eq!(coordinator2.current_phase(), FugcPhase::Idle);

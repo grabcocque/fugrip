@@ -20,13 +20,13 @@ fn main() {
     let counter = Arc::new(AtomicUsize::new(0));
 
     // Demonstrate basic soft handshake
-    demonstrate_basic_handshake(&manager, Arc::clone(&counter));
+    demonstrate_basic_handshake(manager, Arc::clone(&counter));
 
     // Demonstrate enter/exit functionality
-    demonstrate_enter_exit_functionality(&manager, Arc::clone(&counter));
+    demonstrate_enter_exit_functionality(manager, Arc::clone(&counter));
 
     // Demonstrate multi-threaded coordination
-    demonstrate_multithreaded_coordination(&manager, Arc::clone(&counter));
+    demonstrate_multithreaded_coordination(manager, Arc::clone(&counter));
 
     println!("\n✅ Soft handshake demo completed successfully!");
     println!("Final counter value: {}", counter.load(Ordering::Relaxed));

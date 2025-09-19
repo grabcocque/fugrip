@@ -16,7 +16,7 @@ fuzz_target!(|data: &[u8]| {
     // Input sanitization
     let sanitized_data = data
         .iter()
-        .filter(|&&b| b < 128)
+        .filter(|&b| *b < 128)
         .copied()
         .collect::<Vec<u8>>();
     if sanitized_data.len() < 4 {

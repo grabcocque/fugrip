@@ -229,7 +229,9 @@ impl Scanning<RustVM> for RustScanning {
 
     fn notify_initial_thread_scan_complete(partial_scan: bool, _tls: VMWorkerThread) {
         let coordinator = {
-            let manager = crate::binding::FUGC_PLAN_MANAGER.lock();
+            let manager = crate::binding::FUGC_PLAN_MANAGER
+                .get_or_init(|| parking_lot::Mutex::new(crate::plan::FugcPlanManager::new()))
+                .lock();
             Arc::clone(manager.get_fugc_coordinator())
         };
 
@@ -244,7 +246,9 @@ impl Scanning<RustVM> for RustScanning {
 
     fn prepare_for_roots_re_scanning() {
         let coordinator = {
-            let manager = crate::binding::FUGC_PLAN_MANAGER.lock();
+            let manager = crate::binding::FUGC_PLAN_MANAGER
+                .get_or_init(|| parking_lot::Mutex::new(crate::plan::FugcPlanManager::new()))
+                .lock();
             Arc::clone(manager.get_fugc_coordinator())
         };
         // FUGC coordinator resets are handled internally during collection cycles

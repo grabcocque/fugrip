@@ -37,8 +37,8 @@ fn stress_concurrent_marking_high_contention() {
         heap_base,
         256 * 1024 * 1024, // 256MB heap
         STRESS_THREAD_COUNT,
-        thread_registry,
-        global_roots,
+        &thread_registry,
+        &global_roots,
     ));
 
     // Create shared object pool for high contention
@@ -726,7 +726,7 @@ fn stress_crossbeam_epoch_integration() {
 
     // Spawn high-contention worker threads
     for worker_id in 0..8 {
-        let coordinator = Arc::clone(&coordinator);
+        let coordinator = Arc::clone(coordinator);
         let test_objects = Arc::clone(&test_objects);
         let promoted_count = Arc::clone(&promoted_count);
         let queue_operations = Arc::clone(&queue_operations);
@@ -851,8 +851,8 @@ fn stress_multi_generation_promotion_contention() {
         heap_base,
         heap_size,
         STRESS_THREAD_COUNT,
-        thread_registry,
-        global_roots,
+        &thread_registry,
+        &global_roots,
     ));
 
     // Test young/old generation boundaries (30% young, 70% old)
@@ -921,13 +921,13 @@ fn stress_multi_generation_promotion_contention() {
                         {
                             // Simulate promotion by treating young object as if promoted
                             coordinator
-                                .tricolor_marking
+                                .tricolor_marking()
                                 .set_color(*young_obj, ObjectColor::Black);
                             promotion_count.fetch_add(1, Ordering::Relaxed);
 
                             // Create cross-generational reference
                             coordinator
-                                .tricolor_marking
+                                .tricolor_marking()
                                 .set_color(*old_obj, ObjectColor::Grey);
                             cross_gen_refs.fetch_add(1, Ordering::Relaxed);
                         }
@@ -971,7 +971,7 @@ fn stress_multi_generation_promotion_contention() {
                                 ObjectColor::Grey => {
                                     // Complete marking to black
                                     coordinator
-                                        .tricolor_marking
+                                        .tricolor_marking()
                                         .set_color(*obj, ObjectColor::Black);
                                 }
                                 ObjectColor::Black => {
@@ -986,10 +986,10 @@ fn stress_multi_generation_promotion_contention() {
                         for &obj in young_objects.iter().take(5) {
                             // Simulate marking progression: white -> grey -> black
                             coordinator
-                                .tricolor_marking
+                                .tricolor_marking()
                                 .set_color(obj, ObjectColor::Grey);
                             coordinator
-                                .tricolor_marking
+                                .tricolor_marking()
                                 .set_color(obj, ObjectColor::Black);
                         }
                         promotion_count.fetch_add(1, Ordering::Relaxed);
@@ -1061,8 +1061,8 @@ fn stress_generational_write_barriers() {
         heap_base,
         heap_size,
         4, // Focused test with fewer workers
-        thread_registry,
-        global_roots,
+        &thread_registry,
+        &global_roots,
     ));
 
     // Create dedicated young and old generation object pools

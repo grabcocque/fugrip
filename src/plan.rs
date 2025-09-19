@@ -2,6 +2,7 @@
 //! FUGC-specific concurrent marking and optimized write barriers.
 
 use anyhow::Result;
+use dashmap::DashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -80,7 +81,7 @@ impl FugcPlanManager {
     /// ```
     pub fn new() -> Self {
         // Initialize FUGC coordinator using DI container
-        let mut container = crate::di::DIContainer::new();
+        let container = crate::di::DIContainer::new();
 
         // Use reasonable defaults for heap configuration
         let heap_base = unsafe { mmtk::util::Address::from_usize(0x10000000) }; // 256MB base
@@ -91,7 +92,7 @@ impl FugcPlanManager {
 
         Self {
             mmtk: None,
-            fugc_coordinator,
+            fugc_coordinator: fugc_coordinator.clone(),
             concurrent_collection_enabled: AtomicBool::new(true),
             allocation_stats: AllocationStats::default(),
         }
@@ -349,7 +350,7 @@ impl FugcPlanManager {
             // This handles allocation failure and coordinates with FUGC marking
             // We get the first available mutator thread to trigger the collection
             use crate::binding::MUTATOR_MAP;
-            if let Some(entry) = MUTATOR_MAP.iter().next() {
+            if let Some(entry) = MUTATOR_MAP.get_or_init(DashMap::new).iter().next() {
                 let tls = mmtk::util::opaque_pointer::VMMutatorThread(
                     mmtk::util::opaque_pointer::VMThread(
                         mmtk::util::opaque_pointer::OpaquePointer::from_address(unsafe {

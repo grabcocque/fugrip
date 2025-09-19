@@ -225,16 +225,16 @@ impl CacheOptimizedMarking {
     /// # use std::sync::Arc;
     /// let heap_base = unsafe { Address::from_usize(0x1_0000_0000) };
     /// let tricolor = Arc::new(TricolorMarking::new(heap_base, 1024));
-    /// let marking = CacheOptimizedMarking::with_tricolor(tricolor);
+    /// let marking = CacheOptimizedMarking::with_tricolor(&tricolor);
     /// assert!(marking.is_complete());
     /// ```
-    pub fn with_tricolor(tricolor: Arc<crate::concurrent::TricolorMarking>) -> Self {
+    pub fn with_tricolor(tricolor: &Arc<crate::concurrent::TricolorMarking>) -> Self {
         Self {
             work_queue: Arc::new(SegQueue::new()),
             prefetch_distance: 4,
             objects_marked: AtomicUsize::new(0),
             cache_misses: AtomicUsize::new(0),
-            tricolor_marking: Some(tricolor),
+            tricolor_marking: Some(Arc::clone(tricolor)),
         }
     }
 
@@ -940,7 +940,7 @@ mod tests {
             .collect();
 
         // Add all objects
-        let mut all_objs = local_objs.clone();
+        let mut all_objs = local_objs;
         all_objs.extend(&remote_objs);
         stealer.add_objects(all_objs);
 

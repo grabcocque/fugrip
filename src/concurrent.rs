@@ -823,15 +823,15 @@ pub struct OldGenBarrierState {
 
 impl WriteBarrier {
     pub fn new(
-        tricolor_marking: Arc<TricolorMarking>,
-        coordinator: Arc<ParallelMarkingCoordinator>,
+        tricolor_marking: &Arc<TricolorMarking>,
+        coordinator: &Arc<ParallelMarkingCoordinator>,
         heap_base: Address,
         heap_size: usize,
     ) -> Self {
         let generation_boundary = GenerationBoundary::new(heap_base, heap_size, 0.3); // 30% young gen
         Self {
-            tricolor_marking,
-            coordinator,
+            tricolor_marking: Arc::clone(tricolor_marking),
+            coordinator: Arc::clone(coordinator),
             marking_active: std::sync::atomic::AtomicBool::new(false),
             generation_boundary,
             young_gen_state: Arc::new(RwLock::new(YoungGenBarrierState::default())),
@@ -1317,9 +1317,9 @@ pub struct BlackAllocator {
 }
 
 impl BlackAllocator {
-    pub fn new(tricolor_marking: Arc<TricolorMarking>) -> Self {
+    pub fn new(tricolor_marking: &Arc<TricolorMarking>) -> Self {
         Self {
-            tricolor_marking,
+            tricolor_marking: Arc::clone(tricolor_marking),
             black_allocation_active: std::sync::atomic::AtomicBool::new(false),
             objects_allocated_black: std::sync::atomic::AtomicUsize::new(0),
         }
@@ -1800,7 +1800,7 @@ mod tests {
         let heap_base = unsafe { Address::from_usize(0x10000) };
         let marking = Arc::new(TricolorMarking::new(heap_base, 0x10000));
         let coordinator = Arc::new(ParallelMarkingCoordinator::new(1));
-        let barrier = WriteBarrier::new(marking, coordinator, heap_base, 0x10000);
+        let barrier = WriteBarrier::new(&marking, &coordinator, heap_base, 0x10000);
 
         assert!(!barrier.is_active());
         barrier.activate();
@@ -1814,7 +1814,7 @@ mod tests {
         let heap_base = unsafe { Address::from_usize(0x10000) };
         let marking = Arc::new(TricolorMarking::new(heap_base, 0x10000));
         let coordinator = Arc::new(ParallelMarkingCoordinator::new(1));
-        let barrier = WriteBarrier::new(Arc::clone(&marking), coordinator, heap_base, 0x10000);
+        let barrier = WriteBarrier::new(&marking, &coordinator, heap_base, 0x10000);
 
         let obj1 = unsafe { ObjectReference::from_raw_address_unchecked(heap_base + 0x100usize) };
         let obj2 = unsafe { ObjectReference::from_raw_address_unchecked(heap_base + 0x200usize) };
@@ -1843,7 +1843,7 @@ mod tests {
         let heap_base = unsafe { Address::from_usize(0x10000) };
         let marking = Arc::new(TricolorMarking::new(heap_base, 0x10000));
         let coordinator = Arc::new(ParallelMarkingCoordinator::new(1));
-        let barrier = WriteBarrier::new(Arc::clone(&marking), coordinator, heap_base, 0x10000);
+        let barrier = WriteBarrier::new(&marking, &coordinator, heap_base, 0x10000);
 
         let obj1 = unsafe { ObjectReference::from_raw_address_unchecked(heap_base + 0x100usize) };
         let obj2 = unsafe { ObjectReference::from_raw_address_unchecked(heap_base + 0x200usize) };
@@ -1875,7 +1875,7 @@ mod tests {
     fn black_allocator_operations() {
         let heap_base = unsafe { Address::from_usize(0x10000) };
         let marking = Arc::new(TricolorMarking::new(heap_base, 0x10000));
-        let allocator = BlackAllocator::new(Arc::clone(&marking));
+        let allocator = BlackAllocator::new(&marking);
 
         let obj = unsafe { ObjectReference::from_raw_address_unchecked(heap_base + 0x100usize) };
 
@@ -1901,7 +1901,7 @@ mod tests {
         let heap_base = unsafe { Address::from_usize(0x10000) };
         let marking = Arc::new(TricolorMarking::new(heap_base, 0x10000));
         let coordinator = Arc::new(ParallelMarkingCoordinator::new(1));
-        let barrier = WriteBarrier::new(Arc::clone(&marking), coordinator, heap_base, 0x10000);
+        let barrier = WriteBarrier::new(&marking, &coordinator, heap_base, 0x10000);
 
         let old_obj =
             unsafe { ObjectReference::from_raw_address_unchecked(heap_base + 0x100usize) };
@@ -1937,7 +1937,7 @@ mod tests {
         let heap_size = 0x10000;
         let marking = Arc::new(TricolorMarking::new(heap_base, heap_size));
         let coordinator = Arc::new(ParallelMarkingCoordinator::new(1));
-        let barrier = WriteBarrier::new(Arc::clone(&marking), coordinator, heap_base, heap_size);
+        let barrier = WriteBarrier::new(&marking, &coordinator, heap_base, heap_size);
 
         // Create objects in young generation (first 30% of heap)
         let young_obj1 =
@@ -1972,7 +1972,7 @@ mod tests {
         let heap_size = 0x10000;
         let marking = Arc::new(TricolorMarking::new(heap_base, heap_size));
         let coordinator = Arc::new(ParallelMarkingCoordinator::new(1));
-        let barrier = WriteBarrier::new(Arc::clone(&marking), coordinator, heap_base, heap_size);
+        let barrier = WriteBarrier::new(&marking, &coordinator, heap_base, heap_size);
 
         // Create objects: old object in old generation (70% of heap), young object in young generation
         let old_obj =
@@ -2004,7 +2004,7 @@ mod tests {
         let heap_size = 0x10000;
         let marking = Arc::new(TricolorMarking::new(heap_base, heap_size));
         let coordinator = Arc::new(ParallelMarkingCoordinator::new(1));
-        let barrier = WriteBarrier::new(Arc::clone(&marking), coordinator, heap_base, heap_size);
+        let barrier = WriteBarrier::new(&marking, &coordinator, heap_base, heap_size);
 
         // Create objects in old generation (70% of heap)
         let old_obj1 =
@@ -2034,7 +2034,7 @@ mod tests {
         let heap_size = 0x10000;
         let marking = Arc::new(TricolorMarking::new(heap_base, heap_size));
         let coordinator = Arc::new(ParallelMarkingCoordinator::new(1));
-        let barrier = WriteBarrier::new(Arc::clone(&marking), coordinator, heap_base, heap_size);
+        let barrier = WriteBarrier::new(&marking, &coordinator, heap_base, heap_size);
 
         // Create objects in young and old generations
         let young_obj =

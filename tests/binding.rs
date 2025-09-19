@@ -7,6 +7,7 @@ use fugrip::binding::{
 use fugrip::fugc_coordinator::FugcPhase;
 use fugrip::plan::FugcPlanManager;
 use mmtk::util::Address;
+use parking_lot::Mutex;
 
 #[test]
 fn fugc_alloc_info_respects_alignment() {
@@ -27,13 +28,17 @@ fn fugc_stats_and_phase_accessors_provide_defaults() {
 
     // Ensure we can toggle concurrent collection and observe the change.
     {
-        let manager = FUGC_PLAN_MANAGER.lock();
+        let manager = FUGC_PLAN_MANAGER
+            .get_or_init(|| Mutex::new(FugcPlanManager::new()))
+            .lock();
         manager.set_concurrent_collection(false);
     }
     assert!(!fugc_get_stats().concurrent_collection_enabled);
 
     {
-        let manager = FUGC_PLAN_MANAGER.lock();
+        let manager = FUGC_PLAN_MANAGER
+            .get_or_init(|| Mutex::new(FugcPlanManager::new()))
+            .lock();
         manager.set_concurrent_collection(true);
     }
 }
@@ -47,7 +52,9 @@ fn take_enqueued_references_drains_queue_even_when_empty() {
 fn triggering_gc_without_mmtk_is_a_noop() {
     // Ensure the global manager is in a clean state to start.
     {
-        let mut manager = FUGC_PLAN_MANAGER.lock();
+        let mut manager = FUGC_PLAN_MANAGER
+            .get_or_init(|| Mutex::new(FugcPlanManager::new()))
+            .lock();
         *manager = FugcPlanManager::new();
     }
 
@@ -58,7 +65,9 @@ fn triggering_gc_without_mmtk_is_a_noop() {
 
 #[test]
 fn plan_manager_alloc_info_matches_binding() {
-    let manager = FUGC_PLAN_MANAGER.lock();
+    let manager = FUGC_PLAN_MANAGER
+        .get_or_init(|| Mutex::new(FugcPlanManager::new()))
+        .lock();
     let expected = manager.alloc_info(128, 32);
     drop(manager);
 
@@ -73,7 +82,9 @@ fn take_enqueued_references_handles_mock_entries() {
     let fake_obj = mmtk::util::ObjectReference::from_raw_address(fake_addr).unwrap();
 
     {
-        let manager = FUGC_PLAN_MANAGER.lock();
+        let manager = FUGC_PLAN_MANAGER
+            .get_or_init(|| Mutex::new(FugcPlanManager::new()))
+            .lock();
         manager.post_alloc(fake_obj, 0);
     }
 

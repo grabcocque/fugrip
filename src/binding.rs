@@ -22,7 +22,6 @@
 use crate::{plan::FugcPlanManager, thread::MutatorThread};
 use anyhow;
 use dashmap::DashMap;
-use lazy_static::lazy_static;
 use mmtk::util::{
     Address,
     opaque_pointer::{OpaquePointer, VMMutatorThread, VMThread, VMWorkerThread},
@@ -32,6 +31,7 @@ use mmtk::vm::{Collection, GCThreadContext, ReferenceGlue, VMBinding};
 use parking_lot::Mutex;
 use std::ops::{Deref, DerefMut};
 use std::ptr::NonNull;
+use std::sync::OnceLock;
 
 pub struct MutatorRegistration {
     mutator: *mut mmtk::Mutator<RustVM>,
@@ -87,18 +87,21 @@ impl DerefMut for MutatorHandle {
     }
 }
 
-lazy_static! {
-    static ref REFERENT_MAP: DashMap<mmtk::util::ObjectReference, mmtk::util::ObjectReference> =
-        DashMap::new();
+static REFERENT_MAP: OnceLock<DashMap<mmtk::util::ObjectReference, mmtk::util::ObjectReference>> =
+    OnceLock::new();
 
-    /// Global FUGC plan manager that coordinates MMTk with FUGC-specific features
-    pub static ref FUGC_PLAN_MANAGER: Mutex<FugcPlanManager> = Mutex::new(FugcPlanManager::new());
+/// Global FUGC plan manager that coordinates MMTk with FUGC-specific features
+pub static FUGC_PLAN_MANAGER: OnceLock<Mutex<FugcPlanManager>> = OnceLock::new();
 
-    pub static ref MUTATOR_MAP: DashMap<usize, MutatorRegistration> = DashMap::new();
+pub static MUTATOR_MAP: OnceLock<DashMap<usize, MutatorRegistration>> = OnceLock::new();
 
-    static ref FINALIZATION_QUEUE: Mutex<Vec<(mmtk::util::ObjectReference, Option<mmtk::util::ObjectReference>)>> =
-        Mutex::new(Vec::new());
-}
+type FinalizationQueue = Mutex<
+    Vec<(
+        mmtk::util::ObjectReference,
+        Option<mmtk::util::ObjectReference>,
+    )>,
+>;
+static FINALIZATION_QUEUE: OnceLock<FinalizationQueue> = OnceLock::new();
 
 fn vm_thread_key(thread: VMThread) -> usize {
     thread.0.to_address().as_usize()
@@ -120,13 +123,15 @@ pub fn register_mutator_context(
     container.thread_registry().register(thread.clone());
 
     let key = mutator_thread_key(tls);
-    MUTATOR_MAP.insert(key, MutatorRegistration::new(mutator as *mut _, thread));
+    MUTATOR_MAP
+        .get_or_init(DashMap::new)
+        .insert(key, MutatorRegistration::new(mutator as *mut _, thread));
 }
 
 /// Remove a mutator from the binding registries.
 pub fn unregister_mutator_context(tls: VMMutatorThread) {
     let key = mutator_thread_key(tls);
-    if let Some((_, entry)) = MUTATOR_MAP.remove(&key) {
+    if let Some((_, entry)) = MUTATOR_MAP.get_or_init(DashMap::new).remove(&key) {
         // Use DI container instead of global registry
         let container = crate::di::current_container();
         container.thread_registry().unregister(entry.thread.id());
@@ -138,7 +143,10 @@ where
     F: FnOnce(&MutatorRegistration) -> R,
 {
     let key = mutator_thread_key(tls);
-    MUTATOR_MAP.get(&key).map(|r| f(r.value()))
+    MUTATOR_MAP
+        .get_or_init(DashMap::new)
+        .get(&key)
+        .map(|r| f(r.value()))
 }
 
 fn visit_all_mutators<F>(mut visitor: F)
@@ -146,6 +154,7 @@ where
     F: FnMut(&'static mut mmtk::Mutator<RustVM>),
 {
     let registrations: Vec<_> = MUTATOR_MAP
+        .get_or_init(DashMap::new)
         .iter()
         .map(|entry| entry.value().mutator)
         .collect();
@@ -162,6 +171,7 @@ where
     F: FnMut(&MutatorThread),
 {
     let threads: Vec<_> = MUTATOR_MAP
+        .get_or_init(DashMap::new)
         .iter()
         .map(|entry| entry.value().thread.clone())
         .collect();
@@ -215,7 +225,9 @@ impl Collection<RustVM> for RustCollection {
         match ctx {
             GCThreadContext::Worker(worker) => {
                 let mmtk = {
-                    let manager = FUGC_PLAN_MANAGER.lock();
+                    let manager = FUGC_PLAN_MANAGER
+                        .get_or_init(|| Mutex::new(FugcPlanManager::new()))
+                        .lock();
                     match manager.mmtk() {
                         Ok(mmtk) => mmtk,
                         Err(e) => {
@@ -249,15 +261,20 @@ impl ReferenceGlue<RustVM> for RustReferenceGlue {
     type FinalizableType = crate::weak::WeakRefHeader;
 
     fn set_referent(reference: mmtk::util::ObjectReference, referent: mmtk::util::ObjectReference) {
-        REFERENT_MAP.insert(reference, referent);
+        REFERENT_MAP
+            .get_or_init(DashMap::new)
+            .insert(reference, referent);
     }
 
     fn get_referent(object: mmtk::util::ObjectReference) -> Option<mmtk::util::ObjectReference> {
-        REFERENT_MAP.get(&object).map(|v| *v.value())
+        REFERENT_MAP
+            .get_or_init(DashMap::new)
+            .get(&object)
+            .map(|v| *v.value())
     }
 
     fn clear_referent(object: mmtk::util::ObjectReference) {
-        let _ = REFERENT_MAP.remove(&object);
+        let _ = REFERENT_MAP.get_or_init(DashMap::new).remove(&object);
     }
 
     fn enqueue_references(references: &[mmtk::util::ObjectReference], _tls: VMWorkerThread) {
@@ -267,10 +284,21 @@ impl ReferenceGlue<RustVM> for RustReferenceGlue {
 
         let drained: Vec<_> = references
             .iter()
-            .map(|reference| (*reference, REFERENT_MAP.remove(reference).map(|(_, v)| v)))
+            .map(|reference| {
+                (
+                    *reference,
+                    REFERENT_MAP
+                        .get_or_init(DashMap::new)
+                        .remove(reference)
+                        .map(|(_, v)| v),
+                )
+            })
             .collect();
 
-        FINALIZATION_QUEUE.lock().extend(drained);
+        FINALIZATION_QUEUE
+            .get_or_init(|| Mutex::new(Vec::new()))
+            .lock()
+            .extend(drained);
     }
 }
 
@@ -297,7 +325,7 @@ pub struct RustActivePlan;
 impl mmtk::vm::ActivePlan<RustVM> for RustActivePlan {
     fn is_mutator(tls: mmtk::util::opaque_pointer::VMThread) -> bool {
         let key = vm_thread_key(tls);
-        MUTATOR_MAP.contains_key(&key)
+        MUTATOR_MAP.get_or_init(DashMap::new).contains_key(&key)
     }
 
     fn mutator(
@@ -309,7 +337,7 @@ impl mmtk::vm::ActivePlan<RustVM> for RustActivePlan {
 
     fn mutators<'a>() -> Box<dyn Iterator<Item = &'a mut mmtk::plan::Mutator<RustVM>> + 'a> {
         let mutators: Vec<_> = {
-            let map = MUTATOR_MAP.iter();
+            let map = MUTATOR_MAP.get_or_init(DashMap::new).iter();
             map.map(|entry| entry.value().mutator).collect()
         };
 
@@ -317,7 +345,7 @@ impl mmtk::vm::ActivePlan<RustVM> for RustActivePlan {
     }
 
     fn number_of_mutators() -> usize {
-        MUTATOR_MAP.len()
+        MUTATOR_MAP.get_or_init(DashMap::new).len()
     }
 }
 
@@ -353,7 +381,10 @@ pub fn initialize_mmtk_with_fugc() -> anyhow::Result<&'static mmtk::MMTK<RustVM>
     let mmtk_static: &'static mmtk::MMTK<RustVM> = Box::leak(boxed);
 
     // Initialize the FUGC plan manager with the MMTk instance
-    FUGC_PLAN_MANAGER.lock().initialize(mmtk_static);
+    FUGC_PLAN_MANAGER
+        .get_or_init(|| Mutex::new(FugcPlanManager::new()))
+        .lock()
+        .initialize(mmtk_static);
 
     Ok(mmtk_static)
 }
@@ -415,7 +446,7 @@ pub fn bind_mutator_thread_with_registry(
         }
     }
     let key = mutator_thread_key(tls);
-    MUTATOR_MAP.insert(
+    MUTATOR_MAP.get_or_init(DashMap::new).insert(
         key,
         MutatorRegistration::new(mutator_handle.as_ptr(), thread),
     );
@@ -426,7 +457,10 @@ pub fn bind_mutator_thread_with_registry(
 /// Initialize the FUGC plan manager with an existing MMTk instance.
 /// This is an internal function - use `initialize_mmtk_with_fugc` instead.
 pub fn initialize_fugc_plan(mmtk: &'static mmtk::MMTK<RustVM>) {
-    FUGC_PLAN_MANAGER.lock().initialize(mmtk);
+    FUGC_PLAN_MANAGER
+        .get_or_init(|| Mutex::new(FugcPlanManager::new()))
+        .lock()
+        .initialize(mmtk);
 }
 
 /// Allocate an object using MMTk with FUGC optimizations.
@@ -464,7 +498,10 @@ pub fn fugc_alloc(
     match mmtk::util::ObjectReference::from_raw_address(addr) {
         Some(obj_ref) => {
             // Integrate with FUGC post-allocation processing
-            FUGC_PLAN_MANAGER.lock().post_alloc(obj_ref, size);
+            FUGC_PLAN_MANAGER
+                .get_or_init(|| Mutex::new(FugcPlanManager::new()))
+                .lock()
+                .post_alloc(obj_ref, size);
             Ok(obj_ref)
         }
         None => anyhow::bail!(
@@ -493,7 +530,10 @@ pub fn fugc_alloc(
 /// assert_eq!(alignment, 16);
 /// ```
 pub fn fugc_alloc_info(size: usize, align: usize) -> (usize, usize) {
-    FUGC_PLAN_MANAGER.lock().alloc_info(size, align)
+    FUGC_PLAN_MANAGER
+        .get_or_init(|| Mutex::new(FugcPlanManager::new()))
+        .lock()
+        .alloc_info(size, align)
 }
 
 /// Handle post-allocation processing with FUGC optimizations
@@ -513,7 +553,10 @@ pub fn fugc_alloc_info(size: usize, align: usize) -> (usize, usize) {
 /// // This integrates the object with FUGC's concurrent collection
 /// ```
 pub fn fugc_post_alloc(obj: mmtk::util::ObjectReference, bytes: usize) {
-    FUGC_PLAN_MANAGER.lock().post_alloc(obj, bytes);
+    FUGC_PLAN_MANAGER
+        .get_or_init(|| Mutex::new(FugcPlanManager::new()))
+        .lock()
+        .post_alloc(obj, bytes);
 }
 
 /// Drain the queue of references that were enqueued for finalization by MMTk.
@@ -523,7 +566,11 @@ pub fn take_enqueued_references() -> Vec<(
     mmtk::util::ObjectReference,
     Option<mmtk::util::ObjectReference>,
 )> {
-    FINALIZATION_QUEUE.lock().drain(..).collect()
+    FINALIZATION_QUEUE
+        .get_or_init(|| Mutex::new(Vec::new()))
+        .lock()
+        .drain(..)
+        .collect()
 }
 
 /// Handle write barrier with FUGC optimizations using MMTk's memory manager API.
@@ -556,6 +603,7 @@ pub fn fugc_write_barrier(
     // Call sites that have a mutator should use `fugc_write_barrier_with_mutator` to
     // invoke MMTk's pre/post hooks with the correct mutator argument.
     FUGC_PLAN_MANAGER
+        .get_or_init(|| Mutex::new(FugcPlanManager::new()))
         .lock()
         .handle_write_barrier(src, slot, target);
 }
@@ -577,6 +625,7 @@ pub fn fugc_write_barrier_with_mutator(
 
     // Notify FUGC coordinator as well
     FUGC_PLAN_MANAGER
+        .get_or_init(|| Mutex::new(FugcPlanManager::new()))
         .lock()
         .handle_write_barrier(src, slot, target);
 }
@@ -593,7 +642,10 @@ pub fn fugc_write_barrier_with_mutator(
 /// fugc_gc();
 /// ```
 pub fn fugc_gc() {
-    FUGC_PLAN_MANAGER.lock().gc();
+    FUGC_PLAN_MANAGER
+        .get_or_init(|| Mutex::new(FugcPlanManager::new()))
+        .lock()
+        .gc();
 }
 
 /// Get FUGC statistics
@@ -621,20 +673,32 @@ pub fn fugc_gc() {
 /// println!("Objects allocated black: {}", stats.objects_allocated_black);
 /// ```
 pub fn fugc_get_stats() -> crate::plan::FugcStats {
-    FUGC_PLAN_MANAGER.lock().get_fugc_stats()
+    FUGC_PLAN_MANAGER
+        .get_or_init(|| Mutex::new(FugcPlanManager::new()))
+        .lock()
+        .get_fugc_stats()
 }
 
 /// Get the current FUGC collection phase
 pub fn fugc_get_phase() -> crate::fugc_coordinator::FugcPhase {
-    FUGC_PLAN_MANAGER.lock().fugc_phase()
+    FUGC_PLAN_MANAGER
+        .get_or_init(|| Mutex::new(FugcPlanManager::new()))
+        .lock()
+        .fugc_phase()
 }
 
 /// Check if FUGC collection is currently in progress
 pub fn fugc_is_collecting() -> bool {
-    FUGC_PLAN_MANAGER.lock().is_fugc_collecting()
+    FUGC_PLAN_MANAGER
+        .get_or_init(|| Mutex::new(FugcPlanManager::new()))
+        .lock()
+        .is_fugc_collecting()
 }
 
 /// Get FUGC cycle statistics
 pub fn fugc_get_cycle_stats() -> crate::fugc_coordinator::FugcCycleStats {
-    FUGC_PLAN_MANAGER.lock().get_fugc_cycle_stats()
+    FUGC_PLAN_MANAGER
+        .get_or_init(|| Mutex::new(FugcPlanManager::new()))
+        .lock()
+        .get_fugc_cycle_stats()
 }

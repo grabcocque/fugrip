@@ -19,7 +19,7 @@ fn write_barrier_benchmarks(c: &mut Criterion) {
     let heap_size = 0x1000000; // 16MB heap
     let marking = Arc::new(TricolorMarking::new(heap_base, heap_size));
     let coordinator = Arc::new(ParallelMarkingCoordinator::new(4));
-    let barrier = WriteBarrier::new(Arc::clone(&marking), coordinator, heap_base, heap_size);
+    let barrier = WriteBarrier::new(&marking, &coordinator, heap_base, heap_size);
 
     // Create test objects
     let old_obj = unsafe { ObjectReference::from_raw_address_unchecked(heap_base + 0x1000usize) };
@@ -160,7 +160,7 @@ fn black_allocation_benchmarks(c: &mut Criterion) {
     );
     let heap_size = 0x1000000;
     let marking = Arc::new(TricolorMarking::new(heap_base, heap_size));
-    let black_allocator = BlackAllocator::new(Arc::clone(&marking));
+    let black_allocator = BlackAllocator::new(&Arc::clone(&marking));
 
     let mut group = c.benchmark_group("black_allocation");
     group.warm_up_time(std::time::Duration::from_millis(500));
@@ -283,7 +283,7 @@ fn bench_fuzz_corpus(c: &mut Criterion) {
     debug_assert!(heap_base.as_usize() > 0, "Invalid heap base in fuzz corpus");
     let heap_size = 0x1000000;
     let tricolor_marking = Arc::new(TricolorMarking::new(heap_base, heap_size));
-    let black_allocator = BlackAllocator::new(tricolor_marking.clone());
+    let black_allocator = BlackAllocator::new(&tricolor_marking.clone());
 
     let num_objects = 32;
     let objects: Vec<ObjectReference> = (0..num_objects)

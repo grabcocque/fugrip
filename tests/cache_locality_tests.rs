@@ -102,7 +102,7 @@ fn cache_optimized_marking_vs_standard() {
     let tricolor = Arc::new(TricolorMarking::new(heap_base, 64 * 1024 * 1024));
 
     // Test cache-optimized marking
-    let cache_marking = CacheOptimizedMarking::with_tricolor(Arc::clone(&tricolor));
+    let cache_marking = CacheOptimizedMarking::with_tricolor(&tricolor);
     let start = Instant::now();
     cache_marking.mark_objects_batch(&objects);
     let cache_optimized_time = start.elapsed();
@@ -223,8 +223,8 @@ fn concurrent_marking_cache_integration() {
         heap_base,
         64 * 1024 * 1024,
         4,
-        thread_registry,
-        global_roots,
+        &thread_registry,
+        &global_roots,
     );
 
     // Test cache-optimized marking
@@ -264,7 +264,7 @@ fn end_to_end_cache_performance() {
 
     // 2. Cache-optimized marking
     let tricolor = Arc::new(TricolorMarking::new(base_addr, heap_size));
-    let cache_marking = CacheOptimizedMarking::with_tricolor(Arc::clone(&tricolor));
+    let cache_marking = CacheOptimizedMarking::with_tricolor(&tricolor);
     cache_marking.mark_objects_batch(&objects);
 
     // 3. Locality-aware work processing

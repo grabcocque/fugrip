@@ -111,7 +111,7 @@ fn test_cache_optimized_marking_effectiveness() {
     let heap_base = unsafe { Address::from_usize(0x10000000) };
     let heap_size = 64 * 1024 * 1024;
     let tricolor = Arc::new(TricolorMarking::new(heap_base, heap_size));
-    let cache_marking = CacheOptimizedMarking::with_tricolor(Arc::clone(&tricolor));
+    let cache_marking = CacheOptimizedMarking::with_tricolor(&tricolor);
 
     // Create objects with different locality patterns
     let mut high_locality_objects = Vec::new();
@@ -208,8 +208,8 @@ fn test_concurrent_cache_access() {
         heap_base,
         64 * 1024 * 1024,
         4, // 4 workers
-        thread_registry,
-        global_roots,
+        &thread_registry,
+        &global_roots,
     );
 
     // Create objects for concurrent processing
@@ -264,7 +264,7 @@ fn test_cache_optimization_performance_comparison() {
     }
 
     // Measure cache-optimized marking
-    let cache_marking = CacheOptimizedMarking::with_tricolor(Arc::clone(&tricolor));
+    let cache_marking = CacheOptimizedMarking::with_tricolor(&tricolor);
     let start = std::time::Instant::now();
     cache_marking.mark_objects_batch(&objects);
     let cache_optimized_time = start.elapsed();

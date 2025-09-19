@@ -66,9 +66,10 @@ pub const TEST_WORKER_COUNT: usize = 4;
 
 /// Test fixture that provides an isolated DI container for each test
 pub struct TestFixture {
-    pub container: DIContainer,
+    pub container: Arc<DIContainer>,
     pub coordinator: Arc<FugcCoordinator>,
     _scope: DIScope,
+    _manager: Arc<crate::safepoint::SafepointManager>,
 }
 
 impl TestFixture {
@@ -79,17 +80,23 @@ impl TestFixture {
 
     /// Create a new test fixture with custom heap configuration
     pub fn new_with_config(heap_base: usize, heap_size: usize, worker_count: usize) -> Self {
-        let mut container = DIContainer::new_for_testing();
+        let container = Arc::new(DIContainer::new_for_testing());
 
         let heap_base_addr = unsafe { Address::from_usize(heap_base) };
         let coordinator =
             container.create_fugc_coordinator(heap_base_addr, heap_size, worker_count);
-        let scope = DIScope::new(container.clone());
+
+        // Get the container's safepoint manager
+        let manager = Arc::clone(container.safepoint_manager());
+
+        // Set this container as the current one for the duration of the test
+        let scope = DIScope::new(Arc::clone(&container));
 
         Self {
             container,
             coordinator,
             _scope: scope,
+            _manager: manager,
         }
     }
 
@@ -109,7 +116,7 @@ impl TestFixture {
     }
 
     /// Get the safepoint manager from the container
-    pub fn safepoint_manager(&self) -> Arc<crate::safepoint::SafepointManager> {
+    pub fn safepoint_manager(&self) -> &Arc<crate::safepoint::SafepointManager> {
         self.container.safepoint_manager()
     }
 }
@@ -117,6 +124,14 @@ impl TestFixture {
 impl Default for TestFixture {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl Drop for TestFixture {
+    fn drop(&mut self) {
+        // Clear the global manager to prevent test interference
+        // Note: We can't reset OnceLock, but creating new containers for each test
+        // ensures isolation during the test lifetime
     }
 }
 
@@ -136,7 +151,7 @@ macro_rules! test_fixture {
 
 /// Convenience function for tests that just need a coordinator
 pub fn test_coordinator() -> Arc<FugcCoordinator> {
-    TestFixture::new().coordinator
+    Arc::clone(&TestFixture::new().coordinator)
 }
 
 /// Convenience function for tests that need a coordinator with custom config
@@ -145,7 +160,7 @@ pub fn test_coordinator_with_config(
     heap_size: usize,
     workers: usize,
 ) -> Arc<FugcCoordinator> {
-    TestFixture::new_with_config(heap_base, heap_size, workers).coordinator
+    Arc::clone(&TestFixture::new_with_config(heap_base, heap_size, workers).coordinator)
 }
 
 #[cfg(test)]

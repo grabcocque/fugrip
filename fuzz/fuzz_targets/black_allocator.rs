@@ -14,7 +14,7 @@ fuzz_target!(|data: &[u8]| {
     let heap_base = unsafe { Address::from_usize(0x10000000) };
     let heap_size = 0x1000000; // 16MB
     let tricolor_marking = Arc::new(TricolorMarking::new(heap_base, heap_size));
-    let black_allocator = BlackAllocator::new(tricolor_marking.clone());
+    let black_allocator = BlackAllocator::new(&tricolor_marking);
 
     // Create test objects with proper alignment
     let num_objects = (data[0] as usize % 32) + 1;

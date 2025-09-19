@@ -31,12 +31,12 @@ use crate::fugc_coordinator::FugcCoordinator;
 use crossbeam::channel::{Receiver, Sender, bounded};
 use dashmap::DashMap;
 use once_cell::sync::Lazy;
-use parking_lot::{Condvar, Mutex, RwLock};
+use parking_lot::{Condvar, Mutex};
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::thread::{self, ThreadId};
 use std::time::{Duration, Instant};
 
@@ -44,7 +44,7 @@ use std::time::{Duration, Instant};
 static CUSTOM_COORDINATOR: std::sync::OnceLock<Arc<FugcCoordinator>> = std::sync::OnceLock::new();
 
 /// Global manager instance (can be replaced for testing)
-static GLOBAL_MANAGER: RwLock<Option<Arc<SafepointManager>>> = RwLock::new(None);
+static GLOBAL_MANAGER: OnceLock<Arc<SafepointManager>> = OnceLock::new();
 
 /// Global safepoint state that all threads poll
 ///
@@ -65,9 +65,37 @@ static SAFEPOINT_INTERVAL_STATS: Lazy<Mutex<(Duration, usize)>> =
 static SOFT_HANDSHAKE_REQUESTED: AtomicBool = AtomicBool::new(false);
 static HANDSHAKE_GENERATION: AtomicUsize = AtomicUsize::new(0);
 
+/// Get the current thread's cached SafepointManager, falling back to container lookup
+fn get_thread_manager() -> Arc<SafepointManager> {
+    THREAD_SAFEPOINT_MANAGER.with(|manager_cell| {
+        let manager_opt = manager_cell.borrow().clone();
+        match manager_opt {
+            Some(manager) => manager,
+            None => {
+                // Fallback: get from container and cache it
+                let container = crate::di::current_container();
+                let manager = Arc::clone(container.safepoint_manager());
+                *manager_cell.borrow_mut() = Some(Arc::clone(&manager));
+                manager
+            }
+        }
+    })
+}
+
+/// Clear the thread-local manager cache (used when DI container changes)
+pub fn clear_thread_safepoint_manager_cache() {
+    THREAD_SAFEPOINT_MANAGER.with(|manager_cell| {
+        *manager_cell.borrow_mut() = None;
+    });
+}
+
 // Thread-local safepoint state for each mutator thread
 thread_local! {
     static THREAD_SAFEPOINT_STATE: std::cell::RefCell<Option<ThreadSafepointState>> =
+        const { std::cell::RefCell::new(None) };
+
+    // Thread-local cached manager for this thread
+    static THREAD_SAFEPOINT_MANAGER: std::cell::RefCell<Option<Arc<SafepointManager>>> =
         const { std::cell::RefCell::new(None) };
 }
 
@@ -198,9 +226,9 @@ pub fn safepoint_exit() {
         }
     });
 
-    // Register this thread with the DI container's safepoint manager
-    let container = crate::di::current_container();
-    container.safepoint_manager().register_thread();
+    // Register this thread with a safepoint manager and cache it
+    let manager = get_thread_manager();
+    manager.register_thread();
 }
 
 /// Enter "active" state after returning from blocking operations
@@ -233,8 +261,7 @@ pub fn safepoint_enter() {
                 && thread_state.last_handshake_generation < current_generation
             {
                 // Execute any pending handshake callback
-                let container = crate::di::current_container();
-                container.safepoint_manager().execute_handshake_callback();
+                get_thread_manager().execute_handshake_callback();
             }
 
             // Now set to active state
@@ -284,21 +311,38 @@ fn safepoint_slow_path() {
             thread_state.local_hits += 1;
             thread_state.last_safepoint = Instant::now();
 
-            // Update handshake generation if this is a handshake
-            if SOFT_HANDSHAKE_REQUESTED.load(Ordering::Acquire) {
-                thread_state.last_handshake_generation =
-                    HANDSHAKE_GENERATION.load(Ordering::Acquire);
-            }
+            // Note: handshake generation will be updated after callback execution
         }
     });
 
-    // Execute appropriate callbacks
-    let container = crate::di::current_container();
-    let manager = container.safepoint_manager();
+    // Execute appropriate callbacks using the thread's cached manager
+    let manager = get_thread_manager();
 
     // Handle soft handshake first if requested
     if SOFT_HANDSHAKE_REQUESTED.load(Ordering::Acquire) {
-        manager.execute_handshake_callback();
+        // Check if this thread needs to participate in the current handshake
+        let should_execute = THREAD_SAFEPOINT_STATE.with(|state| {
+            let state_ref = state.borrow();
+            if let Some(thread_state) = state_ref.as_ref() {
+                let current_generation = HANDSHAKE_GENERATION.load(Ordering::Acquire);
+                thread_state.last_handshake_generation < current_generation
+            } else {
+                true // If no state, participate in handshake
+            }
+        });
+
+        if should_execute {
+            manager.execute_handshake_callback();
+
+            // Update generation after successful callback execution
+            THREAD_SAFEPOINT_STATE.with(|state| {
+                let mut state_ref = state.borrow_mut();
+                if let Some(thread_state) = state_ref.as_mut() {
+                    thread_state.last_handshake_generation =
+                        HANDSHAKE_GENERATION.load(Ordering::Acquire);
+                }
+            });
+        }
     }
 
     // Then handle regular safepoint if requested
@@ -429,7 +473,7 @@ impl SafepointManager {
 
     /// Set the global manager (for testing)
     pub fn set_global_manager(manager: Arc<SafepointManager>) {
-        GLOBAL_MANAGER.write().replace(manager);
+        let _ = GLOBAL_MANAGER.set(manager);
     }
 
     /// Get the global safepoint manager instance
@@ -443,28 +487,18 @@ impl SafepointManager {
     /// let stats = manager.get_stats();
     /// println!("Safepoint hit rate: {:.2}%", stats.hit_rate * 100.0);
     /// ```
-    pub(crate) fn global() -> Arc<SafepointManager> {
-        // Check if already initialized
-        if let Some(ref m) = *GLOBAL_MANAGER.read() {
-            return Arc::clone(m);
-        }
+    pub fn global() -> &'static Arc<SafepointManager> {
+        GLOBAL_MANAGER.get_or_init(|| {
+            let coordinator = CUSTOM_COORDINATOR.get().cloned().unwrap_or_else(|| {
+                let container = crate::di::DIContainer::new();
+                let heap_base = unsafe { mmtk::util::Address::from_usize(0x10000000) };
+                container
+                    .create_fugc_coordinator(heap_base, 64 * 1024 * 1024, 4)
+                    .clone()
+            });
 
-        // Not initialized, acquire write lock
-        let mut manager = GLOBAL_MANAGER.write();
-        if let Some(ref m) = *manager {
-            return Arc::clone(m);
-        }
-
-        // Create new manager
-        let coordinator = CUSTOM_COORDINATOR.get().cloned().unwrap_or_else(|| {
-            let mut container = crate::di::DIContainer::new();
-            let heap_base = unsafe { mmtk::util::Address::from_usize(0x10000000) };
-            container.create_fugc_coordinator(heap_base, 64 * 1024 * 1024, 4)
-        });
-
-        let new_manager = Arc::new(SafepointManager::new(coordinator));
-        *manager = Some(Arc::clone(&new_manager));
-        new_manager
+            Arc::new(SafepointManager::new(coordinator))
+        })
     }
 
     /// Create a safepoint manager with a specific FUGC coordinator
@@ -496,19 +530,19 @@ impl SafepointManager {
     /// let manager = SafepointManager::with_coordinator(coordinator);
     /// manager.request_gc_safepoint(GcSafepointPhase::BarrierActivation);
     /// ```
-    pub fn with_coordinator(coordinator: Arc<FugcCoordinator>) -> Arc<Self> {
-        Arc::new(SafepointManager::new(coordinator))
+    pub fn with_coordinator(coordinator: &Arc<FugcCoordinator>) -> Arc<Self> {
+        Arc::new(SafepointManager::new(Arc::clone(coordinator)))
     }
 
     /// Create a safepoint manager for testing without requiring an external
     /// coordinator to be supplied. This creates a minimal `FugcCoordinator`
     /// using DI container.
     pub fn new_for_testing() -> Arc<Self> {
-        let mut container = crate::di::DIContainer::new();
+        let container = crate::di::DIContainer::new();
         let heap_base = unsafe { mmtk::util::Address::from_usize(0x10000000) };
         let coordinator = container.create_fugc_coordinator(heap_base, 64 * 1024 * 1024, 1);
 
-        Arc::new(SafepointManager::new(coordinator))
+        Arc::new(SafepointManager::new(coordinator.clone()))
     }
 
     /// Create a new safepoint manager
@@ -677,7 +711,7 @@ impl SafepointManager {
     }
 
     /// Register a thread with the global thread registry
-    pub fn register_thread(&self) {
+    pub fn register_thread(self: &Arc<Self>) {
         let thread_id = thread::current().id();
         self.thread_registry.insert(
             thread_id,
@@ -687,6 +721,21 @@ impl SafepointManager {
                 last_seen: Instant::now(),
             },
         );
+
+        THREAD_SAFEPOINT_MANAGER.with(|manager_cell| {
+            *manager_cell.borrow_mut() = Some(Arc::clone(self));
+        });
+    }
+
+    /// Register a thread with this specific manager and cache it for this thread
+    pub fn register_and_cache_thread(self: &Arc<Self>) {
+        // Cache this manager in the thread-local slot
+        THREAD_SAFEPOINT_MANAGER.with(|manager_cell| {
+            *manager_cell.borrow_mut() = Some(Arc::clone(self));
+        });
+
+        // Register with this manager
+        self.register_thread();
     }
 
     /// Execute the current handshake callback (called from slow path)
@@ -723,13 +772,7 @@ impl SafepointManager {
     pub fn execute_safepoint_callback(&self) {
         let cb = self.current_callback.lock();
         if let Some(ref callback) = *cb {
-            // Debug: print manager identity and indicate callback execution
-            let addr = self as *const SafepointManager as usize;
-            println!("[safepoint] executing callback on manager {:x}", addr);
             callback();
-        } else {
-            let addr = self as *const SafepointManager as usize;
-            println!("[safepoint] no callback to execute on manager {:x}", addr);
         }
     }
 
@@ -926,8 +969,9 @@ mod tests {
     #[test]
     fn safepoint_callback_execution() {
         // Use a dedicated DI container so pollcheck and the test share the same manager
-        let _scope = crate::di::DIScope::new(crate::di::DIContainer::new_for_testing());
-        let manager = crate::di::current_container().safepoint_manager();
+        let container = Arc::new(crate::di::DIContainer::new_for_testing());
+        let _scope = crate::di::DIScope::new(Arc::clone(&container));
+        let manager = Arc::clone(container.safepoint_manager());
         manager.register_thread();
 
         // Reset globals
@@ -957,9 +1001,9 @@ mod tests {
 
     #[test]
     fn safepoint_statistics() {
-        let container = crate::di::DIContainer::new_for_testing();
-        let _scope = crate::di::DIScope::new(container.clone());
-        let manager = container.safepoint_manager();
+        let container = Arc::new(crate::di::DIContainer::new_for_testing());
+        let _scope = crate::di::DIScope::new(Arc::clone(&container));
+        let manager = Arc::clone(container.safepoint_manager());
 
         // Snapshot existing counters so we can restore them after the test
         let previous_polls = SAFEPOINT_POLLS.swap(0, Ordering::Relaxed);
@@ -1005,7 +1049,7 @@ mod tests {
             crate::test_utils::TestFixture::new_with_config(0x10000000, 64 * 1024 * 1024, 4);
         let coordinator = Arc::clone(&fixture.coordinator);
 
-        let manager = SafepointManager::with_coordinator(coordinator);
+        let manager = SafepointManager::with_coordinator(&coordinator);
 
         // Test different GC phases
         manager.request_gc_safepoint(GcSafepointPhase::RootScanning);

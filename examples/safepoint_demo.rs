@@ -21,7 +21,7 @@ fn main() {
 
     // Demonstrate GC coordination through safepoints
     println!("\n2. GC coordination through safepoints:");
-    demonstrate_gc_coordination(&manager);
+    demonstrate_gc_coordination(manager);
 
     // Show safepoint statistics
     println!("\n3. Safepoint performance statistics:");

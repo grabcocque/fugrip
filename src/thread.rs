@@ -212,7 +212,7 @@ pub fn global_thread_registry() -> &'static ThreadRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{sync::Arc, thread, time::Duration};
+    use std::{sync::Arc, thread};
 
     #[test]
     fn test_mutator_thread_creation() {
@@ -306,21 +306,37 @@ mod tests {
     fn test_poll_safepoint_loop() {
         let (mutator, _req_rx, _completion_tx, _release_rx) = MutatorThread::new_with_channels(2);
 
-        // Spawn a thread which polls safepoint until a small duration
+        // Use proper thread coordination with channels
+        let (start_tx, start_rx) = channel::bounded(1);
+        let (done_tx, done_rx) = channel::bounded(1);
         let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let running_clone = running.clone();
         let handler_clone = mutator.clone();
 
         let handle = thread::spawn(move || {
+            // Signal that thread is ready
+            start_tx.send(()).unwrap();
+
             while running_clone.load(std::sync::atomic::Ordering::Relaxed) {
                 handler_clone.poll_safepoint();
                 thread::yield_now();
             }
+
+            // Signal completion
+            done_tx.send(()).unwrap();
         });
 
-        // Let it run briefly and then stop
-        thread::sleep(Duration::from_millis(10));
+        // Wait for thread to start
+        start_rx.recv().unwrap();
+
+        // Allow some polling iterations, then stop
+        for _ in 0..10 {
+            thread::yield_now();
+        }
         running.store(false, std::sync::atomic::Ordering::Relaxed);
+
+        // Wait for thread to complete
+        done_rx.recv().unwrap();
         handle.join().unwrap();
 
         // Ensure basic stack root registration works
@@ -364,16 +380,21 @@ mod tests {
         let registry = Arc::new(ThreadRegistry::new());
         let mut handles = Vec::new();
 
+        // Use proper synchronization with barriers for deterministic thread coordination
+        let barrier = Arc::new(std::sync::Barrier::new(8));
+
         // Spawn threads that register/unregister concurrently
         for i in 0..8 {
             let registry_clone = Arc::clone(&registry);
+            let barrier_clone = Arc::clone(&barrier);
             let handle = thread::spawn(move || {
                 for j in 0..10 {
                     let thread_id = i * 10 + j;
                     let mutator = MutatorThread::new(thread_id);
                     registry_clone.register(mutator);
 
-                    thread::sleep(Duration::from_millis(1));
+                    // Synchronize all threads at this point for deterministic testing
+                    barrier_clone.wait();
 
                     registry_clone.unregister(thread_id);
                 }

@@ -9,25 +9,14 @@ use crate::roots::GlobalRoots;
 use crate::safepoint::SafepointManager;
 use crate::thread::ThreadRegistry;
 use parking_lot::Mutex;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 /// Dependency injection container for FUGC components
 pub struct DIContainer {
     thread_registry: Arc<ThreadRegistry>,
     global_roots: Arc<Mutex<GlobalRoots>>,
-    safepoint_manager: Mutex<Option<Arc<SafepointManager>>>,
-    fugc_coordinator: Mutex<Option<Arc<FugcCoordinator>>>,
-}
-
-impl Clone for DIContainer {
-    fn clone(&self) -> Self {
-        Self {
-            thread_registry: Arc::clone(&self.thread_registry),
-            global_roots: Arc::clone(&self.global_roots),
-            safepoint_manager: Mutex::new(self.safepoint_manager.lock().clone()),
-            fugc_coordinator: Mutex::new(self.fugc_coordinator.lock().clone()),
-        }
-    }
+    safepoint_manager: OnceLock<Arc<SafepointManager>>,
+    fugc_coordinator: OnceLock<Arc<FugcCoordinator>>,
 }
 
 impl DIContainer {
@@ -39,8 +28,8 @@ impl DIContainer {
         Self {
             thread_registry,
             global_roots,
-            safepoint_manager: Mutex::new(None),
-            fugc_coordinator: Mutex::new(None),
+            safepoint_manager: OnceLock::new(),
+            fugc_coordinator: OnceLock::new(),
         }
     }
 
@@ -61,64 +50,60 @@ impl DIContainer {
     }
 
     /// Get or create the safepoint manager
-    pub fn safepoint_manager(&self) -> Arc<SafepointManager> {
-        // Fast path: return cached manager if present
-        {
-            let guard = self.safepoint_manager.lock();
-            if let Some(ref manager) = *guard {
-                return Arc::clone(manager);
+    pub fn safepoint_manager(&self) -> &Arc<SafepointManager> {
+        self.safepoint_manager.get_or_init(|| {
+            if let Some(coordinator) = self.fugc_coordinator.get() {
+                SafepointManager::with_coordinator(coordinator)
+            } else {
+                SafepointManager::new_for_testing()
             }
-        }
-
-        // Need to create and cache a manager
-        let manager = if let Some(coordinator) = self.fugc_coordinator.lock().as_ref() {
-            SafepointManager::with_coordinator(Arc::clone(coordinator))
-        } else {
-            SafepointManager::new_for_testing()
-        };
-
-        let mut guard = self.safepoint_manager.lock();
-        *guard = Some(Arc::clone(&manager));
-        manager
+        })
     }
 
     /// Set the FUGC coordinator
-    pub fn set_fugc_coordinator(&mut self, coordinator: Arc<FugcCoordinator>) {
-        let mut guard = self.fugc_coordinator.lock();
-        *guard = Some(coordinator);
+    pub fn set_fugc_coordinator(&self, coordinator: Arc<FugcCoordinator>) {
+        if self.fugc_coordinator.set(coordinator.clone()).is_ok() {
+            let _ = self
+                .safepoint_manager
+                .set(SafepointManager::with_coordinator(&coordinator));
+        }
     }
 
     /// Get the FUGC coordinator (panics if not set)
-    pub fn fugc_coordinator(&self) -> Arc<FugcCoordinator> {
+    pub fn fugc_coordinator(&self) -> &Arc<FugcCoordinator> {
         self.fugc_coordinator
-            .lock()
-            .as_ref()
+            .get()
             .expect("FUGC coordinator not set in DI container")
-            .clone()
     }
 
     /// Create a FUGC coordinator with the dependencies from this container
     pub fn create_fugc_coordinator(
-        &mut self,
+        &self,
         heap_base: mmtk::util::Address,
         heap_size: usize,
         num_workers: usize,
     ) -> Arc<FugcCoordinator> {
+        if let Some(existing) = self.fugc_coordinator.get() {
+            return existing.clone();
+        }
+
         let coordinator = Arc::new(FugcCoordinator::new(
             heap_base,
             heap_size,
             num_workers,
-            Arc::clone(&self.thread_registry),
-            Arc::clone(&self.global_roots),
+            &self.thread_registry,
+            &self.global_roots,
         ));
 
-        let mut guard = self.fugc_coordinator.lock();
-        *guard = Some(Arc::clone(&coordinator));
-        // Also set safepoint manager to use this coordinator
-        let mut sm_guard = self.safepoint_manager.lock();
-        *sm_guard = Some(SafepointManager::with_coordinator(Arc::clone(&coordinator)));
-
-        coordinator
+        match self.fugc_coordinator.set(coordinator.clone()) {
+            Ok(()) => {
+                let _ = self
+                    .safepoint_manager
+                    .set(SafepointManager::with_coordinator(&coordinator));
+                coordinator
+            }
+            Err(_) => self.fugc_coordinator.get().unwrap().clone(),
+        }
     }
 }
 
@@ -136,9 +121,9 @@ thread_local! {
 }
 
 /// Set the DI container for the current thread context
-pub fn set_current_container(container: DIContainer) {
+pub fn set_current_container(container: Arc<DIContainer>) {
     CURRENT_CONTAINER.with(|c| {
-        *c.borrow_mut() = Some(Arc::new(container));
+        *c.borrow_mut() = Some(container);
     });
 }
 
@@ -160,26 +145,30 @@ pub fn clear_current_container() {
     CURRENT_CONTAINER.with(|c| {
         *c.borrow_mut() = None;
     });
+    crate::safepoint::clear_thread_safepoint_manager_cache();
 }
 
 /// RAII guard for setting a DI container for a scope
 pub struct DIScope {
-    _phantom: std::marker::PhantomData<()>,
+    previous: Option<Arc<DIContainer>>,
 }
 
 impl DIScope {
     /// Create a new DI scope with the given container
-    pub fn new(container: DIContainer) -> Self {
+    pub fn new(container: Arc<DIContainer>) -> Self {
+        let previous = CURRENT_CONTAINER.with(|c| c.borrow().clone());
         set_current_container(container);
-        Self {
-            _phantom: std::marker::PhantomData,
-        }
+        Self { previous }
     }
 }
 
 impl Drop for DIScope {
     fn drop(&mut self) {
-        clear_current_container();
+        if let Some(prev) = self.previous.take() {
+            set_current_container(prev);
+        } else {
+            clear_current_container();
+        }
     }
 }
 
@@ -212,32 +201,30 @@ mod tests {
 
     #[test]
     fn test_di_scope() {
-        let container = DIContainer::new_for_testing();
+        // Each test gets its own isolated container
+        let test_container = Arc::new(DIContainer::new_for_testing());
+        let test_registry = test_container.thread_registry();
 
         {
-            let _scope = DIScope::new(container.clone());
+            // Set this test's container as current for the scope
+            let _scope = DIScope::new(Arc::clone(&test_container));
             let current = current_container();
-            assert!(Arc::ptr_eq(
-                current.thread_registry(),
-                container.thread_registry()
-            ));
+            assert!(Arc::ptr_eq(current.thread_registry(), test_registry));
         }
 
         // Should be cleared after scope ends
         clear_current_container();
         let new_current = current_container();
-        assert!(!Arc::ptr_eq(
-            new_current.thread_registry(),
-            container.thread_registry()
-        ));
+        // New default container should have different registry
+        assert!(!Arc::ptr_eq(new_current.thread_registry(), test_registry));
     }
 
     #[test]
     fn test_fugc_coordinator_creation() {
-        let mut container = DIContainer::new_for_testing();
+        let container = Arc::new(DIContainer::new_for_testing());
         let heap_base = unsafe { Address::from_usize(0x10000000) };
         let coordinator = container.create_fugc_coordinator(heap_base, 64 * 1024 * 1024, 4);
 
-        assert!(Arc::ptr_eq(&coordinator, &container.fugc_coordinator()));
+        assert!(Arc::ptr_eq(&coordinator, container.fugc_coordinator()));
     }
 }

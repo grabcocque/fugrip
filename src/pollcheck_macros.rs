@@ -201,7 +201,7 @@ mod tests {
             counter.fetch_add(i, Ordering::Relaxed);
         });
 
-        assert_eq!(counter.load(Ordering::Relaxed), (0..10000).sum());
+        assert_eq!(counter.load(Ordering::Relaxed), (0..10000).sum::<usize>());
     }
 
     #[test]

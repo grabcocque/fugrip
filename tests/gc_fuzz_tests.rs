@@ -203,7 +203,7 @@ proptest! {
         let heap_size = 64 * 1024 * 1024;
         let tricolor = Arc::new(TricolorMarking::new(heap_base, heap_size));
         let coordinator = Arc::new(fugrip::concurrent::ParallelMarkingCoordinator::new(4));
-        let barrier = WriteBarrier::new(tricolor, coordinator, heap_base, heap_size);
+        let barrier = WriteBarrier::new(&tricolor, &coordinator, heap_base, heap_size);
 
         // Activate barrier
         barrier.activate();
@@ -252,8 +252,8 @@ fn fuzz_concurrent_marking_coordinator() {
             heap_base,
             64 * 1024 * 1024,
             num_workers,
-            thread_registry,
-            global_roots,
+            &thread_registry,
+            &global_roots,
         );
 
         // Generate test objects
@@ -429,7 +429,7 @@ proptest! {
         let heap_base = unsafe { Address::from_usize(0x10000000) };
         let heap_size = 64 * 1024 * 1024;
         let tricolor = Arc::new(TricolorMarking::new(heap_base, heap_size));
-        let black_allocator = BlackAllocator::new(tricolor.clone());
+        let black_allocator = BlackAllocator::new(&tricolor);
 
         // Filter objects to only those within heap bounds
         let valid_objects: Vec<_> = objects.iter()
@@ -490,8 +490,8 @@ fn stress_test_concurrent_gc_operations() {
         heap_base,
         128 * 1024 * 1024, // 128MB
         8,                 // 8 workers
-        thread_registry,
-        global_roots,
+        &thread_registry,
+        &global_roots,
     ));
 
     let stop_flag = Arc::new(AtomicBool::new(false));

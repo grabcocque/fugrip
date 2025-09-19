@@ -342,8 +342,8 @@ fn bench_concurrent_marking_scalability(c: &mut Criterion) {
                             heap_base,
                             64 * 1024 * 1024,
                             thread_count,
-                            thread_registry,
-                            global_roots,
+                            &thread_registry,
+                            &global_roots,
                         );
 
                         if cache_opt {

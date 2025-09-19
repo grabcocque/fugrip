@@ -161,18 +161,18 @@ impl FugcCoordinator {
         heap_base: Address,
         heap_size: usize,
         num_workers: usize,
-        thread_registry: Arc<ThreadRegistry>,
-        global_roots: Arc<Mutex<GlobalRoots>>,
+        thread_registry: &Arc<ThreadRegistry>,
+        global_roots: &Arc<Mutex<GlobalRoots>>,
     ) -> Self {
         let tricolor_marking = Arc::new(TricolorMarking::new(heap_base, heap_size));
         let parallel_coordinator = Arc::new(ParallelMarkingCoordinator::new(num_workers));
         let write_barrier = Arc::new(WriteBarrier::new(
-            Arc::clone(&tricolor_marking),
-            Arc::clone(&parallel_coordinator),
+            &tricolor_marking,
+            &parallel_coordinator,
             heap_base,
             heap_size,
         ));
-        let black_allocator = Arc::new(BlackAllocator::new(Arc::clone(&tricolor_marking)));
+        let black_allocator = Arc::new(BlackAllocator::new(&tricolor_marking));
 
         // Initialize SIMD bitvector for ultra-fast sweeping (assume 16-byte object alignment)
         let simd_bitvector = Arc::new(SimdBitvector::new(heap_base, heap_size, 16));
@@ -183,14 +183,12 @@ impl FugcCoordinator {
 
         // Initialize cache optimization and object classification (always enabled)
         let cache_optimized_marking = Arc::new(
-            crate::cache_optimization::CacheOptimizedMarking::with_tricolor(
-                tricolor_marking.clone(),
-            ),
+            crate::cache_optimization::CacheOptimizedMarking::with_tricolor(&tricolor_marking),
         );
         let object_classifier = Arc::new(crate::concurrent::ObjectClassifier::new());
         let root_scanner = Arc::new(crate::concurrent::ConcurrentRootScanner::new(
-            thread_registry.clone(),
-            global_roots.clone(),
+            Arc::clone(thread_registry),
+            Arc::clone(global_roots),
             Arc::clone(&tricolor_marking),
             num_workers,
         ));
@@ -201,8 +199,8 @@ impl FugcCoordinator {
             black_allocator,
             parallel_coordinator,
             simd_bitvector,
-            thread_registry,
-            global_roots,
+            thread_registry: Arc::clone(thread_registry),
+            global_roots: Arc::clone(global_roots),
             current_phase: Arc::new(Mutex::new(FugcPhase::Idle)),
             collection_in_progress: Arc::new(AtomicBool::new(false)),
             handshake_completion_time_ms: Arc::new(AtomicUsize::new(0)),

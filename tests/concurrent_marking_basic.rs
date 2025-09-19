@@ -13,7 +13,7 @@ fn write_barrier_integration_test() {
     let heap_base = unsafe { Address::from_usize(0x100000) };
     let marking = Arc::new(TricolorMarking::new(heap_base, 0x100000));
     let coordinator = Arc::new(ParallelMarkingCoordinator::new(2));
-    let barrier = WriteBarrier::new(Arc::clone(&marking), coordinator, heap_base, 0x100000);
+    let barrier = WriteBarrier::new(&marking, &coordinator, heap_base, 0x100000);
 
     // Create test objects
     let obj1 = unsafe { ObjectReference::from_raw_address_unchecked(heap_base + 0x1000usize) };
@@ -39,7 +39,7 @@ fn write_barrier_integration_test() {
 fn black_allocator_integration_test() {
     let heap_base = unsafe { Address::from_usize(0x200000) };
     let marking = Arc::new(TricolorMarking::new(heap_base, 0x100000));
-    let allocator = BlackAllocator::new(marking);
+    let allocator = BlackAllocator::new(&marking);
 
     let obj = unsafe { ObjectReference::from_raw_address_unchecked(heap_base + 0x1000usize) };
 
@@ -188,7 +188,7 @@ fn write_barrier_bulk_operations() {
     let heap_base = unsafe { Address::from_usize(0x600000) };
     let marking = Arc::new(TricolorMarking::new(heap_base, 0x100000));
     let coordinator = Arc::new(ParallelMarkingCoordinator::new(1));
-    let barrier = WriteBarrier::new(marking, coordinator, heap_base, 0x100000);
+    let barrier = WriteBarrier::new(&marking, &coordinator, heap_base, 0x100000);
 
     barrier.activate();
 

@@ -20,7 +20,7 @@ fn concurrent_marking_full_workflow() {
     let global_roots = Arc::new(Mutex::new(fugrip::roots::GlobalRoots::default()));
 
     let coordinator =
-        ConcurrentMarkingCoordinator::new(heap_base, heap_size, 2, thread_registry, global_roots);
+        ConcurrentMarkingCoordinator::new(heap_base, heap_size, 2, &thread_registry, &global_roots);
 
     // Create a realistic object graph
     let root1 = unsafe { ObjectReference::from_raw_address_unchecked(heap_base + 0x1000usize) };
@@ -87,8 +87,8 @@ fn write_barrier_concurrent_stress_test() {
     let marking = Arc::new(TricolorMarking::new(heap_base, 0x100000));
     let coordinator = Arc::new(ParallelMarkingCoordinator::new(4));
     let barrier = Arc::new(WriteBarrier::new(
-        Arc::clone(&marking),
-        coordinator,
+        &marking,
+        &coordinator,
         heap_base,
         0x100000,
     ));
@@ -141,7 +141,7 @@ fn write_barrier_concurrent_stress_test() {
 fn black_allocator_concurrent_stress_test() {
     let heap_base = unsafe { Address::from_usize(0x300000) };
     let marking = Arc::new(TricolorMarking::new(heap_base, 0x100000));
-    let allocator = Arc::new(BlackAllocator::new(marking));
+    let allocator = Arc::new(BlackAllocator::new(&marking));
 
     allocator.activate();
 
@@ -297,7 +297,7 @@ fn write_barrier_bulk_operations_performance() {
     let heap_base = unsafe { Address::from_usize(0x600000) };
     let marking = Arc::new(TricolorMarking::new(heap_base, 0x100000));
     let coordinator = Arc::new(ParallelMarkingCoordinator::new(1));
-    let barrier = WriteBarrier::new(Arc::clone(&marking), coordinator, heap_base, 0x100000);
+    let barrier = WriteBarrier::new(&marking, &coordinator, heap_base, 0x100000);
 
     barrier.activate();
 
@@ -357,7 +357,7 @@ fn concurrent_marking_termination_detection() {
     let global_roots = Arc::new(Mutex::new(fugrip::roots::GlobalRoots::default()));
 
     let coordinator =
-        ConcurrentMarkingCoordinator::new(heap_base, 0x100000, 2, thread_registry, global_roots);
+        ConcurrentMarkingCoordinator::new(heap_base, 0x100000, 2, &thread_registry, &global_roots);
 
     // Start with minimal work to ensure quick termination
     let root = unsafe { ObjectReference::from_raw_address_unchecked(heap_base + 0x1000usize) };
@@ -386,7 +386,7 @@ fn write_barrier_array_operations() {
     let heap_base = unsafe { Address::from_usize(0x900000) };
     let marking = Arc::new(TricolorMarking::new(heap_base, 0x100000));
     let coordinator = Arc::new(ParallelMarkingCoordinator::new(1));
-    let barrier = WriteBarrier::new(marking, coordinator, heap_base, 0x100000);
+    let barrier = WriteBarrier::new(&marking, &coordinator, heap_base, 0x100000);
 
     barrier.activate();
 

@@ -16,13 +16,8 @@ fn reproduce_concurrent_stress_artifact() {
     let heap_size = 0x1000000; // 16MB
     let tricolor_marking = Arc::new(TricolorMarking::new(heap_base, heap_size));
     let coordinator = Arc::new(ParallelMarkingCoordinator::new(2));
-    let write_barrier = WriteBarrier::new(
-        tricolor_marking.clone(),
-        coordinator.clone(),
-        heap_base,
-        heap_size,
-    );
-    let black_allocator = BlackAllocator::new(tricolor_marking.clone());
+    let write_barrier = WriteBarrier::new(&tricolor_marking, &coordinator, heap_base, heap_size);
+    let black_allocator = BlackAllocator::new(&tricolor_marking);
 
     // Parse the input data same way as fuzz target
     let num_objects = (data[0] as usize % 16) + 4; // 4-19 objects

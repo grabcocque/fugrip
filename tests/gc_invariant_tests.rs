@@ -286,7 +286,7 @@ proptest! {
         }
 
         // Test 2: Cache-optimized marking approach
-        let cache_marking = CacheOptimizedMarking::with_tricolor(Arc::clone(&tricolor));
+        let cache_marking = CacheOptimizedMarking::with_tricolor(&tricolor);
         cache_marking.mark_objects_batch(&unique_objects);
 
         // Verify cache-optimized marking worked

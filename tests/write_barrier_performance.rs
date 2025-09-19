@@ -20,7 +20,7 @@ mod tests {
         let heap_size = 0x100000; // 1MB heap
         let tricolor_marking = Arc::new(TricolorMarking::new(heap_base, heap_size));
         let coordinator = Arc::new(ParallelMarkingCoordinator::new(1));
-        let barrier = WriteBarrier::new(tricolor_marking, coordinator, heap_base, heap_size);
+        let barrier = WriteBarrier::new(&tricolor_marking, &coordinator, heap_base, heap_size);
 
         // Create test objects
         let objects: Vec<ObjectReference> = (0..1000)
