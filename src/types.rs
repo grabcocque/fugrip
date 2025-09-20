@@ -4,7 +4,7 @@
 
 use std::fmt;
 use std::hash::Hash;
-use std::ops::{Add, Sub, AddAssign, SubAssign};
+use std::ops::{Add, AddAssign, Sub, SubAssign};
 
 /// Drop-in replacement for mmtk::util::Address
 /// Represents a memory address in the heap
@@ -328,11 +328,7 @@ pub trait ObjectModel<VM> {
         copy_context: &mut GCWorkerCopyContext<VM>,
     ) -> ObjectReference;
 
-    fn copy_to(
-        from: ObjectReference,
-        to: ObjectReference,
-        region: Address,
-    ) -> Address;
+    fn copy_to(from: ObjectReference, to: ObjectReference, region: Address) -> Address;
 
     fn get_current_size(object: ObjectReference) -> usize;
     fn get_size_when_copied(object: ObjectReference) -> usize;
@@ -366,7 +362,7 @@ impl<VM> GCWorkerCopyContext<VM> {
         _semantics: CopySemantics,
     ) -> Address {
         // Stub implementation - in practice would delegate to allocator
-        use std::alloc::{alloc, Layout};
+        use std::alloc::{Layout, alloc};
         let layout = Layout::from_size_align(bytes, align).unwrap();
         let ptr = unsafe { alloc(layout) };
         Address::from_usize(ptr as usize)

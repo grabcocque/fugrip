@@ -4,10 +4,10 @@
 //! our abstraction layer, allowing us to swap backends.
 
 use crate::alloc_facade::global_allocator;
-use crate::compat::{Address, ObjectReference};
 use crate::core::ObjectHeader;
-use crate::error::{GcError, GcResult};
+use crate::error::GcResult;
 use crate::thread::MutatorThread;
+use crate::types::{Address, ObjectReference};
 
 /// Allocator that delegates to the global allocation facade
 pub struct FacadeAllocator {
@@ -25,11 +25,13 @@ impl FacadeAllocator {
         let facade = global_allocator();
 
         // Use the facade to allocate
-        facade.allocate_object(header, body_bytes)
+        let ptr = facade.allocate_object(header, body_bytes)?;
+        // Convert *mut u8 to ObjectReference
+        Ok(unsafe { ObjectReference::from_raw_address_unchecked(Address::from_mut_ptr(ptr)) })
     }
 
     /// Allocate raw memory through the facade
-    pub fn allocate_raw(&self, size: usize, align: usize) -> GcResult<Address> {
+    pub fn allocate_raw(&self, size: usize, _align: usize) -> GcResult<Address> {
         // For now, we need to go through the object allocation API
         // In a real implementation, we'd add raw allocation to the facade
         let header = ObjectHeader::default();
@@ -73,7 +75,9 @@ impl CleanAllocator for FacadeAllocator {
     }
 
     fn deallocate_object(&self, obj: ObjectReference, size: usize) {
-        global_allocator().deallocate_object(obj, size);
+        // Convert ObjectReference to *mut u8 for facade
+        let ptr = obj.to_address().to_mut_ptr::<u8>();
+        global_allocator().deallocate_object(ptr, size);
     }
 
     fn poll_gc(&self, thread: &MutatorThread) {
