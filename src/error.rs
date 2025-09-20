@@ -40,6 +40,10 @@ pub enum GcError {
     PhaseTransitionFailed,
     /// Emergency stop requested
     EmergencyStop,
+    /// Invalid memory layout
+    InvalidLayout,
+    /// Custom error message
+    Custom(String),
 }
 
 impl fmt::Display for GcError {
@@ -51,6 +55,8 @@ impl fmt::Display for GcError {
             GcError::MmtkError(msg) => write!(f, "MMTk error: {}", msg),
             GcError::PhaseTransitionFailed => write!(f, "GC phase transition failed"),
             GcError::EmergencyStop => write!(f, "Emergency stop requested"),
+            GcError::InvalidLayout => write!(f, "Invalid memory layout"),
+            GcError::Custom(msg) => write!(f, "{}", msg),
         }
     }
 }

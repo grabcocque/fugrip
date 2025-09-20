@@ -20,9 +20,9 @@ mod safepoint_coverage_tests {
 
         // Test all states are valid and comparable
         let states = [
-            ThreadExecutionState::Active,
-            ThreadExecutionState::Exited,
-            ThreadExecutionState::Entering,
+            ThreadExecutionState::Running,
+            ThreadExecutionState::AtSafepoint,
+            ThreadExecutionState::Blocked,
         ];
 
         // Verify states can be compared
@@ -34,7 +34,7 @@ mod safepoint_coverage_tests {
         }
 
         // Verify states can be cloned
-        let state = ThreadExecutionState::Active;
+        let state = ThreadExecutionState::Running;
         let cloned = state;
         assert_eq!(state, cloned);
     }

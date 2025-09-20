@@ -19,8 +19,7 @@ fn concurrent_marking_full_workflow() {
     let thread_registry = Arc::new(fugrip::thread::ThreadRegistry::new());
     let global_roots = arc_swap::ArcSwap::new(Arc::new(fugrip::roots::GlobalRoots::default()));
 
-    let coordinator =
-        ConcurrentMarkingCoordinator::new(heap_base, heap_size, 2, &thread_registry, &global_roots);
+    let coordinator = ConcurrentMarkingCoordinator::new(2);
 
     // Create a realistic object graph
     let root1 = unsafe { ObjectReference::from_raw_address_unchecked(heap_base + 0x1000usize) };
@@ -281,10 +280,9 @@ fn concurrent_marking_termination_detection() {
 
     // Create required dependencies
     let thread_registry = Arc::new(fugrip::thread::ThreadRegistry::new());
-    let global_roots = Arc::new(TODO::new(fugrip::roots::GlobalRoots::default()));
+    let global_roots = Arc::new(///::new(fugrip::roots::GlobalRoots::default()));
 
-    let coordinator =
-        ConcurrentMarkingCoordinator::new(heap_base, 0x100000, 2, &thread_registry, &global_roots);
+    let coordinator = ConcurrentMarkingCoordinator::new(2);
 
     // Start with minimal work to ensure quick termination
     let root = unsafe { ObjectReference::from_raw_address_unchecked(heap_base + 0x1000usize) };

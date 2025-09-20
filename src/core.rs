@@ -25,12 +25,10 @@ use std::{marker::PhantomData, mem::size_of};
 
 use bitflags::bitflags;
 
-use mmtk::{
-    util::ObjectReference,
-    vm::{
-        ObjectModel as MMTkObjectModel, VMGlobalLogBitSpec, VMLocalForwardingBitsSpec,
-        VMLocalForwardingPointerSpec, VMLocalLOSMarkNurserySpec, VMLocalMarkBitSpec,
-    },
+use crate::compat::{
+    ObjectReference,
+    ObjectModel as MMTkObjectModel, VMGlobalLogBitSpec, VMLocalForwardingBitsSpec,
+    VMLocalForwardingPointerSpec, VMLocalLOSMarkNurserySpec, VMLocalMarkBitSpec,
 };
 
 use crate::binding::RustVM;
@@ -71,12 +69,12 @@ use crate::binding::RustVM;
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub struct ObjectHeader {
     /// Hot flags accessed during marking/sweeping (first 8 bytes for cache efficiency)
-    pub flags: ObjectFlags,       // 2 bytes (was wider before)
-    pub layout_id: LayoutId,      // 2 bytes (compact type ID)
-    pub body_size: u32,           // 4 bytes (sufficient for most objects, was usize)
+    pub flags: ObjectFlags, // 2 bytes (was wider before)
+    pub layout_id: LayoutId, // 2 bytes (compact type ID)
+    pub body_size: u32,      // 4 bytes (sufficient for most objects, was usize)
 
     /// Less frequently accessed vtable pointer (second 8 bytes)
-    pub vtable: *const (),        // 8 bytes
+    pub vtable: *const (), // 8 bytes
 }
 
 impl Default for ObjectHeader {
@@ -146,7 +144,7 @@ pub struct LayoutId(pub u16);
 ///
 /// ```
 /// use fugrip::core::Gc;
-/// use mmtk::util::Address;
+/// use crate::types::Address;
 ///
 /// // Create a null Gc pointer
 /// let null_ptr: Gc<i32> = Gc::new();
@@ -162,7 +160,7 @@ pub struct LayoutId(pub u16);
 /// // Convert to ObjectReference (with proper alignment)
 /// let obj_ref = gc_ptr.to_object_reference();
 /// // ObjectReference created from aligned pointer
-/// assert_eq!(obj_ref.to_raw_address(), unsafe { Address::from_usize(aligned_addr) });
+/// assert_eq!(obj_ref.to_raw_address(), crate::types::Address::from_usize(aligned_addr));
 /// ```
 pub struct Gc<T> {
     ptr: *mut u8,
@@ -194,6 +192,10 @@ impl<T> Gc<T> {
         self.ptr.cast()
     }
 
+    pub fn as_raw_ptr(&self) -> *mut T {
+        self.ptr.cast()
+    }
+
     pub fn from_raw(ptr: *mut T) -> Self {
         Self {
             ptr: ptr.cast(),
@@ -207,7 +209,9 @@ impl<T> Gc<T> {
 
     pub fn to_object_reference(&self) -> ObjectReference {
         unsafe {
-            ObjectReference::from_raw_address_unchecked(mmtk::util::Address::from_mut_ptr(self.ptr))
+            ObjectReference::from_raw_address_unchecked(crate::types::Address::from_mut_ptr(
+                self.ptr,
+            ))
         }
     }
 }
@@ -256,6 +260,11 @@ impl ObjectModel for RustObjectModel {
 }
 
 impl RustObjectModel {
+    /// Direct access to get_current_size for compatibility
+    pub fn get_current_size(object: ObjectReference) -> usize {
+        Self::size(object.to_raw_address().to_mut_ptr())
+    }
+
     pub fn get_weak_ref_header(&self, object: ObjectReference) -> Option<*mut *mut u8> {
         let object_ptr = object.to_raw_address().to_mut_ptr();
         let header = Self::header(object_ptr);
@@ -266,6 +275,28 @@ impl RustObjectModel {
             Some(weak_ref_ptr)
         } else {
             None
+        }
+    }
+
+    /// Real implementation: Get object size for memory slice integration
+    ///
+    /// This method provides object size information for the MemorySlice implementation,
+    /// enabling proper object boundary detection and memory layout analysis.
+    pub fn get_object_size(object_ptr: *mut u8) -> Option<usize> {
+        if object_ptr.is_null() {
+            return None;
+        }
+
+        // Use the existing MMTkObjectModel implementation to get object size
+        // This leverages the production-ready size calculation already implemented
+        match ObjectReference::from_raw_address(
+            crate::types::Address::from_mut_ptr(object_ptr)
+        ) {
+            Some(obj_ref) => {
+                // Use the existing get_current_size method from MMTkObjectModel
+                Some(Self::get_current_size(obj_ref))
+            }
+            None => None,
         }
     }
 }
@@ -288,8 +319,8 @@ impl MMTkObjectModel<RustVM> for RustObjectModel {
 
     fn copy(
         from: ObjectReference,
-        semantics: mmtk::util::copy::CopySemantics,
-        copy_context: &mut mmtk::util::copy::GCWorkerCopyContext<RustVM>,
+        semantics: crate::types::CopySemantics,
+        copy_context: &mut crate::types::GCWorkerCopyContext<RustVM>,
     ) -> ObjectReference {
         let object_size = Self::get_current_size(from);
         let align = Self::get_align_when_copied(from);
@@ -313,8 +344,8 @@ impl MMTkObjectModel<RustVM> for RustObjectModel {
     fn copy_to(
         from: ObjectReference,
         to: ObjectReference,
-        _region: mmtk::util::Address,
-    ) -> mmtk::util::Address {
+        _region: crate::types::Address,
+    ) -> crate::types::Address {
         let object_size = Self::get_current_size(from);
 
         // Copy the object contents to the specified location
@@ -327,7 +358,7 @@ impl MMTkObjectModel<RustVM> for RustObjectModel {
         }
 
         // Return the address after the copied object
-        to.to_raw_address() + object_size
+        to.to_raw_address().add(object_size)
     }
 
     fn get_current_size(object: ObjectReference) -> usize {
@@ -348,7 +379,7 @@ impl MMTkObjectModel<RustVM> for RustObjectModel {
 
     fn get_reference_when_copied_to(
         _from: ObjectReference,
-        to: mmtk::util::Address,
+        to: crate::types::Address,
     ) -> ObjectReference {
         unsafe { ObjectReference::from_raw_address_unchecked(to) }
     }
@@ -357,11 +388,11 @@ impl MMTkObjectModel<RustVM> for RustObjectModel {
         unsafe { std::mem::transmute(b"RustVMObject\0" as &[u8]) }
     }
 
-    fn ref_to_object_start(object: ObjectReference) -> mmtk::util::Address {
+    fn ref_to_object_start(object: ObjectReference) -> crate::types::Address {
         object.to_raw_address()
     }
 
-    fn ref_to_header(object: ObjectReference) -> mmtk::util::Address {
+    fn ref_to_header(object: ObjectReference) -> crate::types::Address {
         object.to_raw_address()
     }
 
@@ -514,7 +545,7 @@ mod tests {
         }
 
         let obj_ref1 = unsafe {
-            ObjectReference::from_raw_address_unchecked(mmtk::util::Address::from_mut_ptr(
+            ObjectReference::from_raw_address_unchecked(crate::types::Address::from_mut_ptr(
                 buffer1.as_mut_ptr(),
             ))
         };
@@ -538,7 +569,7 @@ mod tests {
         }
 
         let obj_ref2 = unsafe {
-            ObjectReference::from_raw_address_unchecked(mmtk::util::Address::from_mut_ptr(
+            ObjectReference::from_raw_address_unchecked(crate::types::Address::from_mut_ptr(
                 buffer2.as_mut_ptr(),
             ))
         };
@@ -549,7 +580,7 @@ mod tests {
     #[test]
     fn test_mmtk_object_model_functions() {
         let obj_ref = unsafe {
-            ObjectReference::from_raw_address_unchecked(mmtk::util::Address::from_usize(0x4000))
+            ObjectReference::from_raw_address_unchecked(crate::types::Address::from_usize(0x4000))
         };
 
         // Test alignment functions
@@ -557,7 +588,7 @@ mod tests {
         assert_eq!(RustObjectModel::get_align_offset_when_copied(obj_ref), 0);
 
         // Test reference functions
-        let new_addr = unsafe { mmtk::util::Address::from_usize(0x5000) };
+        let new_addr = crate::types::Address::from_usize(0x5000);
         let new_ref = RustObjectModel::get_reference_when_copied_to(obj_ref, new_addr);
         assert_eq!(new_ref.to_raw_address(), new_addr);
 

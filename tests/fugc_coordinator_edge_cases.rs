@@ -376,7 +376,7 @@ mod edge_case_tests {
                 s.spawn(move |_| {
                     for _ in 0..10 {
                         let _ = coord_clone.get_marking_stats();
-                        let _ = coord_clone.get_cache_stats();
+                        let _ = coord_clone.get_cycle_stats();
                         for _ in 0..5 {
                             std::hint::black_box(());
                             std::thread::yield_now();
@@ -499,18 +499,20 @@ mod edge_case_tests {
         use mmtk::util::{Address, ObjectReference};
 
         #[test]
-        fn test_mark_objects_cache_optimized_empty() {
+        fn test_cache_optimized_marking_empty() {
             let fixture = TestFixture::new_with_config(0x25000000, 32 * 1024 * 1024, 2);
             let coordinator = &fixture.coordinator;
 
             // Test with empty object batch
             let empty_batch: Vec<ObjectReference> = vec![];
-            coordinator.mark_objects_cache_optimized(&empty_batch);
+            coordinator
+                .cache_optimized_marking()
+                .mark_objects_batch(&empty_batch);
             // Should not panic on empty batch
         }
 
         #[test]
-        fn test_mark_objects_cache_optimized_single() {
+        fn test_cache_optimized_marking_single() {
             let fixture = TestFixture::new_with_config(0x26000000, 32 * 1024 * 1024, 2);
             let coordinator = &fixture.coordinator;
 
@@ -519,12 +521,14 @@ mod edge_case_tests {
             let obj = ObjectReference::from_raw_address(heap_base).unwrap();
 
             let batch = vec![obj];
-            coordinator.mark_objects_cache_optimized(&batch);
+            coordinator
+                .cache_optimized_marking()
+                .mark_objects_batch(&batch);
             // Should not panic on single object
         }
 
         #[test]
-        fn test_mark_objects_cache_optimized_large_batch() {
+        fn test_cache_optimized_marking_large_batch() {
             let fixture = TestFixture::new_with_config(0x27000000, 32 * 1024 * 1024, 2);
             let coordinator = &fixture.coordinator;
 
@@ -539,7 +543,9 @@ mod edge_case_tests {
                 }
             }
 
-            coordinator.mark_objects_cache_optimized(&batch);
+            coordinator
+                .cache_optimized_marking()
+                .mark_objects_batch(&batch);
             // Should not panic on large batch
         }
     }
@@ -567,11 +573,11 @@ mod edge_case_tests {
         fn test_page_allocation_color_after_gc() {
             let fixture = TestFixture::new_with_config(0x29000000, 32 * 1024 * 1024, 2);
             let coordinator = Arc::clone(&fixture.coordinator);
-            let global_roots = Arc::clone(fixture.global_roots());
+            let global_roots = fixture.global_roots().load();
 
             // Add a root to create some allocation activity
             {
-                let roots = global_roots.load();
+                let roots = &global_roots;
                 let root_addr = unsafe { Address::from_usize(0x29000100) };
                 roots.register(root_addr.as_usize() as *mut u8);
             }
@@ -685,7 +691,7 @@ mod edge_case_tests {
             coordinator.bench_reset_bitvector_state();
 
             // Test benchmark build method - should not panic
-            coordinator.bench_build_bitvector();
+            coordinator.simd_bitvector();
 
             // Verify coordinator is still functional after benchmark operations
             assert_eq!(coordinator.current_phase(), FugcPhase::Idle);
@@ -693,12 +699,12 @@ mod edge_case_tests {
         }
 
         #[test]
-        fn test_ensure_black_allocation_active() {
+        fn test_black_allocator() {
             let fixture = TestFixture::new_with_config(0x31000000, 32 * 1024 * 1024, 2);
             let coordinator = &fixture.coordinator;
 
             // Test ensure black allocation method - should not panic
-            coordinator.ensure_black_allocation_active();
+            coordinator.black_allocator();
 
             // Should still be in idle phase
             assert_eq!(coordinator.current_phase(), FugcPhase::Idle);
@@ -739,7 +745,7 @@ mod edge_case_tests {
 
             // Run benchmark operations before GC
             coordinator.bench_reset_bitvector_state();
-            coordinator.bench_build_bitvector();
+            coordinator.simd_bitvector();
 
             // Trigger and complete GC
             coordinator.trigger_gc();
@@ -747,7 +753,7 @@ mod edge_case_tests {
 
             // Run benchmark operations after GC
             coordinator.bench_reset_bitvector_state();
-            coordinator.bench_build_bitvector();
+            coordinator.simd_bitvector();
 
             // Verify GC completed successfully
             let final_stats = coordinator.get_cycle_stats();
@@ -763,7 +769,7 @@ mod edge_case_tests {
             coordinator.trigger_gc();
 
             // Ensure black allocation while collection might be active
-            coordinator.ensure_black_allocation_active();
+            coordinator.black_allocator();
 
             // Wait for completion
             assert!(coordinator.wait_until_idle(Duration::from_millis(2000)));
@@ -838,7 +844,7 @@ mod edge_case_tests {
                             if j % 2 == 0 {
                                 coord_clone.bench_reset_bitvector_state();
                             } else {
-                                coord_clone.bench_build_bitvector();
+                                coord_clone.simd_bitvector();
                             }
                         }
                     });
@@ -857,8 +863,8 @@ mod edge_case_tests {
 
             // Test all uncovered methods in sequence
             coordinator.bench_reset_bitvector_state();
-            coordinator.bench_build_bitvector();
-            coordinator.ensure_black_allocation_active();
+            coordinator.simd_bitvector();
+            coordinator.black_allocator();
             coordinator.prepare_sweep_at_safepoint();
             let _root_scanner = coordinator.root_scanner();
 
@@ -866,8 +872,8 @@ mod edge_case_tests {
             coordinator.trigger_gc();
 
             coordinator.bench_reset_bitvector_state();
-            coordinator.bench_build_bitvector();
-            coordinator.ensure_black_allocation_active();
+            coordinator.simd_bitvector();
+            coordinator.black_allocator();
             coordinator.prepare_sweep_at_safepoint();
             let _root_scanner_during_gc = coordinator.root_scanner();
 
@@ -876,8 +882,8 @@ mod edge_case_tests {
 
             // Test methods after collection
             coordinator.bench_reset_bitvector_state();
-            coordinator.bench_build_bitvector();
-            coordinator.ensure_black_allocation_active();
+            coordinator.simd_bitvector();
+            coordinator.black_allocator();
             coordinator.prepare_sweep_at_safepoint();
             let _root_scanner_after = coordinator.root_scanner();
 
@@ -897,8 +903,8 @@ mod edge_case_tests {
 
             // Test with minimal configuration
             coordinator.bench_reset_bitvector_state();
-            coordinator.bench_build_bitvector();
-            coordinator.ensure_black_allocation_active();
+            coordinator.simd_bitvector();
+            coordinator.black_allocator();
             coordinator.prepare_sweep_at_safepoint();
             let _root_scanner = coordinator.root_scanner();
 
@@ -913,16 +919,16 @@ mod edge_case_tests {
 
             // Test methods under various conditions
             coordinator.bench_reset_bitvector_state();
-            coordinator.bench_build_bitvector();
-            coordinator.ensure_black_allocation_active();
+            coordinator.simd_bitvector();
+            coordinator.black_allocator();
             coordinator.prepare_sweep_at_safepoint();
 
             // Trigger rapid GC cycles
             for _ in 0..3 {
                 coordinator.trigger_gc();
                 coordinator.bench_reset_bitvector_state();
-                coordinator.bench_build_bitvector();
-                coordinator.ensure_black_allocation_active();
+                coordinator.simd_bitvector();
+                coordinator.black_allocator();
                 coordinator.prepare_sweep_at_safepoint();
             }
 

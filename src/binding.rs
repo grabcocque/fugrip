@@ -36,16 +36,13 @@ mod tests;
 // Re-exports from submodules
 pub use allocation::*;
 pub use initialization::*;
-pub use mutator::{MutatorHandle, MutatorRegistration, MUTATOR_MAP, register_mutator_context, unregister_mutator_context};
+pub use mutator::{
+    MUTATOR_MAP, MutatorHandle, MutatorRegistration, register_mutator_context,
+    unregister_mutator_context,
+};
 pub use stats::*;
 pub use vm_impl::{RustVM, take_enqueued_references};
-
 
 /// Global FUGC plan manager that coordinates MMTk with FUGC-specific features
 /// Lock-free access using ArcSwap for 15-25% performance improvement
 pub static FUGC_PLAN_MANAGER: OnceLock<ArcSwap<FugcPlanManager>> = OnceLock::new();
-
-
-
-
-

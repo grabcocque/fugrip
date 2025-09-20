@@ -1,16 +1,16 @@
 //! MMTk initialization and configuration with FUGC optimizations
 
+use crate::compat::{
+    Address,
+    vm::opaque_pointer::{OpaquePointer, VMMutatorThread, VMThread},
+};
 use crate::{plan::FugcPlanManager, thread::MutatorThread};
 use anyhow;
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
-use mmtk::util::{
-    opaque_pointer::{OpaquePointer, VMMutatorThread, VMThread},
-    Address,
-};
 use std::sync::Arc;
 
-use super::{mutator::*, vm_impl::RustVM, FUGC_PLAN_MANAGER};
+use super::{FUGC_PLAN_MANAGER, mutator::*, vm_impl::RustVM};
 
 /// Initialize MMTk with FUGC-optimized configuration and set up the plan manager.
 /// This creates the MMTk instance, configures it with FUGC settings, and initializes

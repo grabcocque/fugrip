@@ -123,16 +123,16 @@ fn test_coordinator_direct_barrier_activation() {
     // Spawn a monitoring thread that will signal when barrier gets activated
     crossbeam::scope(|s| {
         let monitor_handle = s.spawn(move |_| {
-        for _ in 0..1000 {
-            // Poll for a reasonable number of iterations
-            if coordinator_clone.write_barrier().is_active() {
-                let _ = barrier_activated_tx.send(true);
-                break;
+            for _ in 0..1000 {
+                // Poll for a reasonable number of iterations
+                if coordinator_clone.write_barrier().is_active() {
+                    let _ = barrier_activated_tx.send(true);
+                    break;
+                }
+                thread::yield_now(); // Cooperative yielding instead of sleep
             }
-            thread::yield_now(); // Cooperative yielding instead of sleep
-        }
-        // If we never detected activation, send false
-        let _ = barrier_activated_tx.send(false);
+            // If we never detected activation, send false
+            let _ = barrier_activated_tx.send(false);
         });
 
         // Trigger GC which should activate barriers
@@ -147,7 +147,8 @@ fn test_coordinator_direct_barrier_activation() {
         coordinator.wait_until_idle(Duration::from_millis(200));
 
         barrier_was_activated
-    }).unwrap();
+    })
+    .unwrap();
 
     // Note: Barrier activation may not occur in all test scenarios due to timing
     // This test validates the monitoring infrastructure works correctly
@@ -216,16 +217,16 @@ fn test_concurrent_marking_with_coordinator() {
         .map(|tid| {
             let bv = Arc::clone(&bitvector);
             let _run = Arc::clone(&running);
-                let mut marked = 0;
-                // Each thread marks exactly its assigned range of objects
-                for i in 0..objects_per_thread {
-                    let offset = (tid * objects_per_thread + i) * 16;
-                    let obj = unsafe { Address::from_usize(heap_base.as_usize() + offset) };
-                    if bv.mark_live(obj) {
-                        marked += 1;
-                    }
+            let mut marked = 0;
+            // Each thread marks exactly its assigned range of objects
+            for i in 0..objects_per_thread {
+                let offset = (tid * objects_per_thread + i) * 16;
+                let obj = unsafe { Address::from_usize(heap_base.as_usize() + offset) };
+                if bv.mark_live(obj) {
+                    marked += 1;
                 }
-                marked
+            }
+            marked
         })
         .collect();
 

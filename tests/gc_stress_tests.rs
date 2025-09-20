@@ -457,7 +457,7 @@ fn endurance_test_gc_operations() {
                             for obj in &objects {
                                 tricolor.set_color(*obj, ObjectColor::White);
                             }
-                    }
+                        }
                     5 => {
                         // Statistics access
                         let _stats = cache_marking.get_cache_stats();
@@ -476,7 +476,7 @@ fn endurance_test_gc_operations() {
             operations.fetch_add(local_operations, Ordering::Relaxed);
         });
 
-        handles.push(handle);
+        // Handle managed by crossbeam scope automatically
     }
 
     // Use work-based endurance test instead of sleep
@@ -664,7 +664,7 @@ fn stress_memory_safety_concurrent_access() {
             violations.fetch_add(local_violations, Ordering::Relaxed);
         });
 
-            handles.push(handle);
+            // Handle managed by crossbeam scope automatically
         }
 
         // Let threads run until they've completed sufficient work
@@ -728,7 +728,8 @@ fn stress_crossbeam_epoch_integration() {
         let queue_operations = Arc::clone(&queue_operations);
         let stop_flag = Arc::clone(&stop_flag);
 
-        let handle = thread::TODO(move || {
+        crossbeam::scope(|s| {
+            s.spawn(move || {
             let mut iteration_count = 0;
 
             while !stop_flag.load(Ordering::Relaxed) {
@@ -789,8 +790,10 @@ fn stress_crossbeam_epoch_integration() {
             }
         });
 
-        handles.push(handle);
+        // Handle managed by crossbeam scope automatically
     }
+
+    }).unwrap();
 
     // Use work-based synchronization instead of sleep
     let target_work_units = 10000; // Target total operations across all threads
@@ -808,12 +811,9 @@ fn stress_crossbeam_epoch_integration() {
 
     stop_flag.store(true, Ordering::Relaxed);
 
-    // Wait for all workers to complete
-    for handle in handles {
-        handle
-            .join()
-            .expect("Worker thread should complete successfully");
-    }
+    }).unwrap();
+
+    // crossbeam scope automatically waits for all spawned threads
 
     // Validate epoch integration worked correctly
     let final_promoted = promoted_count.load(Ordering::Relaxed);
@@ -841,7 +841,7 @@ fn stress_multi_generation_promotion_contention() {
     let heap_base = unsafe { Address::from_usize((0x70000000 + 7) & !7) };
     let heap_size = 128 * 1024 * 1024; // 128MB heap
     let thread_registry = Arc::new(fugrip::thread::ThreadRegistry::new());
-    let global_roots = Arc::new(TODO::new(fugrip::roots::GlobalRoots::default()));
+    let global_roots = ArcSwap::new(Arc::new(fugrip::roots::GlobalRoots::default()));
 
     let coordinator = Arc::new(FugcCoordinator::new(
         heap_base,
@@ -900,7 +900,8 @@ fn stress_multi_generation_promotion_contention() {
         let barrier = Arc::clone(&barrier);
         let coordinator = Arc::clone(&coordinator);
 
-        let handle = thread::TODO(move || {
+        crossbeam::scope(|s| {
+            s.spawn(move || {
             barrier.wait(); // Synchronize start for maximum contention
 
             let mut iteration_count = 0;
@@ -1001,7 +1002,7 @@ fn stress_multi_generation_promotion_contention() {
             }
         });
 
-        handles.push(handle);
+        // Handle managed by crossbeam scope automatically
     }
 
     // Use work-based termination for multi-generation test
@@ -1051,7 +1052,7 @@ fn stress_generational_write_barriers() {
     let heap_base = unsafe { Address::from_usize((0x80000000 + 7) & !7) };
     let heap_size = 64 * 1024 * 1024; // 64MB heap
     let thread_registry = Arc::new(fugrip::thread::ThreadRegistry::new());
-    let global_roots = Arc::new(TODO::new(fugrip::roots::GlobalRoots::default()));
+    let global_roots = ArcSwap::new(Arc::new(fugrip::roots::GlobalRoots::default()));
 
     let coordinator = Arc::new(FugcCoordinator::new(
         heap_base,
@@ -1106,7 +1107,8 @@ fn stress_generational_write_barriers() {
         let stop_flag = Arc::clone(&stop_flag);
         let coordinator = Arc::clone(&coordinator);
 
-        let handle = thread::TODO(move || {
+        crossbeam::scope(|s| {
+            s.spawn(move || {
             let mut iteration_count = 0;
 
             while !stop_flag.load(Ordering::Relaxed) {
@@ -1128,8 +1130,22 @@ fn stress_generational_write_barriers() {
                             if let (Some(_src_obj), Some(_dst_obj)) =
                                 (young_pool.get(src_idx), young_pool.get(dst_idx))
                             {
-                                // In real implementation, this would use write_barrier_generational_fast
-                                barrier_operations.fetch_add(1, Ordering::Relaxed);
+                                // Use actual generational write barrier implementation
+                                use mmtk::vm::ActivePlan;
+                                use mmtk::util::ObjectReference;
+                                unsafe {
+                                    // Simulate generational barrier: check if src is in young gen
+                                    let src_addr = mmtk::util::Address::from_usize(_src_obj as *const _ as usize);
+                                    let src_obj_ref = ObjectReference::from_raw_address_unchecked(src_addr);
+                                    let dst_addr = mmtk::util::Address::from_usize(_dst_obj as *const _ as usize);
+                                    let dst_obj_ref = ObjectReference::from_raw_address_unchecked(dst_addr);
+
+                                    // Apply write barrier if src is in young generation
+                                    if <RustVM as VMBinding>::VMActivePlan::global().is_object_in_young_gen(src_obj_ref) {
+                                        <RustVM as VMBinding>::VMActivePlan::global().write_barrier(src_obj_ref, dst_obj_ref);
+                                        barrier_operations.fetch_add(1, Ordering::Relaxed);
+                                    }
+                                }
                             }
                         }
 
@@ -1146,9 +1162,25 @@ fn stress_generational_write_barriers() {
                             if let (Some(_old_obj), Some(_young_obj)) =
                                 (old_pool.get(old_idx), young_pool.get(young_idx))
                             {
-                                // This would trigger remembered set update
-                                remembered_set_updates.fetch_add(1, Ordering::Relaxed);
-                                barrier_operations.fetch_add(1, Ordering::Relaxed);
+                                // Real MMTk integration: Implement generational write barrier for old->young references
+                                // This triggers remembered set updates as required by FUGC Step 7 protocol
+                                use mmtk::vm::ActivePlan;
+                                use mmtk::util::ObjectReference;
+                                unsafe {
+                                    // Convert object references to MMTk ObjectReference type
+                                    let old_addr = mmtk::util::Address::from_usize(_old_obj as *const _ as usize);
+                                    let old_obj_ref = ObjectReference::from_raw_address_unchecked(old_addr);
+                                    let young_addr = mmtk::util::Address::from_usize(_young_obj as *const _ as usize);
+                                    let young_obj_ref = ObjectReference::from_raw_address_unchecked(young_addr);
+
+                                    // Apply MMTk generational write barrier for old->young reference
+                                    // This updates remembered set to track young objects referenced by old generation
+                                    <RustVM as VMBinding>::VMActivePlan::global().generational_barrier(old_obj_ref, young_obj_ref);
+
+                                    // Record the remembered set update for test verification
+                                    remembered_set_updates.fetch_add(1, Ordering::Relaxed);
+                                    barrier_operations.fetch_add(1, Ordering::Relaxed);
+                                }
                             }
                         }
 
@@ -1179,7 +1211,7 @@ fn stress_generational_write_barriers() {
             }
         });
 
-        handles.push(handle);
+        // Handle managed by crossbeam scope automatically
     }
 
     // Use work-based termination for generational barrier test
@@ -1260,7 +1292,7 @@ fn stress_enhanced_simd_sweep_capacity_aware() {
             let objects_marked = Arc::clone(&objects_marked);
             let sweeps_completed = Arc::clone(&sweeps_completed);
 
-            thread::TODO(move || {
+            s.spawn(move || {
                 let mut local_marked = 0;
                 let mut local_sweeps = 0;
 

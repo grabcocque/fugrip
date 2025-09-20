@@ -11,8 +11,8 @@ use dashmap::DashMap;
 use flume::{Receiver, Sender};
 use std::{
     fmt,
-    sync::{Arc, OnceLock},
     sync::atomic::{AtomicUsize, Ordering},
+    sync::{Arc, OnceLock},
     time::Duration,
 };
 
@@ -116,9 +116,9 @@ impl std::fmt::Debug for MutatorThread {
 #[repr(align(64))]
 pub struct ThreadRegistry {
     /// Hot data: Frequently scanned during handshakes (cache-friendly)
-    thread_ids: DashMap<usize, ()>,           // Just existence checking (hot)
-    thread_states: DashMap<usize, u8>,        // Current handshake states (hot)
-    thread_generations: DashMap<usize, u32>,  // For ABA protection (warm)
+    thread_ids: DashMap<usize, ()>, // Just existence checking (hot)
+    thread_states: DashMap<usize, u8>, // Current handshake states (hot)
+    thread_generations: DashMap<usize, u32>, // For ABA protection (warm)
 
     /// Cold data: Accessed less frequently during handshakes
     thread_handlers: DashMap<usize, Arc<MutatorHandshakeHandler>>, // Handler objects (cold)
@@ -419,7 +419,7 @@ mod tests {
         use rayon::prelude::*;
         let registry = Arc::new(ThreadRegistry::new());
 
-        // Use rayon parallel iteration instead of manual thread::TODO
+        // Use rayon parallel iteration instead of manual thread spawning
         (0..4).into_par_iter().for_each(|i| {
             let mutator = MutatorThread::new(i);
             registry.register(mutator.clone());

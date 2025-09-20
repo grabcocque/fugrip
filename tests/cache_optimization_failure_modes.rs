@@ -14,7 +14,7 @@ mod failure_mode_tests {
     use fugrip::test_utils::LocalityAwareWorkStealer;
     use mmtk::util::{Address, ObjectReference};
     use rayon::prelude::*;
-    use std::sync::{Arc, TODO};
+    use std::sync::{Arc, ///};
 
     /// Test failure modes and edge cases in CacheAwareAllocator
     mod cache_aware_allocator_tests {
@@ -228,7 +228,7 @@ mod failure_mode_tests {
             // Test concurrent marking operations
             let marking = Arc::new(CacheOptimizedMarking::new(4));
 
-            // Use rayon parallel iteration instead of manual thread::TODO
+            // Use rayon parallel iteration instead of manual thread::///
             (0..5).into_par_iter().for_each(|thread_id| {
                 for i in 0..100 {
                     let obj = unsafe {
@@ -386,7 +386,7 @@ mod failure_mode_tests {
             // Test concurrent allocation recording
             let optimizer = Arc::new(MemoryLayoutOptimizer::new());
 
-            // Use rayon parallel iteration instead of manual thread::TODO
+            // Use rayon parallel iteration instead of manual thread::///
             (0..5).into_par_iter().for_each(|_thread_id| {
                 for i in 0..100 {
                     let size = 8 + (i % 8) * 8; // Sizes 8, 16, 24, ...
@@ -486,7 +486,7 @@ mod failure_mode_tests {
             // Test concurrent access to work stealer
             let stealer = Arc::new(LocalityAwareWorkStealer::new(8));
 
-            // Use rayon scope for producer-consumer pattern instead of manual thread::TODO
+            // Use rayon scope for producer-consumer pattern instead of manual thread::///
             rayon::scope(|s| {
                 // Spawn producers
                 for thread_id in 0..3 {
@@ -581,7 +581,7 @@ mod failure_mode_tests {
             // Test concurrent metadata access
             let metadata = Arc::new(MetadataColocation::new(100, 8));
 
-            // Use rayon parallel iteration instead of manual thread::TODO
+            // Use rayon parallel iteration instead of manual thread::///
             (0..10).into_par_iter().for_each(|thread_id| {
                 for i in 0..15 {
                     let index = thread_id * 15 + i;

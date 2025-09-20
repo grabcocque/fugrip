@@ -13,7 +13,6 @@
 use std::cell::UnsafeCell;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::thread;
 
 /// Batch size for thread-local counter accumulation.
 /// Larger batches = fewer atomic operations, more memory usage.
@@ -283,7 +282,6 @@ macro_rules! hot_increment {
 mod tests {
     use super::*;
     use std::sync::Arc;
-    use std::thread;
 
     #[test]
     fn test_hot_counter_basic() {

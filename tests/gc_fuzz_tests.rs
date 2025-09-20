@@ -253,13 +253,7 @@ fn fuzz_concurrent_marking_coordinator() {
         let thread_registry = Arc::new(fugrip::thread::ThreadRegistry::new());
         let global_roots = arc_swap::ArcSwap::new(Arc::new(fugrip::roots::GlobalRoots::default()));
 
-        let coordinator = ConcurrentMarkingCoordinator::new(
-            heap_base,
-            64 * 1024 * 1024,
-            num_workers,
-            &thread_registry,
-            &global_roots,
-        );
+        let coordinator = ConcurrentMarkingCoordinator::new(num_workers);
 
         // Generate test objects
         let mut objects = Vec::new();
@@ -280,7 +274,7 @@ fn fuzz_concurrent_marking_coordinator() {
                 1 => {
                     // Test statistics retrieval
                     let stats = coordinator.get_marking_stats();
-                    assert!(stats.work_stolen < 1000000); // Sanity check
+                    assert!(stats.1 < 1000000); // Sanity check
                 }
                 2 => {
                     // Test black allocator
@@ -491,13 +485,7 @@ fn stress_test_concurrent_gc_operations() {
     let thread_registry = Arc::new(fugrip::thread::ThreadRegistry::new());
     let global_roots = arc_swap::ArcSwap::new(Arc::new(fugrip::roots::GlobalRoots::default()));
 
-    let coordinator = Arc::new(ConcurrentMarkingCoordinator::new(
-        heap_base,
-        128 * 1024 * 1024, // 128MB
-        8,                 // 8 workers
-        &thread_registry,
-        &global_roots,
-    ));
+    let coordinator = Arc::new(ConcurrentMarkingCoordinator::new(8)); // 8 workers
 
     let stop_flag = Arc::new(AtomicBool::new(false));
     let (progress_tx, progress_rx) = crossbeam::channel::bounded(4);
@@ -558,7 +546,7 @@ fn stress_test_concurrent_gc_operations() {
                         3 => {
                             // Statistics and status checks
                             let _stats = coordinator.get_stats();
-                            let _cache_stats = coordinator.get_cache_stats();
+                            let _cache_stats = coordinator.get_stats();
                         }
                         _ => unreachable!(),
                     }
@@ -609,6 +597,7 @@ fn stress_test_concurrent_gc_operations() {
     );
 
     // Verify final state is consistent
-    let final_stats = coordinator.get_marking_stats();
-    assert!(final_stats.work_stolen < total_operations * 10); // Sanity check
+    let final_stats = coordinator.get_stats();
+    let (stolen, _) = final_stats;
+    assert!(stolen < total_operations * 10); // Sanity check
 }

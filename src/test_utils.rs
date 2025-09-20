@@ -4,12 +4,13 @@
 //! consistent dependency injection setup across all tests.
 
 use crate::allocator::AllocatorInterface;
+use crate::alloc_facade::MutatorHandle;
+use crate::types::{Address, ObjectReference};
 use crate::core::ObjectHeader;
 use crate::di::{DIContainer, DIScope};
 use crate::error::GcResult;
 use crate::fugc_coordinator::FugcCoordinator;
 use crate::thread::MutatorThread;
-use mmtk::util::{Address, ObjectReference};
 use std::sync::Arc;
 
 use crossbeam::queue::SegQueue;
@@ -51,7 +52,7 @@ impl Default for StubAllocator {
 impl AllocatorInterface for StubAllocator {
     fn allocate(
         &self,
-        _mmtk_mutator: &mut mmtk::Mutator<crate::binding::RustVM>,
+        _mutator: MutatorHandle,
         _header: ObjectHeader,
         _bytes: usize,
     ) -> GcResult<*mut u8> {
@@ -200,7 +201,7 @@ impl TestFixture {
     pub fn new_with_config(heap_base: usize, heap_size: usize, worker_count: usize) -> Self {
         let container = Arc::new(DIContainer::new_for_testing());
 
-        let heap_base_addr = unsafe { Address::from_usize(heap_base) };
+        let heap_base_addr = Address::from_usize(heap_base);
         let coordinator =
             container.create_fugc_coordinator(heap_base_addr, heap_size, worker_count);
 

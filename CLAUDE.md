@@ -65,33 +65,74 @@ cargo nextest run -E 'test(handshake)'
 
 ## Current Implementation Status
 
-**⚠️ Active Refactoring:** The codebase is undergoing simplification to leverage existing libraries (crossbeam_deque) more effectively.
+**🚧 MMTk Blackwall Migration:** The codebase is undergoing a strategic refactoring to push all MMTk types behind an impermeable "blackwall" of opaque handles with zero-cost abstractions.
+
+**🎯 Migration Strategy:** Bottom-up module migration starting with `alloc_facade.rs` to create a forcing function where external code must use opaque handles.
 
 **🔧 Build Status:**
 
-- **Compilation errors** in `concurrent.rs` module:
-  - Missing fields `global_injector` and `worker_stealers` in `ParallelMarkingCoordinator`
-  - Missing field `grey_stack` on `MarkingWorker`
-  - These appear to be from simplifying manual work-stealing to use `crossbeam_deque`
+- **Public API Clean**: `lib.rs` doesn't re-export MMTk types - external code forced onto opaque handles ✅
+- **Internal compat usage**: Legacy modules still import from `compat.rs` causing build failures ❌
+- **Opaque core working**: `alloc_facade.rs`, `zero_cost_allocator.rs` use pure handles ✅
+- **Migration in progress**: `alloc_facade.rs` being completed as first target ⏳
 
-**✅ Core Infrastructure (when compiling):**
+**✅ Blackwall Infrastructure (completed):**
 
+- Opaque handle types (`MutatorHandle`, `PlanHandle`) - just `usize` values
+- Feature flag infrastructure (`use_mmtk` vs `use_jemalloc`) for compile-time dispatch
+- Handle registry mapping opaque IDs to actual backend objects
+- Zero-cost dispatch via monomorphization
 - Lock-free handshake protocol using crossbeam channels and atomic state machines
 - Thread registry with deadlock-free coordination
-- MMTk VM binding layer (RustVM)
-- Safepoint infrastructure with pollcheck macros
 - SIMD-optimized sweeping algorithms
 
-**🔄 FUGC 8-Step Protocol:**
+**🔄 FUGC 8-Step Protocol Status:**
 
 - Steps 1-8 architecturally designed with clear separation of concerns
 - Lock-free handshake eliminates deadlocks by design
 - Integration between coordinator and handshake protocol needs completion
-- Previous test health: 97.3% pass rate (252/259 tests) before refactoring
+- Target: All protocol APIs to use opaque handles only (no MMTk type leakage)
+- Previous test health: 97.3% pass rate (252/259 tests) before blackwall migration
+
+## MMTk Blackwall Migration Strategy
+
+### Objective
+Create an impermeable "blackwall" where all MMTk types are hidden behind opaque handles with zero-cost abstractions. External code must use handles exclusively - no direct MMTk type access.
+
+### Bottom-Up Migration Approach
+
+**Layer 1: Foundation (First Targets)**
+1. ⭐ **`alloc_facade.rs`** - Core opaque API, remove `compat` imports
+2. **`types.rs`** - Custom types for non-MMTk backend
+3. **`core.rs`** - Object headers and basic types
+
+**Layer 2-5**: See `MMTK_BLACKWALL_ROADMAP.md` for complete migration order.
+
+### Zero-Cost Verification
+```rust
+// Handles are exactly usize - no overhead
+assert_eq!(size_of::<MutatorHandle>(), size_of::<usize>());
+assert_eq!(size_of::<PlanHandle>(), size_of::<usize>());
+
+// All dispatch at compile-time via feature flags
+#[cfg(feature = "use_mmtk")]
+fn allocate_impl(handle: MutatorHandle) -> *mut u8 { /* MMTk path */ }
+
+#[cfg(not(feature = "use_mmtk"))]
+fn allocate_impl(handle: MutatorHandle) -> *mut u8 { /* jemalloc path */ }
+```
+
+### Migration Rules for Contributors
+
+1. **Never import `compat` types** - Use opaque handles exclusively
+2. **Test both backends** - Verify `use_mmtk` and `use_jemalloc` work
+3. **Verify zero-cost** - Include size assertions in tests
+4. **Follow migration order** - Bottom-up dependency respect
+5. **No MMTk leakage** - All MMTk types confined to `src/internal/`
 
 ## Architecture
 
-The project implements a FUGC-inspired garbage collector for a Rust VM using MMTk as the foundation.
+The project implements a FUGC-inspired garbage collector with swappable backends (MMTk/jemalloc) via opaque handle abstraction.
 
 ### MMTk Integration Strategy
 
@@ -270,7 +311,7 @@ For realistic protocol testing, the test suite requires:
    ```rust
    // Critical: mutators must poll safepoints for handshake realism
    fn spawn_mutator(mutator: MutatorThread) -> (JoinHandle<()>, Arc<AtomicBool>) {
-       let handle = thread::TODO(move || {
+       let handle = thread::///(move || {
            while running.load(Ordering::Relaxed) {
                worker.poll_safepoint();  // Enables soft handshakes
                //(Duration::from_millis(1));
@@ -440,7 +481,7 @@ Tests demonstrate key FUGC properties including handshake mechanisms, safepoint 
 
 - `mmtk` - Memory Management Toolkit integration
 - `crossbeam` - Lock-free channels and epoch-based memory reclamation
-- `parking_lot` - Fast TODO implementations for rare coordination
+- `parking_lot` - Fast /// implementations for rare coordination
 - `rayon` - Parallel work-stealing for marking phase
 - `psm` & `stacker` - Stack manipulation for root scanning
 - `bitflags` - Object header flag management
@@ -493,7 +534,7 @@ pub fn request_safepoint(&self, callback: impl Fn()) {
 #### 4. Use arc-swap for Read-Heavy Callbacks (60% reduction - 20 lines)
 
 ```rust
-// OLD: TODO<Option<SafepointCallback>>
+// OLD: ///<Option<SafepointCallback>>
 // NEW: Lock-free reads
 use arc_swap::ArcSwap;
 current_callback: ArcSwap<Option<SafepointCallback>>,
@@ -508,4 +549,4 @@ use flume::{Sender, Receiver};
 event_bus: (Sender<GcEvent>, Receiver<GcEvent>),
 ```
 
-#### 6. Replace all remaining TODOes with futexes or lock-free/atomic algorithms and datastructures
+#### 6. Replace all remaining ///es with futexes or lock-free/atomic algorithms and datastructures

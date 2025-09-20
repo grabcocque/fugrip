@@ -30,6 +30,8 @@ itertools = ">=0.13"
 flume = "0.11.1"
 arc-swap = "1.7.1"
 wide = "0.7.33"
+jemallocator = { version = ">=0.5", optional = true }
+jemalloc = "0.3.0"
 
 # Consolidated benchmark suite covering all FUGC performance aspects
 [[bench]]
@@ -46,6 +48,12 @@ quickcheck = ">=1.0"
 arbitrary = ">=1.0"
 
 [features]
+default = ["use_jemalloc"]
+
+# Allocation backend selection (mutually exclusive)
+use_mmtk = []
+use_jemalloc = ["jemallocator"]
+
 # Enable lightweight smoke tests that validate high-level GC semantics
 smoke = []
 segment_scan_linux = []
@@ -55,6 +63,7 @@ cache_profiling = []
 stress-tests = []
 # Gate nondeterministic performance tests that can fail due to system load
 performance-tests = []
+jemalloc = ["jemallocator"]
 
 # Coverage configuration
 [profile.coverage]

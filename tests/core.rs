@@ -11,7 +11,7 @@ fn make_object(body_size: usize) -> (Vec<u8>, ObjectReference) {
     let header = ObjectHeader {
         flags: ObjectFlags::MARKED,
         layout_id: LayoutId(7),
-        body_size,
+        body_size: body_size.try_into().unwrap(),
         vtable: std::ptr::null(),
     };
 

@@ -1,12 +1,12 @@
 //! FUGC 8-step protocol implementation
 
-use std::time::Instant;
+use crate::compat::{Address, ObjectReference};
+use rayon::prelude::*;
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
 };
-use rayon::prelude::*;
-use mmtk::util::{Address, ObjectReference};
+use std::time::Instant;
 
 use super::{core::FugcCoordinator, types::*};
 use crate::thread::MutatorThread;
@@ -278,7 +278,7 @@ impl FugcCoordinator {
     }
 
     /// Build SIMD bitvector from cache-optimized markings - converts marked objects to live bits
-    fn build_bitvector_from_markings(&self) {
+    pub(crate) fn build_bitvector_from_markings(&self) {
         self.simd_bitvector().clear();
 
         // Use cache-optimized marking to build bitvector from marked objects
@@ -338,7 +338,7 @@ impl FugcCoordinator {
     }
 
     /// Update page states based on SIMD bitvector liveness counts using AVX2
-    fn update_page_states_from_bitvector(&self) {
+    pub(crate) fn update_page_states_from_bitvector(&self) {
         let objects_per_page = PAGE_SIZE / OBJECT_GRANULE;
 
         for mut item in self.page_states().iter_mut() {

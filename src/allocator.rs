@@ -17,15 +17,13 @@
 //! let header = ObjectHeader::default();
 //! ```
 
+use crate::compat::{AllocationSemantics, ObjectReference, constants::MIN_OBJECT_SIZE};
 use crate::{
+    alloc_facade::{MutatorHandle, allocate, init_facade, post_alloc},
     binding::fugc_post_alloc,
     core::ObjectHeader,
-    error::{GcError, GcResult},
+    error::GcResult,
     thread::MutatorThread,
-};
-use mmtk::{
-    plan::AllocationSemantics,
-    util::{ObjectReference, constants::MIN_OBJECT_SIZE},
 };
 
 /// Trait capturing the minimal allocation API the VM exposes to the runtime.
@@ -52,7 +50,7 @@ pub trait AllocatorInterface {
     /// Allocate an object with the provided header and size in bytes.
     fn allocate(
         &self,
-        mmtk_mutator: &mut mmtk::Mutator<crate::binding::RustVM>,
+        mutator: MutatorHandle,
         header: ObjectHeader,
         bytes: usize,
     ) -> GcResult<*mut u8>;
@@ -92,30 +90,30 @@ impl Default for MMTkAllocator {
 impl AllocatorInterface for MMTkAllocator {
     fn allocate(
         &self,
-        mmtk_mutator: &mut mmtk::Mutator<crate::binding::RustVM>,
+        mutator: MutatorHandle,
         header: ObjectHeader,
         body_bytes: usize,
     ) -> GcResult<*mut u8> {
+        // Initialize facade if needed
+        init_facade();
+
         let total_bytes = std::mem::size_of::<ObjectHeader>() + body_bytes;
         let allocation_size = std::cmp::max(total_bytes, MIN_OBJECT_SIZE);
         let align = std::mem::align_of::<usize>().max(std::mem::align_of::<ObjectHeader>());
 
-        let address = mmtk::memory_manager::alloc(
-            mmtk_mutator,
+        // Use zero-cost opaque handle API - pure monomorphization, no vtables
+        let addr = allocate(
+            mutator,
             allocation_size,
             align,
             0,
             AllocationSemantics::Default,
-        );
+        )?;
 
-        if address.is_zero() {
-            return Err(GcError::OutOfMemory);
-        }
+        let object_ptr = addr.to_mut_ptr::<u8>();
 
-        let object_ptr = address.to_mut_ptr::<u8>();
-
+        // Write header
         unsafe {
-            // Write object header and clear the body so callers observe deterministic state.
             std::ptr::write(object_ptr.cast::<ObjectHeader>(), header);
             if body_bytes > 0 {
                 std::ptr::write_bytes(
@@ -126,9 +124,9 @@ impl AllocatorInterface for MMTkAllocator {
             }
         }
 
-        let object_ref = unsafe { ObjectReference::from_raw_address_unchecked(address) };
-        mmtk::memory_manager::post_alloc(
-            mmtk_mutator,
+        let object_ref = unsafe { ObjectReference::from_raw_address_unchecked(addr) };
+        post_alloc(
+            mutator,
             object_ref,
             allocation_size,
             AllocationSemantics::Default,
@@ -148,6 +146,7 @@ impl AllocatorInterface for MMTkAllocator {
 mod tests {
     use super::*;
     use crate::core::ObjectFlags;
+    use crate::error::GcError;
 
     #[test]
     fn test_mmtk_allocator_creation() {

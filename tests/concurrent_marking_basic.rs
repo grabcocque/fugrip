@@ -6,7 +6,6 @@ use fugrip::concurrent::{
 };
 use mmtk::util::{Address, ObjectReference};
 use std::sync::Arc;
-use std::thread;
 
 #[test]
 fn write_barrier_integration_test() {

@@ -6,7 +6,6 @@
 
 use fugrip::di::DIContainer;
 use fugrip::{GcSafepointPhase, pollcheck};
-use std::thread;
 
 fn main() {
     println!("FUGC Safepoint Demo");
@@ -128,22 +127,22 @@ fn demonstrate_multithreaded_safepoints() {
     let results: Vec<_> = (0..4)
         .into_par_iter()
         .map(|thread_id| {
-                println!("   Thread {} starting work", thread_id);
+            println!("   Thread {} starting work", thread_id);
 
-                // Each thread does work with pollchecks
-                for i in 0..100 {
-                    pollcheck(); // All threads will hit safepoints
+            // Each thread does work with pollchecks
+            for i in 0..100 {
+                pollcheck(); // All threads will hit safepoints
 
-                    // Simulate thread-specific work
-                    //(Duration::from_micros(100 * (thread_id + 1) as u64));
+                // Simulate thread-specific work
+                //(Duration::from_micros(100 * (thread_id + 1) as u64));
 
-                    if i % 50 == 0 {
-                        println!("   Thread {} at iteration {}", thread_id, i);
-                    }
+                if i % 50 == 0 {
+                    println!("   Thread {} at iteration {}", thread_id, i);
                 }
+            }
 
-                println!("   Thread {} completed", thread_id);
-                thread_id
+            println!("   Thread {} completed", thread_id);
+            thread_id
         })
         .collect();
 

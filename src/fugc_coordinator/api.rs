@@ -1,11 +1,7 @@
 //! Public API methods for FugcCoordinator
 
+use std::sync::{Arc, atomic::Ordering};
 use std::time::{Duration, Instant};
-use std::sync::{
-    Arc,
-    atomic::Ordering,
-};
-use rayon::prelude::*;
 
 use super::{core::FugcCoordinator, types::*};
 
@@ -63,13 +59,13 @@ impl FugcCoordinator {
     /// # use fugrip::thread::ThreadRegistry;
     /// # use fugrip::roots::GlobalRoots;
     /// # use fugrip::FugcCoordinator;
-    /// # use mmtk::util::Address;
-    /// # use std::sync::{Arc, TODO};
+    /// # use crate::compat::Address;
+    /// # use std::sync::Arc;
     /// # use std::time::Duration;
     /// # let heap_base = unsafe { Address::from_usize(0x1000_0000) };
     /// # let heap_size = 32 * 1024 * 1024;
     /// # let registry = Arc::new(ThreadRegistry::new());
-    /// # let globals = Arc::new(TODO::new(GlobalRoots::default()));
+    /// # let globals = Arc::new(arc_swap::ArcSwap::new(GlobalRoots::default()));
     /// # let coordinator = FugcCoordinator::new(heap_base, heap_size, 1, registry, globals);
     /// coordinator.trigger_gc();
     /// coordinator.wait_until_idle(Duration::from_millis(1));
@@ -96,12 +92,12 @@ impl FugcCoordinator {
     /// # use fugrip::thread::ThreadRegistry;
     /// # use fugrip::roots::GlobalRoots;
     /// # use fugrip::{FugcCoordinator, FugcPhase};
-    /// # use mmtk::util::Address;
-    /// # use std::sync::{Arc, TODO};
+    /// # use crate::compat::Address;
+    /// # use std::sync::Arc;
     /// # let heap_base = unsafe { Address::from_usize(0x1000_0000) };
     /// # let heap_size = 32 * 1024 * 1024;
     /// # let registry = Arc::new(ThreadRegistry::new());
-    /// # let globals = Arc::new(TODO::new(GlobalRoots::default()));
+    /// # let globals = Arc::new(arc_swap::ArcSwap::new(GlobalRoots::default()));
     /// let coordinator = FugcCoordinator::new(heap_base, heap_size, 1, Arc::clone(&registry), Arc::clone(&globals));
     /// coordinator.trigger_gc();
     /// let _ = coordinator.advance_to_phase(FugcPhase::ActivateBarriers);
@@ -151,12 +147,12 @@ impl FugcCoordinator {
     /// # use fugrip::thread::ThreadRegistry;
     /// # use fugrip::roots::GlobalRoots;
     /// # use fugrip::{FugcCoordinator, FugcPhase};
-    /// # use mmtk::util::Address;
-    /// # use std::sync::{Arc, TODO};
+    /// # use crate::compat::Address;
+    /// # use std::sync::Arc;
     /// # let heap_base = unsafe { Address::from_usize(0x1000_0000) };
     /// # let heap_size = 32 * 1024 * 1024;
     /// # let registry = Arc::new(ThreadRegistry::new());
-    /// # let globals = Arc::new(TODO::new(GlobalRoots::default()));
+    /// # let globals = Arc::new(arc_swap::ArcSwap::new(GlobalRoots::default()));
     /// let coordinator = FugcCoordinator::new(heap_base, heap_size, 1, Arc::clone(&registry), Arc::clone(&globals));
     /// coordinator.trigger_gc();
     /// let _reached = coordinator.wait_for_phase_transition(FugcPhase::ActivateBarriers, FugcPhase::ActivateBlackAllocation);
@@ -208,12 +204,12 @@ impl FugcCoordinator {
     /// # use fugrip::thread::ThreadRegistry;
     /// # use fugrip::roots::GlobalRoots;
     /// # use fugrip::FugcCoordinator;
-    /// # use mmtk::util::Address;
-    /// # use std::sync::{Arc, TODO};
+    /// # use crate::compat::Address;
+    /// # use std::sync::Arc;
     /// # let heap_base = unsafe { Address::from_usize(0x1000_0000) };
     /// # let heap_size = 32 * 1024 * 1024;
     /// # let registry = Arc::new(ThreadRegistry::new());
-    /// # let globals = Arc::new(TODO::new(GlobalRoots::default()));
+    /// # let globals = Arc::new(arc_swap::ArcSwap::new(GlobalRoots::default()));
     /// let coordinator = FugcCoordinator::new(heap_base, heap_size, 1, registry, globals);
     /// let metrics = coordinator.last_handshake_metrics();
     /// assert_eq!(metrics.1, 0);
@@ -231,12 +227,12 @@ impl FugcCoordinator {
     /// # use fugrip::thread::ThreadRegistry;
     /// # use fugrip::roots::GlobalRoots;
     /// # use fugrip::{FugcCoordinator, AllocationColor};
-    /// # use mmtk::util::Address;
-    /// # use std::sync::{Arc, TODO};
+    /// # use crate::compat::Address;
+    /// # use std::sync::Arc;
     /// # let heap_base = unsafe { Address::from_usize(0x1000_0000) };
     /// # let heap_size = 32 * 1024 * 1024;
     /// # let registry = Arc::new(ThreadRegistry::new());
-    /// # let globals = Arc::new(TODO::new(GlobalRoots::default()));
+    /// # let globals = Arc::new(arc_swap::ArcSwap::new(GlobalRoots::default()));
     /// let coordinator = FugcCoordinator::new(heap_base, heap_size, 1, registry, globals);
     /// assert_eq!(coordinator.page_allocation_color(0), AllocationColor::White);
     /// ```

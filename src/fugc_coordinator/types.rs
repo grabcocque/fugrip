@@ -1,7 +1,6 @@
 //! FUGC coordinator types and data structures
 
 use crate::thread::MutatorThread;
-use std::sync::Arc;
 
 /// FUGC collection cycle phases matching the 8-step protocol
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,6 +28,8 @@ pub enum FugcPhase {
 pub enum AllocationColor {
     /// Fresh page - new allocations start white.
     White,
+    /// Page being processed - allocations may be grey during marking.
+    Grey,
     /// Page still contains survivors - new allocations are born black.
     Black,
 }
@@ -46,6 +47,10 @@ pub struct FugcCycleStats {
     pub objects_swept: usize,
     pub handshakes_performed: usize,
     pub avg_stack_scan_objects: f64,
+    /// Legacy field for backward compatibility
+    pub total_handshakes: usize,
+    /// Legacy field for backward compatibility (alias for objects_marked + objects_swept)
+    pub total_objects: usize,
 }
 
 #[derive(Clone, Copy)]

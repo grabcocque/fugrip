@@ -2,7 +2,8 @@
 
 use fugrip::{
     allocator::{AllocatorInterface, MMTkAllocator},
-    binding::{RustActivePlan, RustReferenceGlue, RustVM},
+    binding::RustVM,
+    binding::vm_impl::{RustActivePlan, RustReferenceGlue},
     core::{LayoutId, ObjectFlags, ObjectHeader, ObjectModel, RustObjectModel},
     roots::{GlobalRoots, RustScanning, StackRoots},
     thread::{MutatorThread, ThreadRegistry},

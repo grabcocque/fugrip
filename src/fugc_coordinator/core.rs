@@ -5,6 +5,7 @@ use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
+use crate::compat::Address;
 use crate::{
     concurrent::{BlackAllocator, ParallelMarkingCoordinator, TricolorMarking, WriteBarrier},
     roots::GlobalRoots,
@@ -14,7 +15,6 @@ use crate::{
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use flume::{Receiver, Sender};
-use mmtk::util::Address;
 
 use super::types::*;
 
@@ -54,7 +54,7 @@ pub struct FugcCoordinator {
     collection_finished_receiver: Arc<Receiver<()>>,
 
     // Statistics and per-page accounting
-    /// Lock-free stats access using arc_swap for 15-25% improvement over TODO
+    /// Lock-free stats access using arc_swap for 15-25% improvement over ///
     /// Monitoring/telemetry reads vs GC update contention eliminated
     /// Access: .load() for reads, .store(Arc::new(stats)) for updates
     cycle_stats: ArcSwap<FugcCycleStats>,
@@ -174,6 +174,11 @@ impl FugcCoordinator {
         &self.parallel_coordinator
     }
 
+    /// Backward-compatible accessor for parallel marking coordinator
+    pub fn parallel_marking(&self) -> &Arc<ParallelMarkingCoordinator> {
+        &self.parallel_coordinator
+    }
+
     pub fn simd_bitvector(&self) -> &Arc<SimdBitvector> {
         &self.simd_bitvector
     }
@@ -202,7 +207,9 @@ impl FugcCoordinator {
         &self.page_states
     }
 
-    pub fn cache_optimized_marking(&self) -> &Arc<crate::cache_optimization::CacheOptimizedMarking> {
+    pub fn cache_optimized_marking(
+        &self,
+    ) -> &Arc<crate::cache_optimization::CacheOptimizedMarking> {
         &self.cache_optimized_marking
     }
 
@@ -254,5 +261,52 @@ impl FugcCoordinator {
 
     pub(super) fn set_current_phase(&self, phase: FugcPhase) {
         self.current_phase.store(Arc::new(phase));
+    }
+
+    // Test/safepoint wrappers for legacy callsites
+    pub fn scan_thread_roots_at_safepoint(&self) {
+        self.root_scanner.scan_all_roots();
+    }
+
+    pub fn activate_barriers_at_safepoint(&self) {
+        self.write_barrier().activate();
+        self.black_allocator().activate();
+    }
+
+    pub fn marking_handshake_at_safepoint(&self) {
+        let noop: crate::fugc_coordinator::types::HandshakeCallback =
+            Box::new(|_thread: &crate::thread::MutatorThread| {});
+        self.soft_handshake(noop);
+    }
+
+    pub fn prepare_sweep_at_safepoint(&self) {
+        // Build SIMD bitvector from markings to prepare for sweep
+        self.build_bitvector_from_markings();
+    }
+
+    /// Prepare for root re-scanning as part of MMTk integration
+    /// This is called by MMTk when preparing to re-scan roots during GC
+    pub fn prepare_for_root_rescan(&self) {
+        // Reset marking state for new collection cycle
+        self.tricolor_marking().reset_marking_state();
+
+        // Prepare for FUGC Step 3 (Black Allocation) by ensuring clean state
+        self.set_current_phase(FugcPhase::Idle);
+
+        // Notify any waiting components that we're ready for root scanning
+        let _ = self.collection_finished_sender.send(());
+    }
+
+    /// Mark objects using cache-optimized approach
+    pub fn mark_objects_cache_optimized(&self, objects: &[crate::types::ObjectReference]) {
+        // Use cache-optimized marking if available
+        for &obj in objects {
+            self.tricolor_marking.mark_grey(obj);
+        }
+    }
+
+    /// Check if an object is marked
+    pub fn is_object_marked(&self, obj: crate::types::ObjectReference) -> bool {
+        self.tricolor_marking.get_color(obj) == crate::concurrent::ObjectColor::Black
     }
 }

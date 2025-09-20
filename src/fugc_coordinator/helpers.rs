@@ -1,15 +1,11 @@
 //! Helper methods for FugcCoordinator
 
-use std::time::{Duration, Instant};
-use std::sync::{
-    Arc,
-    atomic::Ordering,
-};
+use crate::compat::{Address, ObjectReference};
 use dashmap::DashMap;
-use mmtk::util::{Address, ObjectReference};
+use std::sync::{Arc, atomic::Ordering};
+use std::time::{Duration, Instant};
 
 use super::{core::FugcCoordinator, types::*};
-use crate::thread::MutatorThread;
 
 const PAGE_SIZE: usize = mmtk::util::constants::BYTES_IN_PAGE;
 
@@ -109,18 +105,31 @@ impl FugcCoordinator {
     /// # use fugrip::thread::ThreadRegistry;
     /// # use fugrip::roots::GlobalRoots;
     /// # use fugrip::FugcCoordinator;
-    /// # use mmtk::util::Address;
-    /// # use std::sync::{Arc, TODO};
+    /// # use crate::compat::Address;
+    /// # use std::sync::Arc;
     /// # let heap_base = unsafe { Address::from_usize(0x1000_0000) };
     /// # let heap_size = 32 * 1024 * 1024;
     /// # let registry = Arc::new(ThreadRegistry::new());
-    /// # let globals = Arc::new(TODO::new(GlobalRoots::default()));
+    /// # let globals = Arc::new(arc_swap::ArcSwap::new(GlobalRoots::default()));
     /// let coordinator = FugcCoordinator::new(heap_base, heap_size, 1, registry, globals);
     /// let stats = coordinator.get_cycle_stats();
     /// assert_eq!(stats.cycles_completed, 0);
     /// ```
     pub fn get_cycle_stats(&self) -> FugcCycleStats {
         (**self.cycle_stats().load()).clone()
+    }
+
+    /// Get marking statistics snapshot for diagnostics and tests
+    pub fn get_marking_stats(&self) -> crate::concurrent::ConcurrentMarkingStats {
+        // Use ParallelMarkingCoordinator::get_stats and BlackAllocator::get_stats
+        let (work_stolen, work_shared) = self.parallel_coordinator().get_stats();
+        let objects_allocated_black = self.black_allocator().get_stats();
+
+        crate::concurrent::ConcurrentMarkingStats {
+            work_stolen,
+            work_shared,
+            objects_allocated_black,
+        }
     }
 
     #[doc(hidden)]
@@ -139,5 +148,26 @@ impl FugcCoordinator {
     #[doc(hidden)]
     pub fn bench_sweep_phase(&self) -> crate::simd_sweep::SweepStatistics {
         self.simd_bitvector().simd_sweep()
+    }
+
+    /// Return a snapshot of page states for testing
+    pub fn page_states_for_testing(&self) -> Vec<(usize, super::types::PageState)> {
+        let mut vec = Vec::new();
+        for r in self.page_states().iter() {
+            let (k, v) = r.pair();
+            vec.push((*k, *v));
+        }
+        vec
+    }
+
+    /// Start a simplified marking phase for tests (compatibility shim)
+    /// This triggers a collection cycle; roots are ignored for now.
+    pub fn start_marking(self: &std::sync::Arc<Self>, _roots: Vec<mmtk::util::ObjectReference>) {
+        self.trigger_gc();
+    }
+
+    /// Stop marking (compatibility shim) - no-op for simplified model
+    pub fn stop_marking(&self) {
+        // No-op in the simplified coordinator model
     }
 }

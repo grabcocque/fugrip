@@ -3,6 +3,15 @@
 #[cfg(test)]
 mod tests {
     use super::super::*;
+    use crate::compat::{Address, ObjectReference};
+    use rayon::iter::{IntoParallelIterator, ParallelIterator};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    use std::time::Duration;
+
+    const PAGE_SIZE: usize = mmtk::util::constants::BYTES_IN_PAGE;
 
     #[test]
     fn fugc_coordinator_creation() {
@@ -80,7 +89,7 @@ mod tests {
                 let mut local_phases = vec![];
                 // Try to receive phase changes with timeout
                 while let Ok(phase) = coord_clone
-                    .phase_change_receiver
+                    .phase_change_receiver()
                     .recv_timeout(Duration::from_millis(100))
                 {
                     local_phases.push(phase);
@@ -96,7 +105,9 @@ mod tests {
             coordinator.wait_until_idle(Duration::from_millis(2000));
         });
 
-        let phases_observed = ph_rx.recv_timeout(Duration::from_millis(500)).unwrap_or_default();
+        let phases_observed = ph_rx
+            .recv_timeout(Duration::from_millis(500))
+            .unwrap_or_default();
         assert!(!phases_observed.is_empty());
         assert_eq!(*phases_observed.last().unwrap(), FugcPhase::Idle);
     }
@@ -348,7 +359,7 @@ mod tests {
         coordinator.build_bitvector_from_markings();
 
         // Verify bitvector is properly cleared
-        let stats = coordinator.simd_bitvector.get_stats();
+        let stats = coordinator.simd_bitvector().get_stats();
         assert_eq!(stats.objects_marked, 0);
     }
 
@@ -362,7 +373,7 @@ mod tests {
         coordinator.update_page_states_from_bitvector();
 
         // Verify page states remain in initial state
-        assert!(coordinator.page_states.is_empty());
+        assert!(coordinator.page_states().is_empty());
     }
 
     #[test]
@@ -396,13 +407,13 @@ mod tests {
     fn test_collection_finished_signaling() {
         // Removed std::thread - using Rayon for parallel execution
         use std::time::Duration;
-    // crossbeam channel not needed here; using flume for test signaling
+        // crossbeam channel not needed here; using flume for test signaling
 
         let fixture = crate::test_utils::TestFixture::new_with_config(0x10000000, 64 * 1024, 2);
         let coordinator = Arc::clone(&fixture.coordinator);
 
-    // Use a channel to receive the collection-finished result from the scoped task
-    let (done_tx, done_rx) = crossbeam::channel::bounded(1);
+        // Use a channel to receive the collection-finished result from the scoped task
+        let (done_tx, done_rx) = crossbeam::channel::bounded(1);
 
         rayon::scope(|s| {
             let coord_clone = Arc::clone(&coordinator);
@@ -412,7 +423,7 @@ mod tests {
                 // It's ok if we don't receive a signal during the test
                 // We just want to verify the receiver works
                 let result = coord_clone
-                    .collection_finished_receiver
+                    .collection_finished_receiver()
                     .recv_timeout(Duration::from_millis(100));
                 let _ = done_tx.send(result);
             });
@@ -439,12 +450,12 @@ mod tests {
         // Verify initial handshake metrics are zero
         assert_eq!(
             coordinator
-                .handshake_completion_time_ms
+                .handshake_completion_time_ms()
                 .load(Ordering::SeqCst),
             0
         );
         assert_eq!(
-            coordinator.threads_processed_count.load(Ordering::SeqCst),
+            coordinator.threads_processed_count().load(Ordering::SeqCst),
             0
         );
 
@@ -454,9 +465,9 @@ mod tests {
 
         // Metrics should be updated (though exact values depend on timing)
         let completion_time = coordinator
-            .handshake_completion_time_ms
+            .handshake_completion_time_ms()
             .load(Ordering::SeqCst);
-        let threads_processed = coordinator.threads_processed_count.load(Ordering::SeqCst);
+        let threads_processed = coordinator.threads_processed_count().load(Ordering::SeqCst);
 
         // Should have processed at least some threads or taken some time
         // (Even if zero, the metrics should be accessible)
@@ -501,8 +512,7 @@ mod tests {
         // Test that we can iterate over page states (if any exist)
         if final_count > 0 {
             for entry in page_states.iter() {
-                let _index = entry.key();
-                let state = entry.value();
+                let (_index, state) = *entry;
                 // Verify page state structure is valid
                 // Index is always non-negative
                 // Live objects count is always non-negative
@@ -537,12 +547,12 @@ mod tests {
 
         // Test that phase change channels work
         // Send a test phase change
-        let result = coordinator.phase_change_sender.send(FugcPhase::Tracing);
+        let result = coordinator.phase_change_sender().send(FugcPhase::Tracing);
         assert!(result.is_ok());
 
         // Should be able to receive the sent phase
         let received = coordinator
-            .phase_change_receiver
+            .phase_change_receiver()
             .recv_timeout(std::time::Duration::from_millis(100));
         assert!(received.is_ok());
         assert_eq!(received.unwrap(), FugcPhase::Tracing);
@@ -593,10 +603,10 @@ mod tests {
         let coordinator = &fixture.coordinator;
 
         // Test heap properties are accessible
-        assert_eq!(coordinator.heap_base, unsafe {
+        assert_eq!(coordinator.heap_base(), unsafe {
             Address::from_usize(0x10000000)
         });
-        assert_eq!(coordinator.heap_size, 64 * 1024);
+        assert_eq!(coordinator.heap_size(), 64 * 1024);
     }
 
     #[test]
@@ -654,11 +664,11 @@ mod tests {
         // Mark some objects in the bitvector
         for i in 0..10 {
             let obj_addr = unsafe { Address::from_usize(heap_base.as_usize() + (i * 16)) };
-            let _ = coordinator.simd_bitvector.mark_live(obj_addr);
+            let _ = coordinator.simd_bitvector().mark_live(obj_addr);
         }
 
         // Verify objects were marked
-        let stats = coordinator.simd_bitvector.get_stats();
+        let stats = coordinator.simd_bitvector().get_stats();
         assert_eq!(stats.objects_marked, 10);
 
         // Test building bitvector from markings includes marked objects
@@ -695,7 +705,7 @@ mod tests {
         let coordinator = &fixture.coordinator;
 
         // Test worker thread creation and cleanup using available metrics
-        let initial_threads = coordinator.threads_processed_count.load(Ordering::SeqCst);
+        let initial_threads = coordinator.threads_processed_count().load(Ordering::SeqCst);
 
         // Trigger GC to start workers
         coordinator.trigger_gc();
@@ -707,7 +717,7 @@ mod tests {
         }
 
         // Some thread processing should have occurred
-        let active_threads = coordinator.threads_processed_count.load(Ordering::SeqCst);
+        let active_threads = coordinator.threads_processed_count().load(Ordering::SeqCst);
         assert!(active_threads >= initial_threads);
 
         // Wait for completion

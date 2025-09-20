@@ -189,33 +189,33 @@ fn test_bounded_progress_under_load() {
             let finished_tx = finished_tx.clone();
 
             let handle = s.spawn(move |_| {
-            start_rx.recv().unwrap();
-            started_tx.send(()).unwrap();
+                start_rx.recv().unwrap();
+                started_tx.send(()).unwrap();
 
-            let mut work_done = 0;
+                let mut work_done = 0;
 
-            // Use bounded work to ensure regular pollchecks
-            while !stop.load(Ordering::Relaxed) {
-                bounded_work!(100 => {
-                    for i in 0..1000 {
-                        work_unit!();
-                        work_done += i;
+                // Use bounded work to ensure regular pollchecks
+                while !stop.load(Ordering::Relaxed) {
+                    bounded_work!(100 => {
+                        for i in 0..1000 {
+                            work_unit!();
+                            work_done += i;
 
-                        if stop.load(Ordering::Relaxed) {
-                            break;
+                            if stop.load(Ordering::Relaxed) {
+                                break;
+                            }
                         }
+                    });
+
+                    if work_done > 1000000 {
+                        break; // Prevent infinite work
                     }
-                });
-
-                if work_done > 1000000 {
-                    break; // Prevent infinite work
                 }
-            }
 
-            completed.fetch_add(1, Ordering::Relaxed);
-            finished_tx.send(()).unwrap();
-            work_done
-        });
+                completed.fetch_add(1, Ordering::Relaxed);
+                finished_tx.send(()).unwrap();
+                work_done
+            });
 
             handles.push(handle);
         }
@@ -254,7 +254,8 @@ fn test_bounded_progress_under_load() {
         drop(started_tx);
 
         // Crossbeam scope automatically joins all spawned threads
-    }).unwrap();
+    })
+    .unwrap();
 
     let final_completed = threads_completed.load(Ordering::Relaxed);
     println!("  📊 Threads that reached safepoint: {}/4", final_completed);

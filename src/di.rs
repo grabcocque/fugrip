@@ -76,6 +76,11 @@ impl DIContainer {
             .expect("FUGC coordinator not set in DI container")
     }
 
+    /// Get the memory manager (for test compatibility)
+    pub fn memory_manager(&self) -> Arc<DIContainer> {
+        Arc::new(DIContainer::new_for_testing())
+    }
+
     /// Create a FUGC coordinator with the dependencies from this container
     pub fn create_fugc_coordinator(
         &self,
@@ -175,7 +180,7 @@ impl Drop for DIScope {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mmtk::util::Address;
+    use crate::compat::Address;
 
     #[test]
     fn test_di_container_creation() {

@@ -12,7 +12,7 @@
 ///
 /// ```ignore
 /// use fugrip::gc_loop;
-///
+///.
 /// let mut sum = 0;
 /// gc_loop!(for i in 0..1000000 => {
 ///     sum += i;

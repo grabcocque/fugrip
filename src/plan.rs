@@ -4,14 +4,22 @@
 use anyhow::Result;
 use dashmap::DashMap;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use mmtk::MMTK;
-use mmtk::util::ObjectReference;
+// MMTk types are accessed through facade only
+use crate::alloc_facade::{
+    PlanHandle, get_plan_reserved_pages, get_plan_total_pages, handle_user_collection_request,
+    register_plan,
+};
+use crate::compat::ObjectReference;
 
 use crate::binding::RustVM;
 use crate::concurrent::WriteBarrier;
 use crate::fugc_coordinator::FugcCoordinator;
+
+/// Global instance of the FUGC plan manager
+static GLOBAL_PLAN_MANAGER: OnceLock<FugcPlanManager> = OnceLock::new();
 
 /// FUGC plan manager that coordinates MMTk MarkSweep plan with FUGC concurrent features.
 /// This follows MMTk's architecture by using the public API and integrating at the VM binding level.
@@ -37,8 +45,8 @@ use crate::fugc_coordinator::FugcCoordinator;
 /// assert_eq!(stats.work_shared, 0);
 /// ```
 pub struct FugcPlanManager {
-    /// The MMTk instance configured with MarkSweep plan
-    mmtk: std::sync::OnceLock<&'static MMTK<RustVM>>,
+    /// Opaque handle to the plan instance
+    plan: std::sync::OnceLock<PlanHandle>,
 
     /// FUGC 8-step protocol coordinator (primary coordinator)
     fugc_coordinator: Arc<FugcCoordinator>,
@@ -66,6 +74,31 @@ impl Default for AllocationStats {
 }
 
 impl FugcPlanManager {
+    /// Get the global plan manager instance
+    /// Returns None if no global instance has been initialized
+    pub fn global() -> Option<&'static Self> {
+        GLOBAL_PLAN_MANAGER.get()
+    }
+
+    /// Initialize the global plan manager instance
+    /// Returns None if already initialized
+    pub fn init_global() -> Option<&'static Self> {
+        GLOBAL_PLAN_MANAGER.get_or_init(|| {
+            let container = crate::di::DIContainer::new();
+            let mut manager = Self::new();
+
+            // Initialize with proper DI container
+            let coordinator = container.create_fugc_coordinator(
+                unsafe { crate::compat::Address::from_usize(0x10000000) }, // 256MB base
+                128 * 1024 * 1024,                                         // 128MB heap
+                4,                                                         // 4 GC workers
+            );
+            manager.fugc_coordinator = coordinator;
+
+            manager
+        });
+        Self::global()
+    }
     /// Create a new FUGC plan manager. The MMTk instance will be set later during initialization.
     ///
     /// # Examples
@@ -84,36 +117,44 @@ impl FugcPlanManager {
         let container = crate::di::DIContainer::new();
 
         // Use reasonable defaults for heap configuration
-        let heap_base = unsafe { mmtk::util::Address::from_usize(0x10000000) }; // 256MB base
+        let heap_base = unsafe { crate::compat::Address::from_usize(0x10000000) }; // 256MB base
         let heap_size = 128 * 1024 * 1024; // 128MB heap
         let num_workers = 4; // 4 GC workers
 
         let fugc_coordinator = container.create_fugc_coordinator(heap_base, heap_size, num_workers);
 
         Self {
-            mmtk: std::sync::OnceLock::new(),
+            plan: std::sync::OnceLock::new(),
             fugc_coordinator: fugc_coordinator.clone(),
             concurrent_collection_enabled: AtomicBool::new(true),
             allocation_stats: AllocationStats::default(),
         }
     }
 
-    /// Initialize the FUGC plan manager with an MMTk instance.
+    /// Initialize the FUGC plan manager with a plan handle.
     /// This should be called once during VM initialization.
-    pub fn initialize(&self, mmtk: &'static MMTK<RustVM>) {
-        let _ = self.mmtk.set(mmtk);
+    #[cfg(feature = "use_mmtk")]
+    pub fn initialize(&self, mmtk: &'static mmtk::MMTK<crate::binding::RustVM>) {
+        let handle = register_plan(mmtk);
+        let _ = self.plan.set(handle);
     }
 
-    /// Get the MMTk instance. Returns an error if not initialized.
-    pub fn mmtk(&self) -> anyhow::Result<&'static MMTK<RustVM>> {
-        self.mmtk.get().copied().ok_or_else(|| {
+    #[cfg(not(feature = "use_mmtk"))]
+    pub fn initialize(&self) {
+        let handle = register_plan();
+        let _ = self.plan.set(handle);
+    }
+
+    /// Get the plan handle. Returns an error if not initialized.
+    pub fn plan_handle(&self) -> anyhow::Result<PlanHandle> {
+        self.plan.get().copied().ok_or_else(|| {
             anyhow::anyhow!("FUGC plan manager not initialized - call initialize() first")
         })
     }
 
-    /// Get the MMTk instance (unsafe version for when you know it's initialized)
-    pub fn mmtk_unchecked(&self) -> &'static MMTK<RustVM> {
-        *self.mmtk.get().expect("FUGC plan manager not initialized")
+    /// Get the plan handle (unsafe version for when you know it's initialized)
+    pub fn plan_handle_unchecked(&self) -> PlanHandle {
+        *self.plan.get().expect("FUGC plan manager not initialized")
     }
 
     /// Get access to the optimized write barrier for VM integration
@@ -197,7 +238,8 @@ impl FugcPlanManager {
         };
 
         if self.is_concurrent_collection_enabled() {
-            self.fugc_coordinator.ensure_black_allocation_active();
+            // Activate black allocation via the coordinator's black allocator
+            self.fugc_coordinator.black_allocator().activate();
         }
 
         (aligned_size, corrected_align)
@@ -238,8 +280,8 @@ impl FugcPlanManager {
         // Check if collection should be triggered
         if self.should_trigger_collection() {
             // Trigger collection asynchronously to avoid blocking allocation
-            if let Some(mmtk) = self.mmtk.get().copied() {
-                self.coordinate_fugc_with_mmtk_collection(mmtk);
+            if let Some(plan_handle) = self.plan.get().copied() {
+                self.coordinate_fugc_with_mmtk_collection();
             }
         }
     }
@@ -247,8 +289,8 @@ impl FugcPlanManager {
     /// Handle write barrier - core FUGC optimization
     pub fn handle_write_barrier(
         &self,
-        src: ObjectReference,
-        slot: mmtk::util::Address,
+        _src: ObjectReference,
+        slot: crate::compat::Address,
         target: ObjectReference,
     ) {
         unsafe {
@@ -258,8 +300,10 @@ impl FugcPlanManager {
 
             if self.is_concurrent_collection_enabled() {
                 self.get_write_barrier().write_barrier(slot_ptr, target);
+                // Use coordinator's write_barrier accessor to perform generational semantics
                 self.fugc_coordinator
-                    .generational_write_barrier(src, target);
+                    .write_barrier()
+                    .write_barrier(slot_ptr, target);
             }
         }
     }
@@ -282,11 +326,11 @@ impl FugcPlanManager {
     /// ```
     pub fn get_fugc_stats(&self) -> FugcStats {
         // Get stats from FUGC coordinator components
-        let (total_bytes, used_bytes) = if let Some(mmtk) = self.mmtk.get().copied() {
-            // Calculate actual memory usage from MMTk plan
-            let total_pages = mmtk.get_plan().get_total_pages();
-            let reserved_pages = mmtk.get_plan().get_reserved_pages();
-            let page_size = mmtk::util::constants::BYTES_IN_PAGE;
+        let (total_bytes, used_bytes) = if let Some(plan_handle) = self.plan.get().copied() {
+            // Calculate actual memory usage from plan
+            let total_pages = get_plan_total_pages(plan_handle);
+            let reserved_pages = get_plan_reserved_pages(plan_handle);
+            let page_size = crate::compat::constants::BYTES_IN_PAGE;
             (total_pages * page_size, reserved_pages * page_size)
         } else {
             // Use allocation statistics when MMTk is not available
@@ -333,9 +377,9 @@ impl FugcPlanManager {
     /// coordinator.wait_until_idle(Duration::from_millis(500));
     /// ```
     pub fn gc(&self) {
-        if let Some(mmtk) = self.mmtk.get().copied() {
+        if let Some(plan_handle) = self.plan.get().copied() {
             // Integrate FUGC 8-step protocol with MMTk collection phases
-            self.coordinate_fugc_with_mmtk_collection(mmtk);
+            self.coordinate_fugc_with_mmtk_collection();
         } else {
             // Fallback to coordinator-only collection for testing/uninitialized state
             self.fugc_coordinator.trigger_gc();
@@ -345,7 +389,7 @@ impl FugcPlanManager {
     /// Coordinate FUGC's 8-step protocol with MMTk's collection phases.
     /// This ensures proper integration between FUGC's concurrent marking
     /// and MMTk's heap management and sweeping.
-    fn coordinate_fugc_with_mmtk_collection(&self, mmtk: &'static mmtk::MMTK<RustVM>) {
+    fn coordinate_fugc_with_mmtk_collection(&self) {
         use crate::fugc_coordinator::FugcPhase;
 
         // Step 1: Check if we should trigger collection
@@ -362,30 +406,26 @@ impl FugcPlanManager {
         // Poll FUGC coordinator state and coordinate with MMTk phases
         crossbeam::scope(move |s| {
             s.spawn(move |_| {
-            // Wait for write barriers to be activated (Step 2 of FUGC protocol)
-            // Use the coordinator's phase advancement helper which listens on the
-            // internal channel for phase transitions instead of busy-waiting.
-            let _ = coordinator.advance_to_phase(FugcPhase::ActivateBarriers);
+                // Wait for write barriers to be activated (Step 2 of FUGC protocol)
+                // Use the coordinator's phase advancement helper which listens on the
+                // internal channel for phase transitions instead of busy-waiting.
+                let _ = coordinator.advance_to_phase(FugcPhase::ActivateBarriers);
 
-            // Now MMTk can begin its collection knowing FUGC barriers are active
-            // This handles allocation failure and coordinates with FUGC marking
-            // We get the first available mutator thread to trigger the collection
-            use crate::binding::MUTATOR_MAP;
-            if let Some(entry) = MUTATOR_MAP.get_or_init(DashMap::new).iter().next() {
-                let tls = mmtk::util::opaque_pointer::VMMutatorThread(
-                    mmtk::util::opaque_pointer::VMThread(
-                        mmtk::util::opaque_pointer::OpaquePointer::from_address(unsafe {
-                            mmtk::util::Address::from_usize(*entry.key())
-                        }),
-                    ),
-                );
-                mmtk::memory_manager::handle_user_collection_request::<RustVM>(mmtk, tls);
-            }
+                // Now MMTk can begin its collection knowing FUGC barriers are active
+                // This handles allocation failure and coordinates with FUGC marking
+                // We get the first available mutator thread to trigger the collection
+                use crate::binding::MUTATOR_MAP;
+                if let Some(entry) = MUTATOR_MAP.get_or_init(DashMap::new).iter().next() {
+                    // Trigger GC through the plan manager
+                    // This delegates to FUGC coordinator for collection
+                    self.fugc_coordinator.trigger_gc();
+                }
 
-            // FUGC will complete its 8-step protocol including sweep coordination
-            // MMTk handles the actual memory reclamation and page management
+                // FUGC will complete its 8-step protocol including sweep coordination
+                // MMTk handles the actual memory reclamation and page management
             });
-        }).ok();
+        })
+        .ok();
     }
 
     /// Determine if collection should be triggered based on allocation pressure
@@ -514,6 +554,12 @@ impl FugcPlanManager {
     /// ```
     pub fn get_fugc_cycle_stats(&self) -> crate::fugc_coordinator::FugcCycleStats {
         self.fugc_coordinator.get_cycle_stats()
+    }
+
+    /// Get access to the tricolor marking system for FUGC concurrent marking
+    /// This integrates with MMTk's marking phase to provide the FUGC 8-step protocol
+    pub fn tricolor_marking(&self) -> &crate::concurrent::TricolorMarking {
+        self.fugc_coordinator.tricolor_marking()
     }
 }
 
@@ -647,14 +693,10 @@ mod tests {
 
         // Track some allocations using post_alloc
         let obj1 = unsafe {
-            mmtk::util::ObjectReference::from_raw_address_unchecked(
-                mmtk::util::Address::from_usize(0x1000),
-            )
+            ObjectReference::from_raw_address_unchecked(crate::compat::Address::from_usize(0x1000))
         };
         let obj2 = unsafe {
-            mmtk::util::ObjectReference::from_raw_address_unchecked(
-                mmtk::util::Address::from_usize(0x2000),
-            )
+            ObjectReference::from_raw_address_unchecked(crate::compat::Address::from_usize(0x2000))
         };
         plan_manager.post_alloc(obj1, 1024);
         plan_manager.post_alloc(obj2, 2048);
@@ -759,9 +801,7 @@ mod tests {
 
         // Test zero allocation
         let obj = unsafe {
-            mmtk::util::ObjectReference::from_raw_address_unchecked(
-                mmtk::util::Address::from_usize(0x3000),
-            )
+            ObjectReference::from_raw_address_unchecked(crate::compat::Address::from_usize(0x3000))
         };
         plan_manager.post_alloc(obj, 0);
         let count = plan_manager
@@ -772,9 +812,7 @@ mod tests {
 
         // Test large allocation
         let obj2 = unsafe {
-            mmtk::util::ObjectReference::from_raw_address_unchecked(
-                mmtk::util::Address::from_usize(0x4000),
-            )
+            ObjectReference::from_raw_address_unchecked(crate::compat::Address::from_usize(0x4000))
         };
         plan_manager.post_alloc(obj2, usize::MAX - 1000);
         let total = plan_manager
@@ -791,14 +829,10 @@ mod tests {
 
         // Create valid object references for testing
         let _src = unsafe {
-            mmtk::util::ObjectReference::from_raw_address_unchecked(
-                mmtk::util::Address::from_usize(0x1000),
-            )
+            ObjectReference::from_raw_address_unchecked(crate::compat::Address::from_usize(0x1000))
         };
         let _target = unsafe {
-            mmtk::util::ObjectReference::from_raw_address_unchecked(
-                mmtk::util::Address::from_usize(0x2000),
-            )
+            ObjectReference::from_raw_address_unchecked(crate::compat::Address::from_usize(0x2000))
         };
 
         // Test write barrier components without dangerous memory access

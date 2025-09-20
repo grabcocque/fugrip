@@ -4,7 +4,7 @@ mod debug {
     #[test]
     fn debug_chunk_mask() {
         use crate::simd_sweep::SimdBitvector;
-        use mmtk::util::Address;
+        use crate::compat::Address;
 
         let heap_base = unsafe { Address::from_usize(0x37000000) };
         let bitvector = SimdBitvector::new(heap_base, 10000, 16);

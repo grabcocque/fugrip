@@ -141,7 +141,9 @@ fn test_incremental_update_collector_property() {
     .unwrap();
 
     // Register root object
-    global_roots.load().register(root.to_raw_address().as_usize() as *mut u8);
+    global_roots
+        .load()
+        .register(root.to_raw_address().as_usize() as *mut u8);
 
     // Initially, root is live, obj1 is reachable through root, obj2 is reachable through obj1
     coordinator.write_barrier().activate();
@@ -417,8 +419,8 @@ fn test_concurrent_marking_with_mutator_interference() {
                 panic!("Mutator thread did not complete within timeout");
             }
         };
-        modifications
-    }).unwrap();
+    })
+    .unwrap();
 
     // Verify advancing wavefront properties
     let barrier_hit_count = write_barrier_hits.load(Ordering::Relaxed);
@@ -475,7 +477,9 @@ fn test_complete_advancing_wavefront_cycle() {
     })
     .unwrap();
 
-    global_roots.load().register(root.to_raw_address().as_usize() as *mut u8);
+    global_roots
+        .load()
+        .register(root.to_raw_address().as_usize() as *mut u8);
 
     // Phase 2: Start advancing wavefront collection
     assert_eq!(coordinator.current_phase(), FugcPhase::Idle);

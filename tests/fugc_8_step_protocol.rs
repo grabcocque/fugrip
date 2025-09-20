@@ -13,6 +13,21 @@ use std::sync::{
 };
 use std::time::Duration;
 
+/// Helper function to spawn a mutator thread that polls safepoints using crossbeam scoped threads
+fn spawn_mutator(mutator: MutatorThread) -> (std::thread::JoinHandle<()>, Arc<AtomicBool>) {
+    let running = Arc::new(AtomicBool::new(true));
+    let running_clone = Arc::clone(&running);
+
+    let handle = std::thread::spawn(move || {
+        while running_clone.load(Ordering::Relaxed) {
+            mutator.poll_safepoint();
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    });
+
+    (handle, running)
+}
+
 /// Rayon-based mutator simulation (replaces complex manual thread management)
 fn simulate_mutators_with_rayon_pool(mutators: &[MutatorThread], iterations: usize) -> Vec<usize> {
     use rayon::prelude::*;
@@ -48,7 +63,7 @@ fn complete_fugc_8_step_protocol() {
     let fixture = TestFixture::new();
     let coordinator = &fixture.coordinator;
     let thread_registry = Arc::clone(fixture.thread_registry());
-    let global_roots = Arc::clone(fixture.global_roots());
+    let global_roots = fixture.global_roots();
     let heap_base = unsafe { Address::from_usize(TEST_HEAP_BASE) };
 
     let mutator1 = MutatorThread::new(1);
@@ -106,7 +121,8 @@ fn complete_fugc_8_step_protocol() {
         running2.store(false, Ordering::Relaxed);
 
         // Scope will join the spawned mutator threads here
-    }).unwrap();
+    })
+    .unwrap();
     thread_registry.unregister(mutator1.id());
     thread_registry.unregister(mutator2.id());
 
@@ -170,7 +186,7 @@ fn step_4_global_root_marking_reachability() {
     let heap_base = unsafe { Address::from_usize(0x23000000) };
     let fixture = TestFixture::new_with_config(0x23000000, 32 * 1024 * 1024, 2);
     let coordinator = Arc::clone(&fixture.coordinator);
-    let global_roots = Arc::clone(fixture.global_roots());
+    let global_roots = fixture.global_roots();
 
     let roots = global_roots.load();
     let r1 = unsafe { Address::from_usize(heap_base.as_usize() + 0x100) };
@@ -265,7 +281,7 @@ fn step_8_page_based_sweep_allocation_coloring() {
     let heap_base = unsafe { Address::from_usize(0x27000000) };
     let fixture = TestFixture::new_with_config(0x27000000, 32 * 1024 * 1024, 2);
     let coordinator = Arc::clone(&fixture.coordinator);
-    let global_roots = Arc::clone(fixture.global_roots());
+    let global_roots = fixture.global_roots();
     {
         let roots = global_roots.load();
         let root_addr = unsafe { Address::from_usize(heap_base.as_usize() + 0x100) };
@@ -299,7 +315,7 @@ fn fugc_statistics_accuracy() {
     let fixture = TestFixture::new_with_config(0x29000000, 32 * 1024 * 1024, 2);
     let coordinator = Arc::clone(&fixture.coordinator);
     let thread_registry = Arc::clone(fixture.thread_registry());
-    let global_roots = Arc::clone(fixture.global_roots());
+    let global_roots = fixture.global_roots();
 
     let mutator = MutatorThread::new(77);
     thread_registry.register(mutator.clone());
@@ -333,7 +349,7 @@ fn fugc_concurrent_collection_stress() {
     let fixture = TestFixture::new_with_config(0x2a000000, 64 * 1024 * 1024, 4);
     let coordinator = Arc::clone(&fixture.coordinator);
     let thread_registry = Arc::clone(fixture.thread_registry());
-    let global_roots = Arc::clone(fixture.global_roots());
+    let global_roots = fixture.global_roots();
 
     let mut mutator_threads = Vec::new();
     for id in 0..4 {

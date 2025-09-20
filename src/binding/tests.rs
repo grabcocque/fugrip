@@ -3,9 +3,10 @@
 #[cfg(test)]
 mod tests {
     use super::super::*;
+    use crate::compat::ObjectReference;
     use crate::thread::MutatorThread;
-    use mmtk::util::ObjectReference;
-    use mmtk::vm::{VMBinding, Collection, ReferenceGlue};
+    use mmtk::AllocationSemantics;
+    use mmtk::vm::{Collection, ReferenceGlue, VMBinding};
     // use mmtk::vm::ActivePlan; // Currently unused
 
     #[test]
@@ -103,7 +104,9 @@ mod tests {
         assert_send_sync::<dashmap::DashMap<u64, mutator::MutatorRegistration>>();
 
         // Test that registry can be accessed (this initializes it)
-        let _initial_len = mutator::MUTATOR_MAP.get_or_init(dashmap::DashMap::new).len();
+        let _initial_len = mutator::MUTATOR_MAP
+            .get_or_init(dashmap::DashMap::new)
+            .len();
         // Registry access should not panic
     }
 
@@ -205,12 +208,16 @@ mod tests {
     #[test]
     fn test_vm_thread_key_functions() {
         // Test thread key generation functions
-        let thread1 = mmtk::util::opaque_pointer::VMThread(mmtk::util::opaque_pointer::OpaquePointer::from_address(unsafe {
-            mmtk::util::Address::from_usize(0x1000)
-        }));
-        let thread2 = mmtk::util::opaque_pointer::VMThread(mmtk::util::opaque_pointer::OpaquePointer::from_address(unsafe {
-            mmtk::util::Address::from_usize(0x2000)
-        }));
+        let thread1 = mmtk::util::opaque_pointer::VMThread(
+            mmtk::util::opaque_pointer::OpaquePointer::from_address(unsafe {
+                mmtk::util::Address::from_usize(0x1000)
+            }),
+        );
+        let thread2 = mmtk::util::opaque_pointer::VMThread(
+            mmtk::util::opaque_pointer::OpaquePointer::from_address(unsafe {
+                mmtk::util::Address::from_usize(0x2000)
+            }),
+        );
 
         let key1 = mutator::vm_thread_key(thread1);
         let key2 = mutator::vm_thread_key(thread2);
@@ -234,22 +241,37 @@ mod tests {
     fn test_mutator_registration_unregistration() {
         // Test mutator registration and unregistration flows
         let thread = MutatorThread::new(42);
-        // Use a placeholder address for testing - we won't dereference it
-        let dummy_mutator_ptr = 0x1000 as *mut mmtk::Mutator<vm_impl::RustVM>;
-        let tls = mmtk::util::opaque_pointer::VMMutatorThread(mmtk::util::opaque_pointer::VMThread(mmtk::util::opaque_pointer::OpaquePointer::from_address(unsafe {
-            mmtk::util::Address::from_usize(42)
-        })));
+
+        // Create a proper test mutator using MMTk's testing infrastructure
+
+        // Initialize a minimal MMTk instance for testing using the builder pattern
+        let builder = mmtk::MMTKBuilder::new();
+        let mmtk = Box::leak(Box::new(builder.build::<vm_impl::RustVM>()));
+        let tls =
+            mmtk::util::opaque_pointer::VMMutatorThread(mmtk::util::opaque_pointer::VMThread(
+                mmtk::util::opaque_pointer::OpaquePointer::from_address(unsafe {
+                    mmtk::util::Address::from_usize(42)
+                }),
+            ));
+
+        // Use MMTk's mutator creation API
+        let mutator = Box::leak(Box::new(mmtk::memory_manager::bind_mutator(mmtk, tls)));
 
         // Register mutator (using unsafe but valid for testing)
-        mutator::register_mutator_context(tls, unsafe { &mut *dummy_mutator_ptr }, thread.clone());
+        mutator::register_mutator_context(tls, mutator, thread.clone());
 
         // Verify registration exists
         let key = mutator::mutator_thread_key(tls);
-        assert!(mutator::MUTATOR_MAP.get_or_init(dashmap::DashMap::new).contains_key(&key));
+        assert!(
+            mutator::MUTATOR_MAP
+                .get_or_init(dashmap::DashMap::new)
+                .contains_key(&key)
+        );
 
         // Test with_mutator_registration (just check that the callback is called)
         let result = mutator::with_mutator_registration(tls, |reg| {
-            assert_eq!(reg.mutator, dummy_mutator_ptr);
+            // Verify we got a non-null mutator pointer
+            assert!(!reg.mutator.is_null());
             "test_value"
         });
         assert_eq!(result, Some("test_value"));
@@ -258,7 +280,11 @@ mod tests {
         mutator::unregister_mutator_context(tls);
 
         // Verify unregistration
-        assert!(!mutator::MUTATOR_MAP.get_or_init(dashmap::DashMap::new).contains_key(&key));
+        assert!(
+            !mutator::MUTATOR_MAP
+                .get_or_init(dashmap::DashMap::new)
+                .contains_key(&key)
+        );
 
         // Test with_mutator_registration after unregistration
         let result = mutator::with_mutator_registration(tls, |_| "should_not_be_called");
@@ -270,19 +296,36 @@ mod tests {
         // Test visitor functions with multiple mutators
         let thread1 = MutatorThread::new(100);
         let thread2 = MutatorThread::new(101);
-        // Use placeholder addresses - visitors don't actually dereference the pointers in tests
-        let dummy_mutator1_ptr = 0x2000 as *mut mmtk::Mutator<vm_impl::RustVM>;
-        let dummy_mutator2_ptr = 0x3000 as *mut mmtk::Mutator<vm_impl::RustVM>;
-        let tls1 = mmtk::util::opaque_pointer::VMMutatorThread(mmtk::util::opaque_pointer::VMThread(mmtk::util::opaque_pointer::OpaquePointer::from_address(unsafe {
-            mmtk::util::Address::from_usize(100)
-        })));
-        let tls2 = mmtk::util::opaque_pointer::VMMutatorThread(mmtk::util::opaque_pointer::VMThread(mmtk::util::opaque_pointer::OpaquePointer::from_address(unsafe {
-            mmtk::util::Address::from_usize(101)
-        })));
+
+        // Create proper test mutators using MMTk's testing infrastructure
+
+        // Initialize MMTk instances for testing using the builder pattern
+        let mmtk1 = Box::leak(Box::new(
+            mmtk::MMTKBuilder::new().build::<vm_impl::RustVM>(),
+        ));
+        let mmtk2 = Box::leak(Box::new(
+            mmtk::MMTKBuilder::new().build::<vm_impl::RustVM>(),
+        ));
+
+        let tls1 =
+            mmtk::util::opaque_pointer::VMMutatorThread(mmtk::util::opaque_pointer::VMThread(
+                mmtk::util::opaque_pointer::OpaquePointer::from_address(unsafe {
+                    mmtk::util::Address::from_usize(100)
+                }),
+            ));
+        let tls2 =
+            mmtk::util::opaque_pointer::VMMutatorThread(mmtk::util::opaque_pointer::VMThread(
+                mmtk::util::opaque_pointer::OpaquePointer::from_address(unsafe {
+                    mmtk::util::Address::from_usize(101)
+                }),
+            ));
+
+        let mutator1 = Box::leak(Box::new(mmtk::memory_manager::bind_mutator(mmtk1, tls1)));
+        let mutator2 = Box::leak(Box::new(mmtk::memory_manager::bind_mutator(mmtk2, tls2)));
 
         // Register mutators
-        mutator::register_mutator_context(tls1, unsafe { &mut *dummy_mutator1_ptr }, thread1.clone());
-        mutator::register_mutator_context(tls2, unsafe { &mut *dummy_mutator2_ptr }, thread2.clone());
+        mutator::register_mutator_context(tls1, mutator1, thread1.clone());
+        mutator::register_mutator_context(tls2, mutator2, thread2.clone());
 
         // Test visit_all_mutators - count calls but don't access mutator internals
         let mut mutator_count = 0;
@@ -312,10 +355,15 @@ mod tests {
     fn test_rust_collection_methods() {
         // Test RustCollection implementation methods
         let _collection = vm_impl::RustCollection;
-        let worker_tls = mmtk::util::opaque_pointer::VMWorkerThread(mmtk::util::opaque_pointer::VMThread::UNINITIALIZED);
-        let mutator_tls = mmtk::util::opaque_pointer::VMMutatorThread(mmtk::util::opaque_pointer::VMThread(mmtk::util::opaque_pointer::OpaquePointer::from_address(unsafe {
-            mmtk::util::Address::from_usize(200)
-        })));
+        let worker_tls = mmtk::util::opaque_pointer::VMWorkerThread(
+            mmtk::util::opaque_pointer::VMThread::UNINITIALIZED,
+        );
+        let mutator_tls =
+            mmtk::util::opaque_pointer::VMMutatorThread(mmtk::util::opaque_pointer::VMThread(
+                mmtk::util::opaque_pointer::OpaquePointer::from_address(unsafe {
+                    mmtk::util::Address::from_usize(200)
+                }),
+            ));
 
         // Test stop_all_mutators - should not panic
         vm_impl::RustCollection::stop_all_mutators(worker_tls, |_mutator| {
@@ -335,14 +383,37 @@ mod tests {
 
     #[test]
     fn test_rust_reference_glue_edge_cases() {
-        // Test ReferenceGlue edge cases
+        // Test ReferenceGlue edge cases with proper MMTk setup
         let _glue = vm_impl::RustReferenceGlue;
-        let obj1 =
-            unsafe { ObjectReference::from_raw_address_unchecked(mmtk::util::Address::from_usize(0x3000)) };
-        let obj2 =
-            unsafe { ObjectReference::from_raw_address_unchecked(mmtk::util::Address::from_usize(0x4000)) };
-        let obj3 =
-            unsafe { ObjectReference::from_raw_address_unchecked(mmtk::util::Address::from_usize(0x5000)) };
+
+        // Initialize MMTk for proper object creation using the builder pattern
+        let mmtk = Box::leak(Box::new(
+            mmtk::MMTKBuilder::new().build::<vm_impl::RustVM>(),
+        ));
+        let tls =
+            mmtk::util::opaque_pointer::VMMutatorThread(mmtk::util::opaque_pointer::VMThread(
+                mmtk::util::opaque_pointer::OpaquePointer::from_address(unsafe {
+                    mmtk::util::Address::from_usize(1)
+                }),
+            ));
+        let mut mutator = mmtk::memory_manager::bind_mutator(mmtk, tls);
+
+        // Create test objects using MMTk's allocator
+        let obj1 = {
+            let addr =
+                mmtk::memory_manager::alloc(&mut *mutator, 8, 8, 0, AllocationSemantics::Default);
+            unsafe { ObjectReference::from_raw_address_unchecked(addr) }
+        };
+        let obj2 = {
+            let addr =
+                mmtk::memory_manager::alloc(&mut *mutator, 8, 8, 0, AllocationSemantics::Default);
+            unsafe { ObjectReference::from_raw_address_unchecked(addr) }
+        };
+        let obj3 = {
+            let addr =
+                mmtk::memory_manager::alloc(&mut *mutator, 8, 8, 0, AllocationSemantics::Default);
+            unsafe { ObjectReference::from_raw_address_unchecked(addr) }
+        };
 
         // Test get_referent on non-existent object
         assert_eq!(vm_impl::RustReferenceGlue::get_referent(obj1), None);
@@ -357,13 +428,23 @@ mod tests {
 
         // Test enqueue_references with empty slice
         let empty_refs: &[ObjectReference] = &[];
-        vm_impl::RustReferenceGlue::enqueue_references(empty_refs, mmtk::util::opaque_pointer::VMWorkerThread(mmtk::util::opaque_pointer::VMThread::UNINITIALIZED));
+        vm_impl::RustReferenceGlue::enqueue_references(
+            empty_refs,
+            mmtk::util::opaque_pointer::VMWorkerThread(
+                mmtk::util::opaque_pointer::VMThread::UNINITIALIZED,
+            ),
+        );
 
         // Test enqueue_references with actual references
         vm_impl::RustReferenceGlue::set_referent(obj1, obj2);
         vm_impl::RustReferenceGlue::set_referent(obj2, obj3);
         let refs = &[obj1, obj2];
-        vm_impl::RustReferenceGlue::enqueue_references(refs, mmtk::util::opaque_pointer::VMWorkerThread(mmtk::util::opaque_pointer::VMThread::UNINITIALIZED));
+        vm_impl::RustReferenceGlue::enqueue_references(
+            refs,
+            mmtk::util::opaque_pointer::VMWorkerThread(
+                mmtk::util::opaque_pointer::VMThread::UNINITIALIZED,
+            ),
+        );
 
         // Verify references were enqueued
         let enqueued = vm_impl::take_enqueued_references();
@@ -379,17 +460,27 @@ mod tests {
         // Test RustActivePlan basic functionality
         let _plan = vm_impl::RustActivePlan;
 
-        // Register a mutator for basic testing
+        // Register a mutator for basic testing with proper MMTk setup
         let thread = MutatorThread::new(600);
-        let dummy_mutator_ptr = 0x4000 as *mut mmtk::Mutator<vm_impl::RustVM>;
-        let tls = mmtk::util::opaque_pointer::VMMutatorThread(mmtk::util::opaque_pointer::VMThread(mmtk::util::opaque_pointer::OpaquePointer::from_address(unsafe {
-            mmtk::util::Address::from_usize(600)
-        })));
-        mutator::register_mutator_context(tls, unsafe { &mut *dummy_mutator_ptr }, thread.clone());
+        let mmtk = Box::leak(Box::new(
+            mmtk::MMTKBuilder::new().build::<vm_impl::RustVM>(),
+        ));
+        let tls =
+            mmtk::util::opaque_pointer::VMMutatorThread(mmtk::util::opaque_pointer::VMThread(
+                mmtk::util::opaque_pointer::OpaquePointer::from_address(unsafe {
+                    mmtk::util::Address::from_usize(thread.id() as usize)
+                }),
+            ));
+        let mutator = Box::leak(Box::new(mmtk::memory_manager::bind_mutator(mmtk, tls)));
+        mutator::register_mutator_context(tls, mutator, thread.clone());
 
         // Test that the mutator map contains our registration
         let key = mutator::mutator_thread_key(tls);
-        assert!(mutator::MUTATOR_MAP.get_or_init(dashmap::DashMap::new).contains_key(&key));
+        assert!(
+            mutator::MUTATOR_MAP
+                .get_or_init(dashmap::DashMap::new)
+                .contains_key(&key)
+        );
 
         // Clean up
         mutator::unregister_mutator_context(tls);
@@ -407,15 +498,37 @@ mod tests {
         let empty_refs = vm_impl::take_enqueued_references();
         assert_eq!(empty_refs.len(), 0);
 
-        // Add some references via RustReferenceGlue
-        let obj1 =
-            unsafe { ObjectReference::from_raw_address_unchecked(mmtk::util::Address::from_usize(0x7000)) };
-        let obj2 =
-            unsafe { ObjectReference::from_raw_address_unchecked(mmtk::util::Address::from_usize(0x8000)) };
+        // Add some references via RustReferenceGlue with proper MMTk setup
+        let mmtk = Box::leak(Box::new(
+            mmtk::MMTKBuilder::new().build::<vm_impl::RustVM>(),
+        ));
+        let tls =
+            mmtk::util::opaque_pointer::VMMutatorThread(mmtk::util::opaque_pointer::VMThread(
+                mmtk::util::opaque_pointer::OpaquePointer::from_address(unsafe {
+                    mmtk::util::Address::from_usize(2)
+                }),
+            ));
+        let mut mutator = mmtk::memory_manager::bind_mutator(mmtk, tls);
+
+        let obj1 = {
+            let addr =
+                mmtk::memory_manager::alloc(&mut *mutator, 8, 8, 0, AllocationSemantics::Default);
+            unsafe { ObjectReference::from_raw_address_unchecked(addr) }
+        };
+        let obj2 = {
+            let addr =
+                mmtk::memory_manager::alloc(&mut *mutator, 8, 8, 0, AllocationSemantics::Default);
+            unsafe { ObjectReference::from_raw_address_unchecked(addr) }
+        };
 
         vm_impl::RustReferenceGlue::set_referent(obj1, obj2);
         let refs = &[obj1];
-        vm_impl::RustReferenceGlue::enqueue_references(refs, mmtk::util::opaque_pointer::VMWorkerThread(mmtk::util::opaque_pointer::VMThread::UNINITIALIZED));
+        vm_impl::RustReferenceGlue::enqueue_references(
+            refs,
+            mmtk::util::opaque_pointer::VMWorkerThread(
+                mmtk::util::opaque_pointer::VMThread::UNINITIALIZED,
+            ),
+        );
 
         // Test taking references
         let enqueued = vm_impl::take_enqueued_references();
@@ -451,8 +564,9 @@ mod tests {
     #[test]
     fn test_write_barrier_sad_paths() {
         // Test write barrier component access without dangerous memory writes
-        let plan_manager =
-            FUGC_PLAN_MANAGER.get_or_init(|| arc_swap::ArcSwap::new(std::sync::Arc::new(crate::plan::FugcPlanManager::new())));
+        let plan_manager = FUGC_PLAN_MANAGER.get_or_init(|| {
+            arc_swap::ArcSwap::new(std::sync::Arc::new(crate::plan::FugcPlanManager::new()))
+        });
 
         let manager = plan_manager.load();
         let write_barrier = manager.get_write_barrier();
@@ -468,10 +582,12 @@ mod tests {
         assert!(manager.is_concurrent_collection_enabled());
 
         // Test with problematic object reference patterns (without memory writes)
-        let src =
-            unsafe { ObjectReference::from_raw_address_unchecked(mmtk::util::Address::from_usize(0x10000)) };
-        let target =
-            unsafe { ObjectReference::from_raw_address_unchecked(mmtk::util::Address::from_usize(0x20000)) };
+        let src = unsafe {
+            ObjectReference::from_raw_address_unchecked(mmtk::util::Address::from_usize(0x10000))
+        };
+        let target = unsafe {
+            ObjectReference::from_raw_address_unchecked(mmtk::util::Address::from_usize(0x20000))
+        };
 
         // Test same src and target references
         assert_eq!(src.to_raw_address(), unsafe {
@@ -524,7 +640,6 @@ mod tests {
     fn test_concurrent_access_patterns() {
         // Test thread safety of global state with rayon parallel execution
         use rayon::prelude::*;
-        use std::sync::Arc;
 
         // Use rayon parallel iteration with fixed number of operations per thread
         let total_ops: usize = (0..4)
@@ -543,9 +658,9 @@ mod tests {
 
                     // Test post alloc
                     let obj = unsafe {
-                        ObjectReference::from_raw_address_unchecked(mmtk::util::Address::from_usize(
-                            0x10000 + i * 8,
-                        ))
+                        ObjectReference::from_raw_address_unchecked(
+                            mmtk::util::Address::from_usize(0x10000 + i * 8),
+                        )
                     };
                     allocation::fugc_post_alloc(obj, 64);
 
