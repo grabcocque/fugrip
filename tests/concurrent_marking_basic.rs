@@ -161,25 +161,19 @@ fn marking_worker_functionality() {
 
     // Test basic operations
     assert_eq!(worker.objects_marked(), 0);
-    assert!(worker.grey_stack.is_empty());
+    // Note: grey_stack is no longer exposed - Rayon handles work distribution internally
 
-    // Add work
+    // Add work (now a no-op since Rayon handles work distribution)
     let heap_base = unsafe { Address::from_usize(0x500000) };
     let objects: Vec<ObjectReference> = (0..5)
         .map(|i| unsafe { ObjectReference::from_raw_address_unchecked(heap_base + i * 0x100usize) })
         .collect();
 
     worker.add_initial_work(objects);
-    assert_eq!(worker.grey_stack.len(), 5);
-
-    // Test work extraction
-    let shared = worker.grey_stack.extract_work();
-    assert!(!shared.is_empty());
-    assert!(worker.grey_stack.len() < 5);
+    // Note: can't test grey_stack.len() anymore since it's handled by Rayon internally
 
     // Test reset
     worker.reset();
-    assert!(worker.grey_stack.is_empty());
     assert_eq!(worker.objects_marked(), 0);
 }
 

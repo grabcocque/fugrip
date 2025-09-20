@@ -13,8 +13,8 @@ mod failure_mode_tests {
     };
     use fugrip::concurrent::TricolorMarking;
     use mmtk::util::{Address, ObjectReference};
+    use rayon::prelude::*;
     use std::sync::{Arc, Mutex};
-    use std::thread;
 
     /// Test failure modes and edge cases in CacheAwareAllocator
     mod cache_aware_allocator_tests {
@@ -78,25 +78,14 @@ mod failure_mode_tests {
             // Test concurrent allocation leading to exhaustion
             let base = unsafe { Address::from_usize(0x50000) };
             let allocator = Arc::new(CacheAwareAllocator::new(base, 1024));
-            let mut handles = vec![];
 
-            for i in 0..10 {
-                let allocator_clone = Arc::clone(&allocator);
-                let handle = thread::spawn(move || {
-                    // Each thread tries to allocate
-                    let result = allocator_clone.allocate(100, 8);
-                    (i, result.is_some())
-                });
-                handles.push(handle);
-            }
+            let results: Vec<_> = (0..10).into_par_iter().map(|i| {
+                // Each thread tries to allocate
+                let result = allocator.allocate(100, 8);
+                (i, result.is_some())
+            }).collect();
 
-            let mut successes = 0;
-            for handle in handles {
-                let (_, success) = handle.join().unwrap();
-                if success {
-                    successes += 1;
-                }
-            }
+            let successes = results.iter().filter(|&(_, success)| *success).count();
 
             // Some allocations should succeed, but not all due to size limit
             assert!(successes > 0);
@@ -231,28 +220,22 @@ mod failure_mode_tests {
 
         #[test]
         fn test_marking_concurrent_operations() {
+            use rayon::prelude::*;
+
             // Test concurrent marking operations
             let marking = Arc::new(CacheOptimizedMarking::new(4));
-            let mut handles = vec![];
 
-            for thread_id in 0..5 {
-                let marking_clone = Arc::clone(&marking);
-                let handle = thread::spawn(move || {
-                    for i in 0..100 {
-                        let obj = unsafe {
-                            ObjectReference::from_raw_address_unchecked(Address::from_usize(
-                                0xc0000 + thread_id * 1000 + i * 8,
-                            ))
-                        };
-                        marking_clone.mark_object(obj);
-                    }
-                });
-                handles.push(handle);
-            }
-
-            for handle in handles {
-                handle.join().unwrap();
-            }
+            // Use rayon parallel iteration instead of manual thread::spawn
+            (0..5).into_par_iter().for_each(|thread_id| {
+                for i in 0..100 {
+                    let obj = unsafe {
+                        ObjectReference::from_raw_address_unchecked(Address::from_usize(
+                            0xc0000 + thread_id * 1000 + i * 8,
+                        ))
+                    };
+                    marking.mark_object(obj);
+                }
+            });
 
             let stats = marking.get_stats();
             assert_eq!(stats.objects_marked, 500); // 5 threads * 100 objects
@@ -395,24 +378,18 @@ mod failure_mode_tests {
 
         #[test]
         fn test_optimizer_concurrent_recording() {
+            use rayon::prelude::*;
+
             // Test concurrent allocation recording
             let optimizer = Arc::new(MemoryLayoutOptimizer::new());
-            let mut handles = vec![];
 
-            for _thread_id in 0..5 {
-                let optimizer_clone = Arc::clone(&optimizer);
-                let handle = thread::spawn(move || {
-                    for i in 0..100 {
-                        let size = 8 + (i % 8) * 8; // Sizes 8, 16, 24, ...
-                        optimizer_clone.record_allocation(size);
-                    }
-                });
-                handles.push(handle);
-            }
-
-            for handle in handles {
-                handle.join().unwrap();
-            }
+            // Use rayon parallel iteration instead of manual thread::spawn
+            (0..5).into_par_iter().for_each(|_thread_id| {
+                for i in 0..100 {
+                    let size = 8 + (i % 8) * 8; // Sizes 8, 16, 24, ...
+                    optimizer.record_allocation(size);
+                }
+            });
 
             let stats = optimizer.get_statistics();
             let total_allocations: usize = stats.iter().map(|(_, count)| *count).sum();
@@ -501,48 +478,46 @@ mod failure_mode_tests {
 
         #[test]
         fn test_work_stealer_concurrent_access() {
+            use rayon::prelude::*;
+
             // Test concurrent access to work stealer
             let stealer = Arc::new(Mutex::new(LocalityAwareWorkStealer::new(8)));
-            let mut handles = vec![];
 
-            // Spawn producers
-            for thread_id in 0..3 {
-                let stealer_clone = Arc::clone(&stealer);
-                let handle = thread::spawn(move || {
-                    let objects: Vec<ObjectReference> = (0..100)
-                        .map(|i| unsafe {
-                            ObjectReference::from_raw_address_unchecked(Address::from_usize(
-                                0x130000 + thread_id * 1000 + i * 8,
-                            ))
-                        })
-                        .collect();
-                    let mut stealer_lock = stealer_clone.lock().unwrap();
-                    stealer_lock.add_objects(objects);
-                });
-                handles.push(handle);
-            }
-
-            // Spawn consumers
-            for _ in 0..2 {
-                let stealer_clone = Arc::clone(&stealer);
-                let handle = thread::spawn(move || {
-                    let mut total_stolen = 0;
-                    while total_stolen < 50 {
+            // Use rayon scope for producer-consumer pattern instead of manual thread::spawn
+            rayon::scope(|s| {
+                // Spawn producers
+                for thread_id in 0..3 {
+                    let stealer_clone = Arc::clone(&stealer);
+                    s.spawn(move |_| {
+                        let objects: Vec<ObjectReference> = (0..100)
+                            .map(|i| unsafe {
+                                ObjectReference::from_raw_address_unchecked(Address::from_usize(
+                                    0x130000 + thread_id * 1000 + i * 8,
+                                ))
+                            })
+                            .collect();
                         let mut stealer_lock = stealer_clone.lock().unwrap();
-                        let batch = stealer_lock.get_next_batch(10);
-                        total_stolen += batch.len();
-                        if batch.is_empty() {
-                            std::hint::black_box(()); // Prevent compiler optimizations
-                            std::thread::yield_now(); // Cooperative yield instead of sleep
-                        }
-                    }
-                });
-                handles.push(handle);
-            }
+                        stealer_lock.add_objects(objects);
+                    });
+                }
 
-            for handle in handles {
-                handle.join().unwrap();
-            }
+                // Spawn consumers
+                for _ in 0..2 {
+                    let stealer_clone = Arc::clone(&stealer);
+                    s.spawn(move |_| {
+                        let mut total_stolen = 0;
+                        while total_stolen < 50 {
+                            let mut stealer_lock = stealer_clone.lock().unwrap();
+                            let batch = stealer_lock.get_next_batch(10);
+                            total_stolen += batch.len();
+                            if batch.is_empty() {
+                                std::hint::black_box(()); // Prevent compiler optimizations
+                                rayon::yield_now(); // Use rayon yield instead of std::thread
+                            }
+                        }
+                    });
+                }
+            });
         }
 
         #[test]
@@ -600,33 +575,27 @@ mod failure_mode_tests {
 
         #[test]
         fn test_metadata_colocation_concurrent_access() {
+            use rayon::prelude::*;
+
             // Test concurrent metadata access
             let metadata = Arc::new(Mutex::new(MetadataColocation::new(100, 8)));
-            let mut handles = vec![];
 
-            for thread_id in 0..10 {
-                let metadata_clone = Arc::clone(&metadata);
-                let handle = thread::spawn(move || {
-                    for i in 0..15 {
-                        let index = thread_id * 15 + i;
-                        if index < 100 {
-                            // Ensure we don't go out of bounds
-                            let value_to_set = thread_id * 100 + i;
-                            {
-                                let meta = metadata_clone.lock().unwrap();
-                                meta.set_metadata(index, value_to_set);
-                            }
-                            let value = metadata_clone.lock().unwrap().get_metadata(index);
-                            assert_eq!(value, value_to_set);
+            // Use rayon parallel iteration instead of manual thread::spawn
+            (0..10).into_par_iter().for_each(|thread_id| {
+                for i in 0..15 {
+                    let index = thread_id * 15 + i;
+                    if index < 100 {
+                        // Ensure we don't go out of bounds
+                        let value_to_set = thread_id * 100 + i;
+                        {
+                            let meta = metadata.lock().unwrap();
+                            meta.set_metadata(index, value_to_set);
                         }
+                        let value = metadata.lock().unwrap().get_metadata(index);
+                        assert_eq!(value, value_to_set);
                     }
-                });
-                handles.push(handle);
-            }
-
-            for handle in handles {
-                handle.join().unwrap();
-            }
+                }
+            });
         }
     }
 
@@ -836,6 +805,8 @@ mod failure_mode_tests {
 
         #[test]
         fn test_full_system_concurrent_stress() {
+            use rayon::prelude::*;
+
             // Create all components
             let base = unsafe { Address::from_usize(0x100000) };
             let allocator = Arc::new(CacheAwareAllocator::new(base, 65536));
@@ -844,54 +815,42 @@ mod failure_mode_tests {
             let stealer = Arc::new(Mutex::new(LocalityAwareWorkStealer::new(10)));
             let metadata = Arc::new(MetadataColocation::new(1000, 8));
 
-            let mut handles = vec![];
+            // Use rayon parallel iteration with collect to gather results
+            let total_operations: usize = (0..4).into_par_iter().map(|thread_id| {
+                let mut operations = 0;
 
-            for thread_id in 0..4 {
-                let allocator_clone = Arc::clone(&allocator);
-                let marking_clone = Arc::clone(&marking);
-                let optimizer_clone = Arc::clone(&optimizer);
-                let stealer_clone = Arc::clone(&stealer);
-                let metadata_clone = Arc::clone(&metadata);
+                for i in 0..25 {
+                    // Test allocator
+                    if let Some(addr) = allocator.allocate(64, 8) {
+                        operations += 1;
 
-                let handle = thread::spawn(move || {
-                    let mut operations = 0;
+                        // Create object reference for other components
+                        let obj = unsafe { ObjectReference::from_raw_address_unchecked(addr) };
 
-                    for i in 0..25 {
-                        // Test allocator
-                        if let Some(addr) = allocator_clone.allocate(64, 8) {
-                            operations += 1;
+                        // Test marking
+                        marking.mark_object(obj);
+                        operations += 1;
 
-                            // Create object reference for other components
-                            let obj = unsafe { ObjectReference::from_raw_address_unchecked(addr) };
+                        // Test optimizer
+                        let _size_class = optimizer.get_size_class(64 + i);
+                        optimizer.record_allocation(64 + i);
+                        operations += 1;
 
-                            // Test marking
-                            marking_clone.mark_object(obj);
-                            operations += 1;
-
-                            // Test optimizer
-                            let _size_class = optimizer_clone.get_size_class(64 + i);
-                            optimizer_clone.record_allocation(64 + i);
-                            operations += 1;
-
-                            // Test work stealer
-                            {
-                                let stealer_lock = stealer_clone.lock().unwrap();
-                                stealer_lock.push_local(obj);
-                            }
-                            operations += 1;
-
-                            // Test metadata
-                            metadata_clone.set_metadata(thread_id * 100 + i, i);
-                            operations += 1;
+                        // Test work stealer
+                        {
+                            let stealer_lock = stealer.lock().unwrap();
+                            stealer_lock.push_local(obj);
                         }
+                        operations += 1;
+
+                        // Test metadata
+                        metadata.set_metadata(thread_id * 100 + i, i);
+                        operations += 1;
                     }
+                }
 
-                    operations
-                });
-                handles.push(handle);
-            }
-
-            let total_operations: usize = handles.into_iter().map(|h| h.join().unwrap()).sum();
+                operations
+            }).sum();
             assert!(total_operations > 0);
 
             // Verify final state

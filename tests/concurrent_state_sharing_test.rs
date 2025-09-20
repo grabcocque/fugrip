@@ -3,26 +3,7 @@
 use fugrip::FugcPhase;
 use fugrip::thread::MutatorThread;
 use std::sync::Arc;
-use std::thread;
 use std::time::Duration;
-
-fn spawn_polling_thread(
-    mutator: MutatorThread,
-) -> (thread::JoinHandle<()>, Arc<std::sync::atomic::AtomicBool>) {
-    use std::sync::atomic::{AtomicBool, Ordering};
-    let running = Arc::new(AtomicBool::new(true));
-    let mutator_clone = mutator.clone();
-    let flag = Arc::clone(&running);
-
-    let handle = thread::spawn(move || {
-        while flag.load(Ordering::Relaxed) {
-            mutator_clone.poll_safepoint();
-            //(Duration::from_millis(1));
-        }
-    });
-
-    (handle, running)
-}
 
 #[test]
 fn coordinator_state_sharing_works() {
@@ -41,28 +22,38 @@ fn coordinator_state_sharing_works() {
     let registered_mutator = thread_registry
         .get(1)
         .expect("Mutator should be registered");
-    let (handle, running) = spawn_polling_thread(registered_mutator);
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let running = Arc::new(AtomicBool::new(true));
+    let flag = Arc::clone(&running);
 
-    // Test coordinator state sharing without triggering GC to avoid deadlock
-    // Validate that the coordinator and mutator thread state is properly shared
-    assert_eq!(coordinator.current_phase(), FugcPhase::Idle);
-    assert!(!coordinator.is_collecting());
+    crossbeam::scope(|s| {
+        let mutator_clone = registered_mutator.clone();
+        s.spawn(move |_| {
+            while flag.load(Ordering::Relaxed) {
+                mutator_clone.poll_safepoint();
+            }
+        });
 
-    // Test that coordinator components are accessible and functioning
-    let stats = coordinator.get_cycle_stats();
-    assert_eq!(stats.cycles_completed, 0); // Should start at 0
+        // Test coordinator state sharing without triggering GC to avoid deadlock
+        // Validate that the coordinator and mutator thread state is properly shared
+        assert_eq!(coordinator.current_phase(), FugcPhase::Idle);
+        assert!(!coordinator.is_collecting());
 
-    // Verify thread is registered and active
-    let threads = thread_registry.iter();
-    assert_eq!(threads.len(), 1);
-    assert_eq!(threads[0].id(), mutator.id());
+        // Test that coordinator components are accessible and functioning
+        let stats = coordinator.get_cycle_stats();
+        assert_eq!(stats.cycles_completed, 0); // Should start at 0
 
-    coordinator.trigger_gc();
-    assert!(coordinator.wait_until_idle(Duration::from_millis(2000)));
-    // Stop polling thread cleanly
-    running.store(false, std::sync::atomic::Ordering::Relaxed);
+        // Verify thread is registered and active
+        let threads = thread_registry.iter();
+        assert_eq!(threads.len(), 1);
+        assert_eq!(threads[0].id(), mutator.id());
 
-    handle.join().unwrap();
+        coordinator.trigger_gc();
+        assert!(coordinator.wait_until_idle(Duration::from_millis(2000)));
+        // Stop polling thread cleanly
+        running.store(false, std::sync::atomic::Ordering::Relaxed);
+    })
+    .unwrap();
     thread_registry.unregister(mutator.id());
 
     assert_eq!(coordinator.current_phase(), FugcPhase::Idle);

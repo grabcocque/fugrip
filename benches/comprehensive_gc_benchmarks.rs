@@ -188,7 +188,7 @@ fn gc_coordination_benchmarks(c: &mut Criterion) {
         });
     });
 
-    // Benchmark safepoint coordination
+    // Benchmark safepoint coordination using Rayon for background thread simulation
     for num_threads in [1, 2, 4, 8] {
         let mutators: Vec<_> = (0..num_threads)
             .map(|i| {
@@ -198,39 +198,19 @@ fn gc_coordination_benchmarks(c: &mut Criterion) {
             })
             .collect();
 
-        let running = Arc::new(AtomicBool::new(true));
-        let handles: Vec<_> = mutators
-            .iter()
-            .map(|mutator| {
-                let m = mutator.clone();
-                let flag = Arc::clone(&running);
-                thread::spawn(move || {
-                    while flag.load(Ordering::Relaxed) {
-                        m.poll_safepoint();
-                        thread::yield_now();
-                    }
-                })
-            })
-            .collect();
-
         group.bench_with_input(
             BenchmarkId::new("safepoint_coordination", num_threads),
             &num_threads,
             |b, _| {
                 b.iter(|| {
-                    // Simulate safepoint request across all threads
-                    for mutator in &mutators {
+                    // Simulate safepoint request across all threads using Rayon
+                    use rayon::prelude::*;
+                    black_box(mutators.par_iter().for_each(|mutator| {
                         mutator.poll_safepoint();
-                    }
+                    }));
                 });
             },
         );
-
-        // Clean up background threads
-        running.store(false, Ordering::Relaxed);
-        for handle in handles {
-            let _ = handle.join();
-        }
 
         // Clean up mutators
         for mutator in mutators {
@@ -311,30 +291,11 @@ fn concurrent_marking_benchmarks(c: &mut Criterion) {
             &objects,
             |b, objs| {
                 b.iter(|| {
-                    // Simulate concurrent marking with multiple threads
-                    let chunk_size = objs.len() / num_threads;
-                    let handles: Vec<_> = (0..num_threads)
-                        .map(|t| {
-                            let start = t * chunk_size;
-                            let end = if t == num_threads - 1 {
-                                objs.len()
-                            } else {
-                                start + chunk_size
-                            };
-                            let chunk: Vec<ObjectReference> = objs[start..end].to_vec();
-                            let tc = tricolor.clone();
-
-                            thread::spawn(move || {
-                                for obj in chunk {
-                                    tc.set_color(obj, ObjectColor::Grey);
-                                }
-                            })
-                        })
-                        .collect();
-
-                    for handle in handles {
-                        let _ = handle.join();
-                    }
+                    // Use Rayon for parallel marking with automatic work stealing
+                    use rayon::prelude::*;
+                    black_box(objs.par_iter().for_each(|&obj| {
+                        tricolor.set_color(obj, ObjectColor::Grey);
+                    }));
                 });
             },
         );

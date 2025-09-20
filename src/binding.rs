@@ -1194,50 +1194,35 @@ mod tests {
 
     #[test]
     fn test_concurrent_access_patterns() {
-        // Test thread safety of global state
+        // Test thread safety of global state with rayon parallel execution
+        use rayon::prelude::*;
         use std::sync::Arc;
 
-        let running = Arc::new(AtomicBool::new(true));
-        let handles: Vec<_> = (0..4)
-            .map(|i| {
-                let running = Arc::clone(&running);
-                thread::spawn(move || {
-                    let mut operations = 0;
-                    while running.load(Ordering::Relaxed) && operations < 10 {
-                        // Test concurrent access to various APIs
-                        let _stats = fugc_get_stats();
-                        let _phase = fugc_get_phase();
-                        let _collecting = fugc_is_collecting();
-                        let _cycle_stats = fugc_get_cycle_stats();
+        // Use rayon parallel iteration with fixed number of operations per thread
+        let total_ops: usize = (0..4).into_par_iter().map(|i| {
+            let mut operations = 0;
+            for _ in 0..10 {
+                // Test concurrent access to various APIs
+                let _stats = fugc_get_stats();
+                let _phase = fugc_get_phase();
+                let _collecting = fugc_is_collecting();
+                let _cycle_stats = fugc_get_cycle_stats();
 
-                        // Test allocation info
-                        let _alloc_info = fugc_alloc_info(64 + i, 8);
+                // Test allocation info
+                let _alloc_info = fugc_alloc_info(64 + i, 8);
 
-                        // Test post alloc
-                        let obj = unsafe {
-                            ObjectReference::from_raw_address_unchecked(Address::from_usize(
-                                0x10000 + i * 8,
-                            ))
-                        };
-                        fugc_post_alloc(obj, 64);
+                // Test post alloc
+                let obj = unsafe {
+                    ObjectReference::from_raw_address_unchecked(Address::from_usize(
+                        0x10000 + i * 8,
+                    ))
+                };
+                fugc_post_alloc(obj, 64);
 
-                        operations += 1;
-                        thread::yield_now(); // Cooperative yielding instead of sleeping
-                    }
-                    operations
-                })
-            })
-            .collect();
-
-        // Let threads run with proper synchronization
-        // Use work-based termination instead of time-based
-        for _ in 0..100 {
-            thread::yield_now();
-        }
-        running.store(false, Ordering::Relaxed);
-
-        // Wait for all threads
-        let total_ops: usize = handles.into_iter().map(|h| h.join().unwrap()).sum();
+                operations += 1;
+            }
+            operations
+        }).sum();
         assert!(total_ops > 0, "Threads should have performed operations");
     }
 

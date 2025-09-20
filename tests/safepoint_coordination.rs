@@ -1,6 +1,5 @@
 use fugrip::thread::{MutatorThread, ThreadRegistry};
 use std::sync::Arc;
-use std::thread;
 
 #[test]
 fn safepoint_request_and_clear() {
@@ -63,22 +62,16 @@ fn safepoint_state_transitions() {
 #[test]
 fn thread_registry_thread_safety() {
     let registry = Arc::new(ThreadRegistry::new());
-    let mut handles = vec![];
-
-    // Spawn multiple threads that register mutators
-    for i in 0..5 {
-        let registry_clone = Arc::clone(&registry);
-        let handle = thread::spawn(move || {
-            let mutator = MutatorThread::new(i);
-            registry_clone.register(mutator);
-        });
-        handles.push(handle);
-    }
-
-    // Wait for all threads to complete
-    for handle in handles {
-        handle.join().unwrap();
-    }
+    // Spawn multiple threads that register mutators using scoped tasks
+    rayon::scope(|s| {
+        for i in 0..5 {
+            let registry_clone = Arc::clone(&registry);
+            s.spawn(move |_| {
+                let mutator = MutatorThread::new(i);
+                registry_clone.register(mutator);
+            });
+        }
+    });
 
     // Verify all mutators were registered
     let mutators = registry.iter();

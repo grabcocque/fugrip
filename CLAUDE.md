@@ -7,6 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 **Fugrip** is a Rust implementation of FUGC (Fil's Unbelievable Garbage Collector), a sophisticated parallel concurrent on-the-fly grey-stack Dijkstra accurate non-moving garbage collector originally designed for the Verse programming language. The project implements a deadlock-impossible lock-free handshake protocol and integrates with MMTk (Memory Management Toolkit) for production-ready garbage collection.
 
 **Key FUGC Features:**
+
 - **Parallel**: Marking and sweeping across multiple threads
 - **Concurrent**: Collection happens on dedicated threads, mutators continue running
 - **On-the-fly**: Uses "soft handshakes" instead of global stop-the-world pauses
@@ -22,23 +23,6 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 # Build the project
 cargo build
 
-# Run all tests using nextest (preferred test runner)
-cargo nextest run
-# OR use cargo aliases:
-cargo nextest-all
-
-# Run specific test categories
-cargo nextest run --features smoke      # Lightweight GC semantics validation
-cargo nextest run --features stress-tests  # Expensive stress tests
-cargo nextest-smoke    # Alias for smoke tests
-cargo nextest-stress   # Alias for stress tests
-
-# Run a single test
-cargo nextest run test_name
-
-# Run without fail-fast (see all test results)
-cargo nextest run --no-fail-fast
-
 # Check compilation without building
 cargo check
 
@@ -48,16 +32,49 @@ cargo fmt
 # Run lints
 cargo clippy
 
-# Run specific benchmarks (disabled by default)
+# Run all tests using nextest (preferred test runner)
+cargo nextest run
+# OR use cargo aliases from .cargo/config.toml:
+cargo test-all      # Alias for: nextest run
+
+# Run specific test categories
+cargo nextest run --features smoke         # Lightweight GC semantics validation
+cargo nextest run --features stress-tests  # Expensive stress tests
+# OR use aliases:
+cargo test-smoke    # Alias for: nextest run --features smoke
+cargo test-stress   # Alias for: nextest run --features stress-tests
+
+# Run a single test
+cargo nextest run test_name
+
+# Run without fail-fast (see all test results)
+cargo nextest run --no-fail-fast
+
+# Run specific benchmarks
 cargo bench --bench comprehensive_gc_benchmarks
 
 # Run coverage analysis (optimal configuration)
 cargo llvm-cov --all-targets --all-features --jobs 32
+
+# Get detailed test output
+RUST_BACKTRACE=1 cargo nextest run test_name
+
+# Run tests matching a pattern
+cargo nextest run -E 'test(handshake)'
 ```
 
 ## Current Implementation Status
 
-**✅ Core Infrastructure Complete:**
+**⚠️ Active Refactoring:** The codebase is undergoing simplification to leverage existing libraries (crossbeam_deque) more effectively.
+
+**🔧 Build Status:**
+
+- **Compilation errors** in `concurrent.rs` module:
+  - Missing fields `global_injector` and `worker_stealers` in `ParallelMarkingCoordinator`
+  - Missing field `grey_stack` on `MarkingWorker`
+  - These appear to be from simplifying manual work-stealing to use `crossbeam_deque`
+
+**✅ Core Infrastructure (when compiling):**
 
 - Lock-free handshake protocol using crossbeam channels and atomic state machines
 - Thread registry with deadlock-free coordination
@@ -67,12 +84,10 @@ cargo llvm-cov --all-targets --all-features --jobs 32
 
 **🔄 FUGC 8-Step Protocol:**
 
-- Steps 1-8 implemented but integration layer needs work
-- Lock-free handshake eliminates deadlocks (252/259 tests pass)
-- Some coordinator integration issues remain (7 failing tests)
-
-**📊 Test Health: 97.3% pass rate (252/259 tests)**
-**🚨 7 failing tests due to coordinator integration issues**
+- Steps 1-8 architecturally designed with clear separation of concerns
+- Lock-free handshake eliminates deadlocks by design
+- Integration between coordinator and handshake protocol needs completion
+- Previous test health: 97.3% pass rate (252/259 tests) before refactoring
 
 ## Architecture
 
@@ -304,7 +319,7 @@ The test suite uses feature flags to organize different test categories:
 
 - **smoke**: Lightweight tests for validating high-level GC semantics and infrastructure
 - **segment_scan_linux**: Linux-specific segment scanning tests
-- **legacy_tests**: Backward compatibility tests
+- **legacy_tests**: bumward bumbumability tests
 
 Tests demonstrate key FUGC properties including handshake mechanisms, safepoint infrastructure, and concurrent collection phases.
 
@@ -402,21 +417,24 @@ Tests demonstrate key FUGC properties including handshake mechanisms, safepoint 
 
 ## Known Issues & Next Steps
 
-**Current Failing Tests (7/259):**
+**Current Compilation Errors (must fix first):**
 
-1. **Fast Failures (0.008-0.016s):** API integration mismatches
+1. **`src/concurrent.rs`** - Refactoring incomplete:
 
-   - `test_rust_scanning` - Root scanning API needs handshake integration
-   - `coordinator_state_sharing_works` - Stats collection integration
-   - `step_5_stack_scanning_mutator_roots` - Stack roots API compatibility
+   - Line 278: `ParallelMarkingCoordinator` missing field `global_injector`
+   - Line 279: `ParallelMarkingCoordinator` missing field `worker_stealers`
+   - Line 433: `MarkingWorker` missing field `grey_stack`
+   - Missing method `process_grey_stack()` on `MarkingWorker`
 
-2. **Timeout Failures (0.5-1.0s):** Coordinator integration incomplete
-   - `complete_fugc_8_step_protocol` - `wait_until_idle()` not wired to handshake protocol
-   - `fugc_concurrent_collection_stress` - Same integration issue
-   - `fugc_statistics_accuracy` - Stats collection during handshakes
-   - `step_2_write_barrier_activation` - Barrier activation timing
+2. **Priority Fixes:**
+   - Complete the `concurrent.rs` refactoring to use `crossbeam_deque::Worker`
+   - Fix struct field mismatches in parallel marking implementation
+   - Once compilation is fixed, address the 7 previously failing integration tests
 
-**Priority Fix:** Wire `FugcCoordinator::wait_until_idle()` to the new lock-free handshake completion signals.
+**Previously Failing Tests (before refactoring):**
+
+- API integration issues in root scanning and stats collection
+- Timeout issues in `wait_until_idle()` not wired to handshake completion
 
 ## Key Dependencies
 
@@ -426,3 +444,68 @@ Tests demonstrate key FUGC properties including handshake mechanisms, safepoint 
 - `rayon` - Parallel work-stealing for marking phase
 - `psm` & `stacker` - Stack manipulation for root scanning
 - `bitflags` - Object header flag management
+
+**Reimplemented Patterns:**
+
+- Custom exponential backoff (20 lines) → `crossbeam::utils::Backoff` (3 lines)
+- Manual grey stack management (60 lines) → Already have `Worker<T>` from crossbeam-deque
+- Complex handshake coordination (200+ lines) → Could use `rayon` scoped threads
+- Manual worker thread management (150 lines) → `rayon::ThreadPool`
+
+### High-Impact Simplification Opportunities
+
+#### 1. Remove Redundant GreyStack (100% reduction - 60 lines)
+
+The `GreyStack` struct duplicates functionality already provided by `crossbeam_deque::Worker`:
+
+```rust
+// REMOVE: GreyStack entirely
+// KEEP: Just use Worker<ObjectReference> directly
+```
+
+#### 2. Replace Manual Worker Management with Rayon (80% reduction - 120 lines)
+
+```rust
+// OLD: 150+ lines of manual thread spawning and channel coordination
+// NEW: 30 lines with rayon
+use rayon::prelude::*;
+
+pub fn parallel_mark(&self, roots: Vec<ObjectReference>) {
+    roots.par_iter()
+        .for_each(|root| self.mark_object(*root));
+}
+```
+
+#### 3. Simplify Safepoint with crossbeam::epoch (67% reduction - 200 lines)
+
+```rust
+// OLD: Complex TLS management and manual coordination
+// NEW: Leverage epoch-based reclamation
+use crossbeam::epoch;
+
+pub fn request_safepoint(&self, callback: impl Fn()) {
+    let guard = &epoch::pin();
+    callback();
+    guard.flush(); // Automatic coordination
+}
+```
+
+#### 4. Use arc-swap for Read-Heavy Callbacks (60% reduction - 20 lines)
+
+```rust
+// OLD: Mutex<Option<SafepointCallback>>
+// NEW: Lock-free reads
+use arc_swap::ArcSwap;
+current_callback: ArcSwap<Option<SafepointCallback>>,
+```
+
+#### 5. Consolidate Channels with flume (40% reduction - 20 lines)
+
+```rust
+// OLD: Multiple crossbeam channels
+// NEW: Single event bus with flume (10-20% faster)
+use flume::{Sender, Receiver};
+event_bus: (Sender<GcEvent>, Receiver<GcEvent>),
+```
+
+#### 6. Replace all remaining Mutexes with futexes or lock-free/atomic algorithms and datastructures

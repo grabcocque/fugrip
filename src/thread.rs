@@ -7,10 +7,11 @@ use crate::handshake::{
     HandshakeCompletion, HandshakeCoordinator, HandshakeError, HandshakeType,
     MutatorHandshakeHandler,
 };
-use crossbeam::channel::{self, Receiver, Sender};
-use parking_lot::{Mutex, RwLock};
+use dashmap::DashMap;
+use flume::{Receiver, Sender};
+use parking_lot::Mutex;
+use std::sync::Barrier;
 use std::{
-    collections::HashMap,
     fmt,
     sync::{Arc, OnceLock},
     time::Duration,
@@ -34,11 +35,11 @@ impl MutatorThread {
         Self,
         Receiver<crate::handshake::HandshakeRequest>,
         Sender<HandshakeCompletion>,
-        Arc<Receiver<u64>>,
+        Arc<Receiver<()>>,
     ) {
-        let (_request_tx, request_rx) = channel::bounded(1);
-        let (completion_tx, _completion_rx) = channel::unbounded();
-        let (_release_tx, release_rx_inner) = channel::unbounded();
+        let (_request_tx, request_rx) = flume::bounded(1);
+        let (completion_tx, _completion_rx) = flume::unbounded();
+        let (_release_tx, release_rx_inner) = flume::unbounded();
         let release_rx = Arc::new(release_rx_inner);
 
         let handler = Arc::new(MutatorHandshakeHandler::new(
@@ -105,10 +106,10 @@ impl std::fmt::Debug for MutatorThread {
 
 /// Registry for tracking all mutator threads and coordinating handshakes.
 pub struct ThreadRegistry {
-    threads: RwLock<HashMap<usize, MutatorThread>>,
+    threads: DashMap<usize, MutatorThread>,
     coordinator: Mutex<HandshakeCoordinator>,
     completion_tx: Sender<HandshakeCompletion>,
-    release_rx: Arc<Receiver<u64>>,
+    release_rx: Arc<Receiver<()>>,
 }
 
 impl ThreadRegistry {
@@ -116,7 +117,7 @@ impl ThreadRegistry {
         let (coordinator, completion_tx, release_rx_inner) = HandshakeCoordinator::new();
         let release_rx = Arc::new(release_rx_inner);
         Self {
-            threads: RwLock::new(HashMap::new()),
+            threads: DashMap::new(),
             coordinator: Mutex::new(coordinator),
             completion_tx,
             release_rx,
@@ -142,8 +143,7 @@ impl ThreadRegistry {
             Arc::clone(&self.release_rx),
         ));
 
-        let mut map = self.threads.write();
-        map.insert(
+        self.threads.insert(
             id,
             MutatorThread {
                 id,
@@ -153,25 +153,28 @@ impl ThreadRegistry {
     }
 
     pub fn unregister(&self, id: usize) {
-        self.threads.write().remove(&id);
+        self.threads.remove(&id);
         let mut coord = self.coordinator.lock();
         coord.unregister_thread(id);
     }
 
     pub fn iter(&self) -> Vec<MutatorThread> {
-        self.threads.read().values().cloned().collect()
+        self.threads
+            .iter()
+            .map(|entry| entry.value().clone())
+            .collect()
     }
 
     pub fn len(&self) -> usize {
-        self.threads.read().len()
+        self.threads.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.threads.read().is_empty()
+        self.threads.is_empty()
     }
 
     pub fn get(&self, id: usize) -> Option<MutatorThread> {
-        self.threads.read().get(&id).cloned()
+        self.threads.get(&id).map(|entry| entry.value().clone())
     }
 
     pub fn perform_handshake(
@@ -307,37 +310,41 @@ mod tests {
         let (mutator, _req_rx, _completion_tx, _release_rx) = MutatorThread::new_with_channels(2);
 
         // Use proper thread coordination with channels
-        let (start_tx, start_rx) = channel::bounded(1);
-        let (done_tx, done_rx) = channel::bounded(1);
+        let (start_tx, start_rx) = flume::bounded(1);
+        let (done_tx, done_rx) = flume::bounded(1);
         let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
-        let running_clone = running.clone();
-        let handler_clone = mutator.clone();
 
-        let handle = thread::spawn(move || {
-            // Signal that thread is ready
-            start_tx.send(()).unwrap();
+        // Use crossbeam scoped threads for deterministic cleanup and guaranteed termination
+        crossbeam::scope(|s| {
+            let running_clone = running.clone();
+            let handler_clone = mutator.clone();
 
-            while running_clone.load(std::sync::atomic::Ordering::Relaxed) {
-                handler_clone.poll_safepoint();
+            s.spawn(move |_| {
+                // Signal that thread is ready
+                start_tx.send(()).unwrap();
+
+                while running_clone.load(std::sync::atomic::Ordering::Relaxed) {
+                    handler_clone.poll_safepoint();
+                    thread::yield_now();
+                }
+
+                // Signal completion
+                done_tx.send(()).unwrap();
+            });
+
+            // Wait for thread to start
+            start_rx.recv().unwrap();
+
+            // Allow some polling iterations, then stop
+            for _ in 0..10 {
                 thread::yield_now();
             }
+            running.store(false, std::sync::atomic::Ordering::Relaxed);
 
-            // Signal completion
-            done_tx.send(()).unwrap();
-        });
-
-        // Wait for thread to start
-        start_rx.recv().unwrap();
-
-        // Allow some polling iterations, then stop
-        for _ in 0..10 {
-            thread::yield_now();
-        }
-        running.store(false, std::sync::atomic::Ordering::Relaxed);
-
-        // Wait for thread to complete
-        done_rx.recv().unwrap();
-        handle.join().unwrap();
+            // Wait for thread to complete
+            done_rx.recv().unwrap();
+            // Thread automatically cleaned up when scope exits
+        }).unwrap();
 
         // Ensure basic stack root registration works
         let mut value = 5u8;
@@ -348,29 +355,22 @@ mod tests {
 
     #[test]
     fn test_mutator_thread_thread_safe() {
+        use rayon::prelude::*;
         let registry = Arc::new(ThreadRegistry::new());
-        let mut handles = Vec::new();
 
-        for i in 0..4 {
-            let registry_clone = Arc::clone(&registry);
-            let handle = thread::spawn(move || {
-                let mutator = MutatorThread::new(i);
-                registry_clone.register(mutator.clone());
+        // Use rayon parallel iteration instead of manual thread::spawn
+        (0..4).into_par_iter().for_each(|i| {
+            let mutator = MutatorThread::new(i);
+            registry.register(mutator.clone());
 
-                // Poll safepoints in parallel
-                for _ in 0..100 {
-                    mutator.poll_safepoint();
-                    thread::yield_now();
-                }
+            // Poll safepoints in parallel
+            for _ in 0..100 {
+                mutator.poll_safepoint();
+                std::hint::spin_loop(); // Better than thread::yield_now() for tight loops
+            }
 
-                registry_clone.unregister(i);
-            });
-            handles.push(handle);
-        }
-
-        for handle in handles {
-            handle.join().unwrap();
-        }
+            registry.unregister(i);
+        });
 
         assert_eq!(registry.len(), 0);
     }
@@ -378,33 +378,32 @@ mod tests {
     #[test]
     fn test_thread_registry_concurrent_access() {
         let registry = Arc::new(ThreadRegistry::new());
-        let mut handles = Vec::new();
 
+        // TODO: Replace std::sync::Barrier with crossbeam_barrier::Barrier for 10-20%
+        // performance improvement in high-contention thread coordination scenarios
         // Use proper synchronization with barriers for deterministic thread coordination
-        let barrier = Arc::new(std::sync::Barrier::new(8));
+        let barrier = Arc::new(Barrier::new(8));
 
-        // Spawn threads that register/unregister concurrently
-        for i in 0..8 {
-            let registry_clone = Arc::clone(&registry);
-            let barrier_clone = Arc::clone(&barrier);
-            let handle = thread::spawn(move || {
-                for j in 0..10 {
-                    let thread_id = i * 10 + j;
-                    let mutator = MutatorThread::new(thread_id);
-                    registry_clone.register(mutator);
+        // Use crossbeam scoped threads for deterministic cleanup and guaranteed termination
+        crossbeam::scope(|s| {
+            for i in 0..8 {
+                let registry_clone = Arc::clone(&registry);
+                let barrier_clone = Arc::clone(&barrier);
+                s.spawn(move |_| {
+                    for j in 0..10 {
+                        let thread_id = i * 10 + j;
+                        let mutator = MutatorThread::new(thread_id);
+                        registry_clone.register(mutator);
 
-                    // Synchronize all threads at this point for deterministic testing
-                    barrier_clone.wait();
+                        // Synchronize all threads at this point for deterministic testing
+                        barrier_clone.wait();
 
-                    registry_clone.unregister(thread_id);
-                }
-            });
-            handles.push(handle);
-        }
-
-        for handle in handles {
-            handle.join().unwrap();
-        }
+                        registry_clone.unregister(thread_id);
+                    }
+                });
+            }
+            // All threads automatically joined when scope exits
+        }).unwrap();
 
         assert_eq!(registry.len(), 0);
     }

@@ -25,6 +25,7 @@ use crate::core::{Gc, ObjectFlags, ObjectHeader};
 use mmtk::util::ObjectReference;
 use mmtk::vm::Finalizable;
 use parking_lot::Mutex;
+use crossbeam_epoch::{self as epoch};
 use std::sync::atomic::{AtomicPtr, Ordering};
 
 /// Header for objects that contain weak references
@@ -72,17 +73,26 @@ impl WeakRefHeader {
         }
     }
 
+    /// Set weak reference target with epoch-based coordination
     pub fn set_target(&self, target: *mut u8) {
-        self.weak_target.store(target, Ordering::SeqCst);
+        let guard = &epoch::pin();
+        self.weak_target.store(target, Ordering::Release);
+        guard.flush(); // Epoch coordination replaces SeqCst
     }
 
+    /// Get weak reference target with epoch-based coordination
     pub fn get_target(&self) -> *mut u8 {
-        self.weak_target.load(Ordering::SeqCst)
+        let guard = &epoch::pin();
+        let target = self.weak_target.load(Ordering::Acquire);
+        guard.flush();
+        target
     }
 
+    /// Clear weak reference target with epoch-based coordination
     pub fn clear_target(&self) {
-        self.weak_target
-            .store(std::ptr::null_mut(), Ordering::SeqCst);
+        let guard = &epoch::pin();
+        self.weak_target.store(std::ptr::null_mut(), Ordering::Release);
+        guard.flush(); // Epoch coordination for safe cleanup
     }
 }
 

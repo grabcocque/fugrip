@@ -29,6 +29,32 @@ fn spawn_mutator(mutator: MutatorThread) -> (thread::JoinHandle<()>, Arc<AtomicB
     (handle, running)
 }
 
+/// Rayon-based mutator simulation (replaces complex manual thread management)
+fn simulate_mutators_with_rayon_pool(mutators: &[MutatorThread], iterations: usize) -> Vec<usize> {
+    use rayon::prelude::*;
+
+    // Use rayon parallel execution instead of manual thread spawning
+    mutators.par_iter().map(|mutator| {
+        let mut polls = 0;
+        for _ in 0..iterations {
+            mutator.poll_safepoint();
+            polls += 1;
+        }
+        polls
+    }).collect()
+}
+
+/// Simulate mutator behavior using Rayon for parallel execution
+fn simulate_mutators_rayon(mutators: &[MutatorThread], iterations: usize) {
+    use rayon::prelude::*;
+
+    mutators.par_iter().for_each(|mutator| {
+        for _ in 0..iterations {
+            mutator.poll_safepoint();
+        }
+    });
+}
+
 #[test]
 fn complete_fugc_8_step_protocol() {
     // Use shared test fixture for proper DI setup
@@ -326,18 +352,16 @@ fn fugc_concurrent_collection_stress() {
     let c1 = Arc::clone(&coordinator);
     let c2 = Arc::clone(&coordinator);
 
-    let t1 = thread::spawn(move || {
-        c1.trigger_gc();
-        c1.wait_until_idle(Duration::from_millis(2000));
+    rayon::scope(|s| {
+        s.spawn(|_| {
+            c1.trigger_gc();
+            c1.wait_until_idle(Duration::from_millis(2000));
+        });
+        s.spawn(|_| {
+            c2.trigger_gc();
+            c2.wait_until_idle(Duration::from_millis(2000));
+        });
     });
-    let t2 = thread::spawn(move || {
-        //(Duration::from_millis(50));
-        c2.trigger_gc();
-        c2.wait_until_idle(Duration::from_millis(2000));
-    });
-
-    t1.join().unwrap();
-    t2.join().unwrap();
 
     assert!(coordinator.wait_until_idle(Duration::from_millis(2000)));
     assert!(coordinator.get_cycle_stats().cycles_completed >= 1);

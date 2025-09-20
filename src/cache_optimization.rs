@@ -4,8 +4,10 @@
 //! the performance of garbage collection operations through better memory locality.
 
 use crossbeam::queue::SegQueue;
+use itertools::izip;
 use mmtk::util::{Address, ObjectReference};
 use parking_lot::Mutex;
+use rayon::prelude::*;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -105,6 +107,10 @@ impl CacheAwareAllocator {
                 return None;
             }
 
+            // TODO: Add crossbeam_utils::Backoff here for allocation contention
+            // CRITICAL HOT PATH: Allocator CAS loops under high thread contention
+            // Expected 15-30% reduction in CPU spinning during allocation storms
+            // Changes: Add backoff.spin() on CAS failure, backoff.reset() on success
             // Try to update the current pointer atomically
             if self
                 .current_ptr
@@ -529,6 +535,17 @@ impl MemoryLayoutOptimizer {
     /// assert_eq!(layouts.len(), 2);
     /// ```
     pub fn calculate_object_layout(&self, sizes: &[usize]) -> Vec<(Address, usize)> {
+        if sizes.len() <= 100 {
+            // Use sequential processing for small object sets to avoid Rayon overhead
+            return self.calculate_object_layout_sequential(sizes);
+        }
+
+        // Use Rayon for parallel processing of large object sets
+        self.calculate_object_layout_parallel(sizes)
+    }
+
+    /// Sequential implementation for small object sets
+    fn calculate_object_layout_sequential(&self, sizes: &[usize]) -> Vec<(Address, usize)> {
         let mut layouts = Vec::new();
         let mut current_addr = 0x1000; // Start at aligned address
 
@@ -543,6 +560,47 @@ impl MemoryLayoutOptimizer {
             layouts.push((unsafe { Address::from_usize(current_addr) }, size));
             current_addr += aligned_size;
         }
+
+        layouts
+    }
+
+    /// Parallel implementation using Rayon for large object sets
+    fn calculate_object_layout_parallel(&self, sizes: &[usize]) -> Vec<(Address, usize)> {
+        // First, compute size classes in parallel
+        let size_classes: Vec<usize> = sizes
+            .par_iter()
+            .map(|&size| self.get_size_class(size))
+            .collect();
+
+        // Calculate base alignments in parallel
+        let alignments: Vec<usize> = size_classes
+            .par_iter()
+            .map(|&aligned_size| {
+                if aligned_size >= CACHE_LINE_SIZE {
+                    CACHE_LINE_SIZE
+                } else {
+                    1
+                }
+            })
+            .collect();
+
+        // Compute cumulative offsets (sequential dependency)
+        let mut offsets = Vec::with_capacity(sizes.len());
+        let mut current_addr = 0x1000;
+
+        for (i, (&_size, &alignment)) in sizes.iter().zip(&alignments).enumerate() {
+            if alignment > 1 {
+                current_addr = (current_addr + alignment - 1) & !(alignment - 1);
+            }
+            offsets.push(current_addr);
+            current_addr += size_classes[i];
+        }
+
+        // Create final layouts in parallel
+        let layouts: Vec<(Address, usize)> = izip!(sizes.iter(), offsets.iter())
+            .par_bridge()
+            .map(|(&size, &offset)| (unsafe { Address::from_usize(offset) }, size))
+            .collect();
 
         layouts
     }
@@ -572,6 +630,12 @@ impl Default for MemoryLayoutOptimizer {
     }
 }
 
+/// TODO-RAYON-HIGH: Replace LocalityAwareWorkStealer with par_chunks()
+/// Current: 100+ lines of manual local/shared queue management + stealing logic
+/// Rayon: objects.par_chunks(CACHE_LINE_SIZE).for_each(|chunk| process_chunk(chunk))
+/// Impact: 75% reduction, better automatic cache-aware batching
+/// Est. effort: 6 hours (need to preserve NUMA locality semantics)
+///
 /// Work-stealing structure with locality awareness.
 ///
 /// ```

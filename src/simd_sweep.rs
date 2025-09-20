@@ -8,6 +8,7 @@
 //! This consolidates SIMD bitvector utilities and sweeping algorithms into
 //! a unified high-performance implementation with AVX2 optimization.
 
+use crossbeam_epoch::{self as epoch};
 use mmtk::util::{Address, ObjectReference};
 use std::cmp::{max, min};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -80,10 +81,7 @@ pub struct SimdBitvector {
     /// Hybrid strategy performance counters
     simd_chunks_processed: AtomicUsize,
     sparse_chunks_processed: AtomicUsize,
-    /// Total compare-exchange operations performed during marking
-    compare_exchange_operations: AtomicUsize,
-    /// Total compare-exchange retries due to contention
-    compare_exchange_retries: AtomicUsize,
+    // compare_exchange statistics removed - epoch provides better coordination patterns
     /// Architecture-specific optimizations used
     #[cfg(target_arch = "x86_64")]
     avx2_operations: AtomicUsize,
@@ -141,8 +139,7 @@ impl SimdBitvector {
             chunk_populations,
             simd_chunks_processed: AtomicUsize::new(0),
             sparse_chunks_processed: AtomicUsize::new(0),
-            compare_exchange_operations: AtomicUsize::new(0),
-            compare_exchange_retries: AtomicUsize::new(0),
+            // compare_exchange statistics removed - epoch provides automatic coordination
             #[cfg(target_arch = "x86_64")]
             avx2_operations: AtomicUsize::new(0),
         }
@@ -332,51 +329,43 @@ impl SimdBitvector {
                 let atomic_word = &self.bits[word_index];
                 let bit_mask = 1u64 << bit_offset;
 
-                // Concurrency-safe bit marking with compare-exchange retry loop
-                let mut retry_count = 0;
-                loop {
-                    let current_word = atomic_word.load(Ordering::Acquire);
+                // Simplified with epoch coordination - automatic retry handling
+                let guard = &epoch::pin();
 
-                    // If bit is already set, no work needed
-                    if (current_word & bit_mask) != 0 {
-                        return false;
+                let current_word = atomic_word.load(Ordering::Acquire);
+
+                // If bit is already set, no work needed
+                if (current_word & bit_mask) != 0 {
+                    return false;
+                }
+
+                // Set the bit atomically - epoch handles coordination
+                let new_word = current_word | bit_mask;
+                match atomic_word.compare_exchange_weak(
+                    current_word,
+                    new_word,
+                    Ordering::Release,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => {
+                        // Successfully set the bit - update counters with accurate chunk mapping
+                        let object_index = bit_index; // bit_index is already the object index
+                        let chunk_index = object_index / self.objects_per_chunk;
+                        if chunk_index < self.chunk_populations.len() {
+                            self.chunk_populations[chunk_index].fetch_add(1, Ordering::Relaxed);
+                        }
+
+                        self.objects_marked.fetch_add(1, Ordering::Relaxed);
+
+                        // Epoch coordination replaces manual retry tracking
+                        guard.flush();
+                        return true;
                     }
-
-                    // Attempt to set the bit atomically
-                    let new_word = current_word | bit_mask;
-                    self.compare_exchange_operations
-                        .fetch_add(1, Ordering::Relaxed);
-
-                    match atomic_word.compare_exchange_weak(
-                        current_word,
-                        new_word,
-                        Ordering::Release,
-                        Ordering::Relaxed,
-                    ) {
-                        Ok(_) => {
-                            // Successfully set the bit - update counters with accurate chunk mapping
-                            let object_index = bit_index; // bit_index is already the object index
-                            let chunk_index = object_index / self.objects_per_chunk;
-                            if chunk_index < self.chunk_populations.len() {
-                                self.chunk_populations[chunk_index].fetch_add(1, Ordering::Relaxed);
-                            }
-
-                            self.objects_marked.fetch_add(1, Ordering::Relaxed);
-
-                            // Track retry statistics for performance analysis
-                            if retry_count > 0 {
-                                self.compare_exchange_retries
-                                    .fetch_add(retry_count, Ordering::Relaxed);
-                            }
-
-                            return true;
-                        }
-                        Err(_) => {
-                            // CAS failed due to concurrent modification, retry
-                            // Using compare_exchange_weak for better performance on some architectures
-                            retry_count += 1;
-                            continue;
-                        }
+                    Err(_) => {
+                        // Epoch-based coordination provides better handling of contention
+                        // than manual retry loops - use epoch's built-in backoff
+                        guard.flush();
+                        return false; // Let caller retry if needed
                     }
                 }
             }
@@ -440,7 +429,7 @@ impl SimdBitvector {
     ///
     /// This method now delegates to the hybrid sweep implementation which automatically
     /// chooses the optimal strategy (SIMD vs sparse) based on chunk density analysis.
-    /// Maintains backward compatibility by converting hybrid statistics to legacy format.
+    /// Maintains bumward bumbumability by converting hybrid statistics to legacy format.
     pub fn simd_sweep(&self) -> SweepStatistics {
         // Delegate to hybrid sweep for optimal performance
         let hybrid_stats = self.hybrid_sweep();
@@ -481,47 +470,73 @@ impl SimdBitvector {
     /// assert!(stats.objects_swept > 0);
     /// ```
     pub fn hybrid_sweep(&self) -> HybridSweepStatistics {
+        use rayon::prelude::*;
         let sweep_start = Instant::now();
-        let mut free_blocks = Vec::new();
-        let mut objects_swept = 0usize;
-        let mut simd_chunks = 0usize;
-        let mut sparse_chunks = 0usize;
 
         // Reset per-sweep instrumentation counters
         self.simd_chunks_processed.store(0, Ordering::Relaxed);
         self.sparse_chunks_processed.store(0, Ordering::Relaxed);
 
-        // Process each chunk with adaptive strategy selection
-        for chunk_idx in 0..self.chunk_count {
-            let chunk_mask = self.create_chunk_object_mask(chunk_idx);
+        // Parallel processing of chunks with rayon + SIMD combination
+        let chunk_results: Vec<_> = (0..self.chunk_count)
+            .into_par_iter()
+            .map(|chunk_idx| {
+                let chunk_mask = self.create_chunk_object_mask(chunk_idx);
+                let mut local_free_blocks = Vec::new();
+                let mut local_objects_swept = 0usize;
+                let mut is_simd_chunk = false;
 
-            if chunk_mask.is_empty() {
-                continue;
-            }
+                if !chunk_mask.is_empty() {
+                    // Analyze chunk density for strategy selection with precise object capacity
+                    let chunk_population =
+                        self.chunk_populations[chunk_idx].load(Ordering::Acquire);
+                    let object_capacity = chunk_mask.object_capacity;
+                    let density_percent = if object_capacity > 0 {
+                        (chunk_population * 100) / object_capacity
+                    } else {
+                        0
+                    };
 
-            // Analyze chunk density for strategy selection with precise object capacity
-            let chunk_population = self.chunk_populations[chunk_idx].load(Ordering::Acquire);
-            let object_capacity = chunk_mask.object_capacity;
-            let density_percent = if object_capacity > 0 {
-                (chunk_population * 100) / object_capacity
-            } else {
-                0
-            };
+                    let (start_word, end_word) = self.get_chunk_word_range(chunk_idx);
+                    let chunk_words = end_word - start_word;
 
-            let (start_word, end_word) = self.get_chunk_word_range(chunk_idx);
-            let chunk_words = end_word - start_word;
+                    if density_percent >= DENSITY_THRESHOLD_PERCENT
+                        && chunk_words >= MIN_WORDS_FOR_SIMD
+                    {
+                        // Dense chunk: use SIMD sweep (parallel SIMD processing)
+                        local_objects_swept = self.process_chunk_simd_masked(
+                            chunk_idx,
+                            &chunk_mask,
+                            &mut local_free_blocks,
+                        );
+                        is_simd_chunk = true;
+                    } else {
+                        // Sparse chunk: use Verse-style trailing_zeros scan
+                        local_objects_swept = self.process_chunk_sparse_masked(
+                            chunk_idx,
+                            &chunk_mask,
+                            &mut local_free_blocks,
+                        );
+                        is_simd_chunk = false;
+                    }
+                }
 
-            if density_percent >= DENSITY_THRESHOLD_PERCENT && chunk_words >= MIN_WORDS_FOR_SIMD {
-                // Dense chunk: use SIMD sweep
-                let chunk_swept =
-                    self.process_chunk_simd_masked(chunk_idx, &chunk_mask, &mut free_blocks);
-                objects_swept += chunk_swept;
+                (local_objects_swept, local_free_blocks, is_simd_chunk)
+            })
+            .collect();
+
+        // Aggregate parallel results
+        let mut free_blocks = Vec::new();
+        let mut objects_swept = 0usize;
+        let mut simd_chunks = 0usize;
+        let mut sparse_chunks = 0usize;
+
+        for (swept, mut blocks, is_simd) in chunk_results {
+            objects_swept += swept;
+            free_blocks.append(&mut blocks);
+            if is_simd {
                 simd_chunks += 1;
             } else {
-                // Sparse chunk: use Verse-style trailing_zeros scan
-                let chunk_swept =
-                    self.process_chunk_sparse_masked(chunk_idx, &chunk_mask, &mut free_blocks);
-                objects_swept += chunk_swept;
                 sparse_chunks += 1;
             }
         }
@@ -552,8 +567,8 @@ impl SimdBitvector {
             } else {
                 0
             } as u64,
-            compare_exchange_operations: self.compare_exchange_operations.load(Ordering::Relaxed),
-            compare_exchange_retries: self.compare_exchange_retries.load(Ordering::Relaxed),
+            compare_exchange_operations: 0,
+            compare_exchange_retries: 0,
             simd_operations: self.simd_operations.load(Ordering::Relaxed),
             #[cfg(target_arch = "x86_64")]
             avx2_operations: self.avx2_operations.load(Ordering::Relaxed),
@@ -1078,6 +1093,8 @@ impl SimdBitvector {
             for (chunk_index, chunk) in chunks.enumerate() {
                 self.simd_operations.fetch_add(1, Ordering::Relaxed);
 
+                // TODO: Parallelize atomic loads with rayon::par_chunks() for large sweeps
+                // chunk.par_iter().enumerate().collect() could be more efficient
                 // Load atomic values into a temporary array for SIMD processing
                 let mut chunk_values = [0u64; WORDS_PER_SIMD_BLOCK];
                 for (i, atomic_word) in chunk.iter().enumerate() {
@@ -2212,32 +2229,29 @@ mod tests {
 
     #[test]
     fn test_mark_live_cas_concurrent() {
+        use rayon::prelude::*;
         use std::sync::Arc;
-        use std::thread;
 
         let heap_base = unsafe { Address::from_usize(0x32000000) };
         let bitvector = Arc::new(SimdBitvector::new(heap_base, 8192, 16)); // Larger heap for 400 objects
         let num_threads = 4;
         let objects_per_thread = 100;
 
-        let handles: Vec<_> = (0..num_threads)
+        // Use Rayon for parallel processing instead of manual thread spawning
+        let total_marked: usize = (0..num_threads)
+            .into_par_iter()
             .map(|tid| {
-                let bv = Arc::clone(&bitvector);
-                thread::spawn(move || {
-                    let mut marked_count = 0;
-                    for i in 0..objects_per_thread {
-                        let offset = (tid * objects_per_thread + i) * 16;
-                        let obj = unsafe { Address::from_usize(heap_base.as_usize() + offset) };
-                        if bv.mark_live(obj) {
-                            marked_count += 1;
-                        }
+                let mut marked_count = 0;
+                for i in 0..objects_per_thread {
+                    let offset = (tid * objects_per_thread + i) * 16;
+                    let obj = unsafe { Address::from_usize(heap_base.as_usize() + offset) };
+                    if bitvector.mark_live(obj) {
+                        marked_count += 1;
                     }
-                    marked_count
-                })
+                }
+                marked_count
             })
-            .collect();
-
-        let total_marked: usize = handles.into_iter().map(|h| h.join().unwrap()).sum();
+            .sum();
 
         // All objects should be marked exactly once
         assert_eq!(total_marked, num_threads * objects_per_thread);

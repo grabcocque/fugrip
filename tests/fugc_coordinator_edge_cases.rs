@@ -12,8 +12,8 @@ mod edge_case_tests {
         use fugrip::FugcPhase;
         use fugrip::test_utils::TestFixture;
 
-        use std::sync::Arc;
-        use std::thread;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
         use std::time::Duration;
 
         #[test]
@@ -80,19 +80,22 @@ mod edge_case_tests {
 
             coordinator.trigger_gc();
 
-            // Spawn multiple threads waiting for idle
-            let mut handles = vec![];
-            for _ in 0..5 {
-                let coord_clone = Arc::clone(&coordinator);
-                let handle =
-                    thread::spawn(move || coord_clone.wait_until_idle(Duration::from_millis(2000)));
-                handles.push(handle);
-            }
+            // Spawn multiple tasks waiting for idle using rayon scope
+            let success = AtomicUsize::new(0);
+            rayon::scope(|s| {
+                for _ in 0..5 {
+                    let coord_clone = Arc::clone(&coordinator);
+                    let success_ref = &success;
+                    s.spawn(move |_| {
+                        if coord_clone.wait_until_idle(Duration::from_millis(2000)) {
+                            success_ref.fetch_add(1, Ordering::Relaxed);
+                        }
+                    });
+                }
+            });
 
             // All should eventually succeed
-            for handle in handles {
-                assert!(handle.join().unwrap());
-            }
+            assert_eq!(success.load(Ordering::Relaxed), 5);
         }
     }
 
@@ -236,8 +239,7 @@ mod edge_case_tests {
     mod multiple_gc_tests {
 
         use fugrip::test_utils::TestFixture;
-        use std::sync::Arc;
-        use std::thread;
+    use std::sync::Arc;
         use std::time::Duration;
 
         #[test]
@@ -292,21 +294,24 @@ mod edge_case_tests {
             let fixture = TestFixture::new_with_config(0x1c000000, 64 * 1024 * 1024, 4);
             let coordinator = Arc::clone(&fixture.coordinator);
 
-            // Spawn multiple threads triggering GC
-            let mut handles = vec![];
-            for _ in 0..3 {
-                let coord_clone = Arc::clone(&coordinator);
-                let handle = thread::spawn(move || {
-                    coord_clone.trigger_gc();
-                    coord_clone.wait_until_idle(Duration::from_millis(2000))
-                });
-                handles.push(handle);
-            }
+            // Spawn multiple tasks triggering GC using rayon scope
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            let success = AtomicUsize::new(0);
+            rayon::scope(|s| {
+                for _ in 0..3 {
+                    let coord_clone = Arc::clone(&coordinator);
+                    let success_ref = &success;
+                    s.spawn(move |_| {
+                        coord_clone.trigger_gc();
+                        if coord_clone.wait_until_idle(Duration::from_millis(2000)) {
+                            success_ref.fetch_add(1, Ordering::Relaxed);
+                        }
+                    });
+                }
+            });
 
             // All should succeed
-            for handle in handles {
-                assert!(handle.join().unwrap());
-            }
+            assert_eq!(success.load(Ordering::Relaxed), 3);
 
             let stats = coordinator.get_cycle_stats();
             assert!(stats.cycles_completed >= 1);
@@ -317,8 +322,7 @@ mod edge_case_tests {
     mod worker_thread_tests {
 
         use fugrip::test_utils::TestFixture;
-        use std::sync::Arc;
-        use std::thread;
+    use std::sync::Arc;
 
         #[test]
         fn test_worker_thread_start_stop() {
@@ -368,19 +372,18 @@ mod edge_case_tests {
 
             // Perform concurrent operations
             let coord_clone = Arc::clone(&coordinator);
-            let handle = thread::spawn(move || {
-                for _ in 0..10 {
-                    let _ = coord_clone.get_marking_stats();
-                    let _ = coord_clone.get_cache_stats();
-                    // Use proper synchronization instead of sleep
-                    for _ in 0..5 {
-                        std::hint::black_box(());
-                        std::thread::yield_now();
+            rayon::scope(|s| {
+                s.spawn(move |_| {
+                    for _ in 0..10 {
+                        let _ = coord_clone.get_marking_stats();
+                        let _ = coord_clone.get_cache_stats();
+                        for _ in 0..5 {
+                            std::hint::black_box(());
+                            std::thread::yield_now();
+                        }
                     }
-                }
+                });
             });
-
-            handle.join().unwrap();
             coordinator.stop_marking();
         }
     }
@@ -544,12 +547,11 @@ mod edge_case_tests {
     /// Test page allocation and coloring edge cases
     mod page_allocation_tests {
 
-        use fugrip::AllocationColor;
-        use fugrip::test_utils::TestFixture;
-        use mmtk::util::Address;
-        use std::sync::Arc;
-        use std::thread;
-        use std::time::Duration;
+    use fugrip::AllocationColor;
+    use fugrip::test_utils::TestFixture;
+    use mmtk::util::Address;
+    use std::sync::Arc;
+    use std::time::Duration;
 
         #[test]
         fn test_page_allocation_color_out_of_bounds() {
@@ -592,30 +594,25 @@ mod edge_case_tests {
             let fixture = TestFixture::new_with_config(0x2a000000, 32 * 1024 * 1024, 2);
             let coordinator = Arc::clone(&fixture.coordinator);
 
-            // Spawn multiple threads accessing page states
-            let mut handles = vec![];
-            for i in 0..5 {
-                let coord_clone = Arc::clone(&coordinator);
-                let i_copy = i; // Capture i for the closure
-                let handle = thread::spawn(move || {
-                    for j in 0..10 {
-                        let _ = coord_clone.page_allocation_color(i_copy * 10 + j);
-                    }
-                });
-                handles.push(handle);
-            }
-
-            for handle in handles {
-                handle.join().unwrap();
-            }
+            // Access page states concurrently using rayon scope
+            rayon::scope(|s| {
+                for i in 0..5 {
+                    let coord_clone = Arc::clone(&coordinator);
+                    s.spawn(move |_| {
+                        for j in 0..10 {
+                            let _ = coord_clone.page_allocation_color(i * 10 + j);
+                        }
+                    });
+                }
+            });
         }
     }
 
     /// Test statistics and metrics edge cases
     mod statistics_tests {
 
-        use fugrip::test_utils::TestFixture;
-        use std::sync::Arc;
+    use fugrip::test_utils::TestFixture;
+    use std::sync::Arc;
         use std::time::Duration;
 
         #[test]
@@ -832,27 +829,21 @@ mod edge_case_tests {
             let fixture = TestFixture::new_with_config(0x38000000, 32 * 1024 * 1024, 2);
             let coordinator = Arc::clone(&fixture.coordinator);
 
-            // Test concurrent access to benchmark methods
-            let mut handles = vec![];
-
-            for _i in 0..5 {
-                let coord_clone = Arc::clone(&coordinator);
-                let handle = std::thread::spawn(move || {
-                    for j in 0..10 {
-                        if j % 2 == 0 {
-                            coord_clone.bench_reset_bitvector_state();
-                        } else {
-                            coord_clone.bench_build_bitvector();
+            // Test concurrent access to benchmark methods using rayon scope
+            rayon::scope(|s| {
+                for _i in 0..5 {
+                    let coord_clone = Arc::clone(&coordinator);
+                    s.spawn(move |_| {
+                        for j in 0..10 {
+                            if j % 2 == 0 {
+                                coord_clone.bench_reset_bitvector_state();
+                            } else {
+                                coord_clone.bench_build_bitvector();
+                            }
                         }
-                    }
-                });
-                handles.push(handle);
-            }
-
-            // Wait for all threads to complete
-            for handle in handles {
-                handle.join().unwrap();
-            }
+                    });
+                }
+            });
 
             // Coordinator should still be functional
             assert_eq!(coordinator.current_phase(), FugcPhase::Idle);

@@ -4,10 +4,11 @@
 //! and how threads that are blocked in syscalls or long operations can
 //! still participate in GC coordination through the enter/exit mechanism.
 
-use crossbeam::channel::{self};
+use flume::{self};
+use std::sync::Barrier;
 use fugrip::{SafepointManager, pollcheck, safepoint_enter, safepoint_exit};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::Duration;
 
@@ -58,43 +59,45 @@ fn demonstrate_enter_exit_functionality(manager: &SafepointManager, counter: Arc
     let counter_clone = Arc::clone(&counter);
 
     // Create channels for proper coordination
-    let (work_sender, work_receiver) = channel::bounded(1);
-    let (exit_sender, exit_receiver) = channel::bounded(1);
-    let (handshake_sender, handshake_receiver) = channel::bounded(1);
+    let (work_sender, work_receiver) = flume::bounded(1);
+    let (exit_sender, exit_receiver) = flume::bounded(1);
+    let (handshake_sender, handshake_receiver) = flume::bounded(1);
 
-    // Spawn a thread that will block
-    let blocking_thread = thread::spawn(move || {
-        println!("   🧵 Thread starting active work");
+    // Run a scoped task that will block
+    rayon::scope(|s| {
+        s.spawn(|_| {
+            println!("   🧵 Thread starting active work");
 
-        // Do some work with pollchecks
-        for i in 0..5 {
-            pollcheck();
+            // Do some work with pollchecks
+            for i in 0..5 {
+                pollcheck();
 
-            // Small amount of actual work instead of sleep
-            for _ in 0..1000 {
-                std::hint::spin_loop();
+                // Small amount of actual work instead of sleep
+                for _ in 0..1000 {
+                    std::hint::spin_loop();
+                }
+
+                if i == 2 {
+                    println!("   📤 Thread entering exited state (blocking operation)");
+                    safepoint_exit(); // Thread is about to block
+
+                    // Signal that we're entering exit state
+                    let _ = exit_sender.try_send(());
+
+                    // Wait for external coordination signal instead of sleep
+                    let _ = work_receiver.recv_timeout(Duration::from_millis(100));
+
+                    println!("   📥 Thread re-entering active state");
+                    safepoint_enter(); // Thread is active again
+                }
             }
 
-            if i == 2 {
-                println!("   📤 Thread entering exited state (blocking operation)");
-                safepoint_exit(); // Thread is about to block
+            counter_clone.fetch_add(10, Ordering::Relaxed);
+            println!("   ✅ Thread completed work");
 
-                // Signal that we're entering exit state
-                let _ = exit_sender.try_send(());
-
-                // Wait for external coordination signal instead of sleep
-                let _ = work_receiver.recv_timeout(Duration::from_millis(100));
-
-                println!("   📥 Thread re-entering active state");
-                safepoint_enter(); // Thread is active again
-            }
-        }
-
-        counter_clone.fetch_add(10, Ordering::Relaxed);
-        println!("   ✅ Thread completed work");
-
-        // Signal completion
-        let _ = handshake_sender.try_send(());
+            // Signal completion
+            let _ = handshake_sender.try_send(());
+        });
     });
 
     // Wait for thread to signal it's in exit state
@@ -110,9 +113,8 @@ fn demonstrate_enter_exit_functionality(manager: &SafepointManager, counter: Arc
     // Signal thread to continue
     let _ = work_sender.try_send(());
 
-    // Wait for thread completion
+    // Wait for task completion
     let _ = handshake_receiver.recv_timeout(Duration::from_millis(200));
-    blocking_thread.join().unwrap();
     println!("   ✓ Enter/exit demonstration completed");
 }
 
@@ -127,13 +129,13 @@ fn demonstrate_multithreaded_coordination(manager: &SafepointManager, counter: A
     let start_barrier = Arc::new(Barrier::new(num_threads + 1)); // +1 for main thread
     let end_barrier = Arc::new(Barrier::new(num_threads + 1));
 
-    let handles: Vec<_> = (0..num_threads)
-        .map(|thread_id| {
+    rayon::scope(|s| {
+        for thread_id in 0..num_threads {
             let counter_clone = Arc::clone(&counter);
             let start_barrier_clone = Arc::clone(&start_barrier);
             let end_barrier_clone = Arc::clone(&end_barrier);
 
-            thread::spawn(move || {
+            s.spawn(move |_| {
                 println!("   🧵 Thread {} starting", thread_id);
 
                 // Wait for all threads to be ready
@@ -165,41 +167,39 @@ fn demonstrate_multithreaded_coordination(manager: &SafepointManager, counter: A
 
                 // Signal completion
                 end_barrier_clone.wait();
-            })
-        })
-        .collect();
+            });
+        }
 
-    // Wait for all threads to be ready
-    start_barrier.wait();
+        // Main thread participates in synchronization inside the scope
+        start_barrier.wait();
 
-    // Give threads a moment to start their work
-    for _ in 0..5000 {
-        std::hint::spin_loop();
-    }
-
-    // Perform multiple handshakes with proper coordination
-    for handshake_id in 0..3 {
-        println!("   📞 Requesting handshake #{}", handshake_id + 1);
-        let counter_clone = Arc::clone(&counter);
-
-        manager.request_soft_handshake(Box::new(move || {
-            counter_clone.fetch_add(1000, Ordering::Relaxed);
-            println!("   🤝 Handshake #{} callback executed", handshake_id + 1);
-        }));
-
-        // Small delay between handshakes using work instead of sleep
-        for _ in 0..20000 {
+        // Give threads a moment to start their work
+        for _ in 0..5000 {
             std::hint::spin_loop();
         }
-    }
 
-    // Wait for all threads to complete
-    end_barrier.wait();
-    for handle in handles {
-        handle.join().unwrap();
-    }
+        // Perform multiple handshakes with proper coordination
+        for handshake_id in 0..3 {
+            println!("   📞 Requesting handshake #{}", handshake_id + 1);
+            let counter_clone = Arc::clone(&counter);
 
-    println!("   ✓ Multi-threaded coordination completed");
+            manager.request_soft_handshake(Box::new(move || {
+                counter_clone.fetch_add(1000, Ordering::Relaxed);
+                println!("   🤝 Handshake #{} callback executed", handshake_id + 1);
+            }));
+
+            // Small delay between handshakes using work instead of sleep
+            for _ in 0..20000 {
+                std::hint::spin_loop();
+            }
+        }
+
+        // Wait for all threads to complete
+        end_barrier.wait();
+        // rayon::scope waits for all tasks to complete
+
+        println!("   ✓ Multi-threaded coordination completed");
+    });
 }
 
 /// Demonstrate advanced coordination patterns

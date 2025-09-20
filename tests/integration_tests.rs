@@ -134,42 +134,36 @@ fn memory_management_workflow() {
 #[test]
 fn concurrent_thread_simulation() {
     use std::sync::Arc;
-    use std::thread;
 
     // Simulate multiple threads working with GC components
     let registry = Arc::new(ThreadRegistry::new());
-    let mut handles = vec![];
-
-    // Spawn threads that create mutators and do GC operations
-    for thread_id in 0..3 {
-        let registry_clone = Arc::clone(&registry);
-        let handle = thread::spawn(move || {
-            // Create mutator for this thread
-            let mutator = MutatorThread::new(thread_id);
-            registry_clone.register(mutator.clone());
-
-            // Create some thread-local objects
-            let obj_data = [thread_id as u8; 8];
-            let gc_handle = Gc::<u8>::from_raw(obj_data.as_ptr() as *mut u8);
-            let weak_ref = WeakRef::new(gc_handle);
-
-            // Verify weak reference works
-            assert!(weak_ref.is_alive());
-            let upgraded = weak_ref.upgrade();
-            assert!(upgraded.is_some());
-
-            // Return the mutator ID for verification
-            mutator.id()
-        });
-        handles.push(handle);
-    }
-
-    // Wait for all threads and collect results
     let mut thread_ids = vec![];
-    for handle in handles {
-        let id = handle.join().unwrap();
-        thread_ids.push(id);
-    }
+    rayon::scope(|s| {
+        for thread_id in 0..3 {
+            let registry_clone = Arc::clone(&registry);
+            s.spawn(move |_| {
+                // Create mutator for this thread
+                let mutator = MutatorThread::new(thread_id);
+                registry_clone.register(mutator.clone());
+
+                // Create some thread-local objects
+                let obj_data = [thread_id as u8; 8];
+                let gc_handle = Gc::<u8>::from_raw(obj_data.as_ptr() as *mut u8);
+                let weak_ref = WeakRef::new(gc_handle);
+
+                // Verify weak reference works
+                assert!(weak_ref.is_alive());
+                let upgraded = weak_ref.upgrade();
+                assert!(upgraded.is_some());
+
+                // Return the mutator ID for verification
+                // Note: capture result via channel-like pattern
+                // but here we push into a Mutex-free vector after scope using IDs from registry
+            });
+        }
+    });
+    // After scope, verify via registry directly
+    thread_ids = registry.iter().into_iter().map(|m| m.id()).collect();
 
     // Verify all threads completed successfully
     thread_ids.sort();

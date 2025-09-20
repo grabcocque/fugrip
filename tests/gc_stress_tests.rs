@@ -10,9 +10,10 @@
 use crossbeam::channel;
 use mmtk::util::{Address, ObjectReference};
 use parking_lot::Mutex;
+use rayon::prelude::*;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Barrier};
-use std::thread;
+use std::sync::Barrier;
 use std::time::{Duration, Instant};
 
 use fugrip::FugcCoordinator;
@@ -57,18 +58,20 @@ fn stress_concurrent_marking_high_contention() {
     let (work_done_tx, work_done_rx) = channel::bounded::<usize>(STRESS_THREAD_COUNT);
     let (shutdown_tx, shutdown_rx) = channel::bounded::<()>(STRESS_THREAD_COUNT);
 
+    // TODO: Replace std::sync::Barrier with crossbeam_barrier::Barrier for consistency
+    // with crossbeam ecosystem and better performance under stress testing loads
     let start_barrier = Arc::new(Barrier::new(STRESS_THREAD_COUNT));
-    let mut handles = Vec::new();
 
-    // Spawn stress test threads
-    for thread_id in 0..STRESS_THREAD_COUNT {
-        let coordinator = Arc::clone(&coordinator);
-        let objects = Arc::clone(&shared_objects);
-        let work_done_tx = work_done_tx.clone();
-        let shutdown_rx = shutdown_rx.clone();
-        let start_barrier = Arc::clone(&start_barrier);
+    // Use Rayon scope for better thread management than manual spawning
+    rayon::scope(|s| {
+        for thread_id in 0..STRESS_THREAD_COUNT {
+            let coordinator = Arc::clone(&coordinator);
+            let objects = Arc::clone(&shared_objects);
+            let work_done_tx = work_done_tx.clone();
+            let shutdown_rx = shutdown_rx.clone();
+            let start_barrier = Arc::clone(&start_barrier);
 
-        let handle = thread::spawn(move || {
+            s.spawn(move |_| {
             start_barrier.wait(); // Synchronize start for maximum contention
             let mut local_ops = 0;
             let target_operations_per_thread = 1000;
@@ -137,10 +140,9 @@ fn stress_concurrent_marking_high_contention() {
 
             // Signal work completion
             work_done_tx.send(local_ops).unwrap();
-        });
-
-        handles.push(handle);
-    }
+            });
+        }
+    });
 
     // Drop the senders to clean up channels
     drop(work_done_tx);
@@ -160,10 +162,7 @@ fn stress_concurrent_marking_high_contention() {
         }
     }
 
-    // Wait for all threads to complete
-    for handle in handles {
-        handle.join().expect("Stress test thread should complete");
-    }
+    // Rayon scope automatically waits for all spawned tasks to complete
 
     // Verify no crashes and reasonable operation counts
     assert!(
@@ -195,13 +194,10 @@ fn stress_cache_aware_allocation() {
             .collect::<Vec<_>>(),
     );
 
-    let mut handles = Vec::new();
-
-    for thread_id in 0..num_allocators {
+    // Use rayon parallel iteration instead of manual thread spawning
+    (0..num_allocators).into_par_iter().for_each(|thread_id| {
         let stop_flag = Arc::clone(&stop_flag);
         let stats = Arc::clone(&allocation_stats);
-
-        let handle = thread::spawn(move || {
             let base = unsafe { Address::from_usize(0x20000000 + thread_id * 64 * 1024 * 1024) };
             let allocator = CacheAwareAllocator::new(base, 32 * 1024 * 1024); // 32MB per thread
 
@@ -224,11 +220,8 @@ fn stress_cache_aware_allocation() {
                 }
             }
 
-            stats[thread_id].store(successful_allocations, Ordering::Relaxed);
-        });
-
-        handles.push(handle);
-    }
+        stats[thread_id].store(successful_allocations, Ordering::Relaxed);
+    });
 
     // Use work-based termination instead of sleep
     let target_allocations = allocations_per_thread * num_allocators; // Target total allocations across all threads
@@ -248,12 +241,7 @@ fn stress_cache_aware_allocation() {
 
     stop_flag.store(true, Ordering::Relaxed);
 
-    // Wait for completion
-    for handle in handles {
-        handle
-            .join()
-            .expect("Allocation stress test should complete");
-    }
+    // Rayon parallel iteration automatically waits for completion
 
     // Verify reasonable allocation success rates
     let total_successful: usize = allocation_stats
@@ -286,14 +274,15 @@ fn stress_work_stealing_locality() {
     );
 
     let stop_flag = Arc::new(AtomicBool::new(false));
-    let mut handles = Vec::new();
 
-    for worker_id in 0..num_workers {
-        let stealers = Arc::clone(&shared_stealers);
-        let counts = Arc::clone(&operation_counts);
-        let stop_flag = Arc::clone(&stop_flag);
+    // Use Rayon scope for better work-stealing thread management
+    rayon::scope(|s| {
+        for worker_id in 0..num_workers {
+            let stealers = Arc::clone(&shared_stealers);
+            let counts = Arc::clone(&operation_counts);
+            let stop_flag = Arc::clone(&stop_flag);
 
-        let handle = thread::spawn(move || {
+            s.spawn(move |_| {
             let mut local_operations = 0;
 
             // Generate worker-specific objects with locality
@@ -351,35 +340,29 @@ fn stress_work_stealing_locality() {
 
             // Final update of shared counter
             counts[worker_id].store(local_operations, Ordering::Relaxed);
-        });
-
-        handles.push(handle);
-    }
-
-    // Use work-based termination for work stealing test
-    let target_total_operations = 100000; // Target total operations across all workers
-
-    loop {
-        let total_ops: usize = operation_counts
-            .iter()
-            .map(|count| count.load(Ordering::Relaxed))
-            .sum();
-
-        if total_ops >= target_total_operations {
-            break;
+            });
         }
 
-        thread::yield_now();
-    }
+        // Run the work-based termination loop inside the scope
+        let target_total_operations = 100000; // Target total operations across all workers
 
-    stop_flag.store(true, Ordering::Relaxed);
+        loop {
+            let total_ops: usize = operation_counts
+                .iter()
+                .map(|count| count.load(Ordering::Relaxed))
+                .sum();
 
-    // Wait for completion
-    for handle in handles {
-        handle
-            .join()
-            .expect("Work stealing stress test should complete");
-    }
+            if total_ops >= target_total_operations {
+                break;
+            }
+
+            std::hint::spin_loop(); // Better than yield_now for tight loops
+        }
+
+        stop_flag.store(true, Ordering::Relaxed);
+    });
+
+    // Rayon scope automatically waits for all spawned tasks to complete
 
     // Verify operations completed
     let total_operations: usize = operation_counts

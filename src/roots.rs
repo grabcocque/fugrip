@@ -151,6 +151,8 @@ impl Scanning<RustVM> for RustScanning {
         let body_size = header.body_size;
         let num_potential_slots = body_size / std::mem::size_of::<*const u8>();
 
+        // TODO: Parallelize with rayon::par_iter() for large objects to reduce GC pause time
+        // (0..num_potential_slots).into_par_iter().for_each(|i| { ... })
         for i in 0..num_potential_slots {
             let slot_ptr = unsafe { body_start.add(i * std::mem::size_of::<*const u8>()) };
             let potential_ref = unsafe { slot_ptr.cast::<*const u8>().read() };
@@ -186,6 +188,8 @@ impl Scanning<RustVM> for RustScanning {
             let roots = roots.borrow();
             let mut slots = Vec::new();
 
+            // TODO: Parallelize stack root processing with rayon::par_iter() for multiple threads
+            // roots.frames.par_iter().for_each(|&frame_addr| { ... })
             // Process each registered stack root
             for &frame_addr in &roots.frames {
                 let frame_ptr = frame_addr as *mut u8;
@@ -385,28 +389,20 @@ mod tests {
 
     #[test]
     fn test_global_roots_thread_safety() {
-        use std::sync::Mutex;
+        use parking_lot::Mutex;
+        use rayon::prelude::*;
         let global_roots = Arc::new(Mutex::new(GlobalRoots::default()));
 
-        // Test concurrent access
-        let handles: Vec<_> = (0..4)
-            .map(|i| {
-                let roots = Arc::clone(&global_roots);
-                std::thread::spawn(move || {
-                    for j in 0..10 {
-                        let ptr = ((i * 100 + j) * 0x1000) as *mut u8;
-                        roots.lock().unwrap().register(ptr);
-                    }
-                })
-            })
-            .collect();
-
-        for handle in handles {
-            handle.join().unwrap();
-        }
+        // Test concurrent access with rayon instead of manual thread::spawn
+        (0..4).into_par_iter().for_each(|i| {
+            for j in 0..10 {
+                let ptr = ((i * 100 + j) * 0x1000) as *mut u8;
+                global_roots.lock().register(ptr);
+            }
+        });
 
         // Should have 40 total registrations
-        assert_eq!(global_roots.lock().unwrap().iter().count(), 40);
+        assert_eq!(global_roots.lock().iter().count(), 40);
     }
 
     #[test]
