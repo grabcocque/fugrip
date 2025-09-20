@@ -9,15 +9,16 @@
 //! - Write barrier consistency
 //! - Root scanning accuracy
 
+use arc_swap::ArcSwap;
 use mmtk::util::{Address, ObjectReference};
-use parking_lot::Mutex;
 use proptest::prelude::*;
 use quickcheck::{TestResult, quickcheck};
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use fugrip::cache_optimization::{CacheAwareAllocator, LocalityAwareWorkStealer};
+use fugrip::cache_optimization::CacheAwareAllocator;
 use fugrip::concurrent::{BlackAllocator, ObjectColor, TricolorMarking, WriteBarrier};
+use fugrip::test_utils::LocalityAwareWorkStealer;
 
 // Note: ConcurrentMarkingCoordinator was replaced by ParallelMarkingCoordinator.
 // Some legacy fuzz tests still reference the old name; gate them for now.
@@ -250,7 +251,7 @@ fn fuzz_concurrent_marking_coordinator() {
 
         let heap_base = unsafe { Address::from_usize(0x10000000) };
         let thread_registry = Arc::new(fugrip::thread::ThreadRegistry::new());
-        let global_roots = Arc::new(Mutex::new(fugrip::roots::GlobalRoots::default()));
+        let global_roots = arc_swap::ArcSwap::new(Arc::new(fugrip::roots::GlobalRoots::default()));
 
         let coordinator = ConcurrentMarkingCoordinator::new(
             heap_base,
@@ -488,7 +489,7 @@ fn stress_test_concurrent_gc_operations() {
 
     let heap_base = unsafe { Address::from_usize(0x10000000) };
     let thread_registry = Arc::new(fugrip::thread::ThreadRegistry::new());
-    let global_roots = Arc::new(Mutex::new(fugrip::roots::GlobalRoots::default()));
+    let global_roots = arc_swap::ArcSwap::new(Arc::new(fugrip::roots::GlobalRoots::default()));
 
     let coordinator = Arc::new(ConcurrentMarkingCoordinator::new(
         heap_base,
@@ -499,103 +500,107 @@ fn stress_test_concurrent_gc_operations() {
     ));
 
     let stop_flag = Arc::new(AtomicBool::new(false));
-    let mut handles = Vec::new();
     let (progress_tx, progress_rx) = crossbeam::channel::bounded(4);
+    let (done_tx, done_rx) = crossbeam::channel::bounded(4);
 
-    // Spawn multiple threads performing different operations
-    for thread_id in 0..4 {
-        let coordinator = Arc::clone(&coordinator);
-        let stop_flag = Arc::clone(&stop_flag);
+    // Spawn multiple scoped workers performing different operations using crossbeam::scope
+    crossbeam::scope(|s| {
+        for thread_id in 0..4 {
+            let coordinator = Arc::clone(&coordinator);
+            let stop_flag = Arc::clone(&stop_flag);
+            let progress_tx = progress_tx.clone();
 
-        let progress_tx = progress_tx.clone();
-        let handle = thread::spawn(move || {
-            let mut operation_count = 0;
-            let mut signaled_progress = false;
+            s.spawn(move |_| {
+                let mut operation_count = 0;
+                let mut signaled_progress = false;
 
-            while !stop_flag.load(Ordering::Relaxed) && operation_count < 1000 {
-                // Generate objects for this thread
-                let mut objects = Vec::new();
-                for i in 0..50 {
-                    let addr =
-                        unsafe { Address::from_usize(0x10000000 + thread_id * 1000000 + i * 128) };
-                    if let Some(obj) = ObjectReference::from_raw_address(addr) {
-                        objects.push(obj);
-                    }
-                }
-
-                match operation_count % 4 {
-                    0 => {
-                        // Cache-optimized marking
-                        coordinator.mark_objects_cache_optimized(&objects);
-                    }
-                    1 => {
-                        // Black allocation
-                        for obj in &objects[..10] {
-                            coordinator.black_allocator().allocate_black(*obj);
+                while !stop_flag.load(Ordering::Relaxed) && operation_count < 1000 {
+                    // Generate objects for this thread
+                    let mut objects = Vec::new();
+                    for i in 0..50 {
+                        let addr = unsafe {
+                            Address::from_usize(0x10000000 + thread_id * 1000000 + i * 128)
+                        };
+                        if let Some(obj) = ObjectReference::from_raw_address(addr) {
+                            objects.push(obj);
                         }
                     }
-                    2 => {
-                        // Write barrier operations using valid stack memory
-                        let barrier = coordinator.write_barrier();
-                        if !objects.is_empty() {
-                            let src = objects[0];
-                            let target = objects[objects.len() - 1];
 
-                            // Use a local variable instead of writing to invalid memory
-                            let mut slot_value = src;
-                            let slot_ptr = &mut slot_value as *mut ObjectReference;
-
-                            unsafe {
-                                barrier.write_barrier(slot_ptr, target);
+                    match operation_count % 4 {
+                        0 => {
+                            // Cache-optimized marking
+                            coordinator.mark_objects_cache_optimized(&objects);
+                        }
+                        1 => {
+                            // Black allocation
+                            if objects.len() >= 10 {
+                                for obj in &objects[..10] {
+                                    coordinator.black_allocator().allocate_black(*obj);
+                                }
                             }
                         }
+                        2 => {
+                            // Write barrier operations using valid stack memory
+                            let barrier = coordinator.write_barrier();
+                            if !objects.is_empty() {
+                                let src = objects[0];
+                                let target = objects[objects.len() - 1];
+
+                                // Use a local variable instead of writing to invalid memory
+                                let mut slot_value = src;
+                                let slot_ptr = &mut slot_value as *mut ObjectReference;
+
+                                unsafe {
+                                    barrier.write_barrier(slot_ptr, target);
+                                }
+                            }
+                        }
+                        3 => {
+                            // Statistics and status checks
+                            let _stats = coordinator.get_stats();
+                            let _cache_stats = coordinator.get_cache_stats();
+                        }
+                        _ => unreachable!(),
                     }
-                    3 => {
-                        // Statistics and status checks
-                        let _stats = coordinator.get_stats();
-                        let _cache_stats = coordinator.get_cache_stats();
+
+                    operation_count += 1;
+
+                    if !signaled_progress && operation_count >= 50 {
+                        let _ = progress_tx.send(());
+                        signaled_progress = true;
                     }
-                    _ => unreachable!(),
+
+                    // Yield to other threads occasionally
+                    if operation_count % 10 == 0 {
+                        thread::yield_now();
+                    }
                 }
 
-                operation_count += 1;
+                // Send completed operation_count back to test harness
+                let _ = done_tx.send(operation_count);
+            });
+        }
 
-                if !signaled_progress && operation_count >= 50 {
-                    let _ = progress_tx.send(());
-                    signaled_progress = true;
-                }
+        drop(progress_tx);
 
-                // Yield to other threads occasionally
-                if operation_count % 10 == 0 {
-                    thread::yield_now();
-                }
-            }
+        for _ in 0..4 {
+            progress_rx
+                .recv()
+                .expect("Thread failed to report progress");
+        }
 
-            operation_count
-        });
+        // Signal stop
+        stop_flag.store(true, Ordering::Relaxed);
 
-        handles.push(handle);
-    }
+        // Collect per-worker completed counts
+        let mut total_operations = 0;
+        for _ in 0..4 {
+            total_operations += done_rx.recv().unwrap_or(0);
+        }
 
-    drop(progress_tx);
-
-    for _ in 0..4 {
-        progress_rx
-            .recv()
-            .expect("Thread failed to report progress");
-    }
-
-    // Use proper crossbeam synchronization - let threads complete their work naturally
-    // No sleep calls - threads will terminate when they hit their operation limits
-
-    // Signal stop
-    stop_flag.store(true, Ordering::Relaxed);
-
-    // Wait for all threads to complete
-    let mut total_operations = 0;
-    for handle in handles {
-        total_operations += handle.join().expect("Thread should complete successfully");
-    }
+        total_operations
+    })
+    .unwrap();
 
     // Verify we performed a reasonable number of operations
     assert!(

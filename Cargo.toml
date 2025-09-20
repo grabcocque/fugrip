@@ -29,6 +29,7 @@ dashmap = ">=6.1"
 itertools = ">=0.13"
 flume = "0.11.1"
 arc-swap = "1.7.1"
+wide = "0.7.33"
 
 # Consolidated benchmark suite covering all FUGC performance aspects
 [[bench]]

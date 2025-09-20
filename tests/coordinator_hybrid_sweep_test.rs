@@ -121,7 +121,8 @@ fn test_coordinator_direct_barrier_activation() {
     let coordinator_clone = Arc::clone(&coordinator);
 
     // Spawn a monitoring thread that will signal when barrier gets activated
-    let monitor_handle = thread::spawn(move || {
+    crossbeam::scope(|s| {
+        let monitor_handle = s.spawn(move |_| {
         for _ in 0..1000 {
             // Poll for a reasonable number of iterations
             if coordinator_clone.write_barrier().is_active() {
@@ -132,19 +133,21 @@ fn test_coordinator_direct_barrier_activation() {
         }
         // If we never detected activation, send false
         let _ = barrier_activated_tx.send(false);
-    });
+        });
 
-    // Trigger GC which should activate barriers
-    coordinator.trigger_gc();
+        // Trigger GC which should activate barriers
+        coordinator.trigger_gc();
 
-    // Wait for either barrier activation signal or timeout
-    let barrier_was_activated = barrier_activated_rx
-        .recv_timeout(Duration::from_millis(500))
-        .unwrap_or(false);
+        // Wait for either barrier activation signal or timeout
+        let barrier_was_activated = barrier_activated_rx
+            .recv_timeout(Duration::from_millis(500))
+            .unwrap_or(false);
 
-    // Wait for the collection to complete and monitoring thread to finish
-    coordinator.wait_until_idle(Duration::from_millis(200));
-    let _ = monitor_handle.join();
+        // Wait for the collection to complete
+        coordinator.wait_until_idle(Duration::from_millis(200));
+
+        barrier_was_activated
+    }).unwrap();
 
     // Note: Barrier activation may not occur in all test scenarios due to timing
     // This test validates the monitoring infrastructure works correctly
@@ -207,11 +210,12 @@ fn test_concurrent_marking_with_coordinator() {
     let objects_per_thread = 500;
     let running = Arc::new(AtomicBool::new(true));
 
-    let handles: Vec<_> = (0..num_threads)
+    use rayon::prelude::*;
+    let results: Vec<_> = (0..num_threads)
+        .into_par_iter()
         .map(|tid| {
             let bv = Arc::clone(&bitvector);
             let _run = Arc::clone(&running);
-            thread::spawn(move || {
                 let mut marked = 0;
                 // Each thread marks exactly its assigned range of objects
                 for i in 0..objects_per_thread {
@@ -222,7 +226,6 @@ fn test_concurrent_marking_with_coordinator() {
                     }
                 }
                 marked
-            })
         })
         .collect();
 
@@ -238,7 +241,7 @@ fn test_concurrent_marking_with_coordinator() {
     running.store(false, Ordering::Relaxed);
     drop(work_done_tx); // Signal channels closed
 
-    let total_marked: usize = handles.into_iter().map(|h| h.join().unwrap()).sum();
+    let total_marked: usize = results.into_iter().sum();
     assert_eq!(
         total_marked,
         num_threads * objects_per_thread,

@@ -8,13 +8,13 @@ use crate::fugc_coordinator::FugcCoordinator;
 use crate::roots::GlobalRoots;
 use crate::safepoint::SafepointManager;
 use crate::thread::ThreadRegistry;
-use parking_lot::Mutex;
+use arc_swap::ArcSwap;
 use std::sync::{Arc, OnceLock};
 
 /// Dependency injection container for FUGC components
 pub struct DIContainer {
     thread_registry: Arc<ThreadRegistry>,
-    global_roots: Arc<Mutex<GlobalRoots>>,
+    global_roots: ArcSwap<GlobalRoots>,
     safepoint_manager: OnceLock<Arc<SafepointManager>>,
     fugc_coordinator: OnceLock<Arc<FugcCoordinator>>,
 }
@@ -23,7 +23,7 @@ impl DIContainer {
     /// Create a new DI container with default implementations
     pub fn new() -> Self {
         let thread_registry = Arc::new(ThreadRegistry::new());
-        let global_roots = Arc::new(Mutex::new(GlobalRoots::default()));
+        let global_roots = ArcSwap::new(Arc::new(GlobalRoots::default()));
 
         Self {
             thread_registry,
@@ -45,7 +45,7 @@ impl DIContainer {
     }
 
     /// Get the global roots
-    pub fn global_roots(&self) -> &Arc<Mutex<GlobalRoots>> {
+    pub fn global_roots(&self) -> &ArcSwap<GlobalRoots> {
         &self.global_roots
     }
 
@@ -194,8 +194,8 @@ mod tests {
             container2.thread_registry()
         ));
         assert!(!Arc::ptr_eq(
-            container1.global_roots(),
-            container2.global_roots()
+            &container1.global_roots().load(),
+            &container2.global_roots().load()
         ));
     }
 

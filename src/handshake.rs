@@ -3,9 +3,8 @@
 
 use crossbeam_epoch::{self as epoch};
 use crossbeam_utils::atomic::AtomicCell;
-use dashmap::DashMap;
+use dashmap::{DashMap, DashSet};
 use flume::{Receiver, RecvTimeoutError, Sender, TryRecvError};
-use parking_lot::Mutex;
 use std::{
     sync::Arc,
     time::{Duration, Instant},
@@ -76,14 +75,15 @@ impl HandshakeCoordinator {
     /// Register a new mutator thread for handshake coordination
     /// Register a new mutator thread and return the receiver the thread will use
     /// to get handshake requests. The coordinator keeps the Sender internally.
-    pub fn register_thread(&mut self, thread_id: usize) -> Receiver<HandshakeRequest> {
+    /// Lock-free operation using DashMap - no TODO required.
+    pub fn register_thread(&self, thread_id: usize) -> Receiver<HandshakeRequest> {
         let (request_tx, request_rx) = flume::bounded(1);
         self.thread_requests.insert(thread_id, request_tx);
         request_rx
     }
 
-    /// Unregister a mutator thread
-    pub fn unregister_thread(&mut self, thread_id: usize) {
+    /// Unregister a mutator thread - lock-free using DashMap
+    pub fn unregister_thread(&self, thread_id: usize) {
         self.thread_requests.remove(&thread_id);
     }
 
@@ -161,8 +161,8 @@ pub struct MutatorHandshakeHandler {
     release_rx: Arc<Receiver<()>>,
     /// Atomic state machine
     state: AtomicCell<HandshakeState>,
-    /// Stack roots storage
-    stack_roots: Mutex<Vec<usize>>,
+    /// Stack roots storage - lock-free set with automatic deduplication
+    stack_roots: DashSet<usize>,
 }
 
 impl MutatorHandshakeHandler {
@@ -178,7 +178,7 @@ impl MutatorHandshakeHandler {
             completion_tx,
             release_rx,
             state: AtomicCell::new(HandshakeState::Running),
-            stack_roots: Mutex::new(Vec::new()),
+            stack_roots: DashSet::new(),
         }
     }
 
@@ -246,8 +246,8 @@ impl MutatorHandshakeHandler {
         // Perform handshake-specific operations
         let stack_roots = match request.callback_type {
             HandshakeType::StackScan => {
-                // Collect stack roots
-                self.stack_roots.lock().clone()
+                // Collect stack roots - lock-free iteration over DashSet
+                self.stack_roots.iter().map(|entry| *entry.key()).collect()
             }
             HandshakeType::CacheReset => {
                 // Reset caches
@@ -273,23 +273,19 @@ impl MutatorHandshakeHandler {
         }
     }
 
-    /// Add stack root (thread-safe)
+    /// Add stack root - lock-free with automatic deduplication
     pub fn add_stack_root(&self, root: usize) {
-        let mut roots = self.stack_roots.lock();
-        if roots.contains(&root) {
-            return;
-        }
-        roots.push(root);
+        self.stack_roots.insert(root);
     }
 
-    /// Clear stack roots (thread-safe)
+    /// Clear stack roots - lock-free bulk clear
     pub fn clear_stack_roots(&self) {
-        self.stack_roots.lock().clear();
+        self.stack_roots.clear();
     }
 
-    /// Get current stack roots (thread-safe)
+    /// Get current stack roots - lock-free iteration
     pub fn get_stack_roots(&self) -> Vec<usize> {
-        self.stack_roots.lock().clone()
+        self.stack_roots.iter().map(|entry| *entry.key()).collect()
     }
 }
 
@@ -331,7 +327,6 @@ impl std::error::Error for HandshakeError {}
 mod tests {
     use super::*;
     use std::sync::atomic::Ordering;
-    use std::thread;
     use std::time::Duration;
 
     #[test]
@@ -352,22 +347,28 @@ mod tests {
         let result = crossbeam::scope(|s| {
             let running_clone = running.clone();
             s.spawn(move |_| {
-                // TODO: Replace thread::yield_now() with crossbeam_utils::Backoff for adaptive coordination
-                // Expected 5-15% improvement in handshake efficiency under varying load
-                // Changes: backoff.snooze() provides adaptive spin → yield → park escalation
+                // Adaptive coordination via backoff: spin → yield → park escalation.
+                // We use `backoff.snooze()` here because the polling loop may
+                // sometimes wait longer (waiting for the coordinator release),
+                // so an escalating strategy that starts with a few spins but
+                // escalates to yielding/parking reduces CPU waste under longer
+                // waits while still remaining responsive for short waits.
+                let backoff = crossbeam_utils::Backoff::new();
                 while running_clone.load(Ordering::Relaxed) {
                     handler_ref.poll_safepoint();
-                    thread::yield_now();
+                    backoff.snooze();
                 }
             });
 
             // Perform handshake with epoch coordination
-            let result = coordinator.perform_handshake(HandshakeType::StackScan, Duration::from_millis(100));
+            let result =
+                coordinator.perform_handshake(HandshakeType::StackScan, Duration::from_millis(100));
 
             // Stop thread and wait for automatic cleanup when scope exits
             running.store(false, Ordering::Relaxed);
             result
-        }).unwrap();
+        })
+        .unwrap();
 
         // Verify handshake succeeded - simplified verification without sequence IDs
         assert!(result.is_ok());

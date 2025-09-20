@@ -1,5 +1,6 @@
 # Rust
-/target
+target/
+harnesses/target/
 
 **/*.rs.bk
 **/*.rs.bk.*

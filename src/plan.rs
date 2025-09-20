@@ -38,7 +38,7 @@ use crate::fugc_coordinator::FugcCoordinator;
 /// ```
 pub struct FugcPlanManager {
     /// The MMTk instance configured with MarkSweep plan
-    mmtk: Option<&'static MMTK<RustVM>>,
+    mmtk: std::sync::OnceLock<&'static MMTK<RustVM>>,
 
     /// FUGC 8-step protocol coordinator (primary coordinator)
     fugc_coordinator: Arc<FugcCoordinator>,
@@ -91,7 +91,7 @@ impl FugcPlanManager {
         let fugc_coordinator = container.create_fugc_coordinator(heap_base, heap_size, num_workers);
 
         Self {
-            mmtk: None,
+            mmtk: std::sync::OnceLock::new(),
             fugc_coordinator: fugc_coordinator.clone(),
             concurrent_collection_enabled: AtomicBool::new(true),
             allocation_stats: AllocationStats::default(),
@@ -100,20 +100,20 @@ impl FugcPlanManager {
 
     /// Initialize the FUGC plan manager with an MMTk instance.
     /// This should be called once during VM initialization.
-    pub fn initialize(&mut self, mmtk: &'static MMTK<RustVM>) {
-        self.mmtk = Some(mmtk);
+    pub fn initialize(&self, mmtk: &'static MMTK<RustVM>) {
+        let _ = self.mmtk.set(mmtk);
     }
 
     /// Get the MMTk instance. Returns an error if not initialized.
     pub fn mmtk(&self) -> anyhow::Result<&'static MMTK<RustVM>> {
-        self.mmtk.ok_or_else(|| {
+        self.mmtk.get().copied().ok_or_else(|| {
             anyhow::anyhow!("FUGC plan manager not initialized - call initialize() first")
         })
     }
 
     /// Get the MMTk instance (unsafe version for when you know it's initialized)
     pub fn mmtk_unchecked(&self) -> &'static MMTK<RustVM> {
-        self.mmtk.expect("FUGC plan manager not initialized")
+        *self.mmtk.get().expect("FUGC plan manager not initialized")
     }
 
     /// Get access to the optimized write barrier for VM integration
@@ -238,7 +238,7 @@ impl FugcPlanManager {
         // Check if collection should be triggered
         if self.should_trigger_collection() {
             // Trigger collection asynchronously to avoid blocking allocation
-            if let Some(mmtk) = self.mmtk {
+            if let Some(mmtk) = self.mmtk.get().copied() {
                 self.coordinate_fugc_with_mmtk_collection(mmtk);
             }
         }
@@ -282,7 +282,7 @@ impl FugcPlanManager {
     /// ```
     pub fn get_fugc_stats(&self) -> FugcStats {
         // Get stats from FUGC coordinator components
-        let (total_bytes, used_bytes) = if let Some(mmtk) = self.mmtk {
+        let (total_bytes, used_bytes) = if let Some(mmtk) = self.mmtk.get().copied() {
             // Calculate actual memory usage from MMTk plan
             let total_pages = mmtk.get_plan().get_total_pages();
             let reserved_pages = mmtk.get_plan().get_reserved_pages();
@@ -333,7 +333,7 @@ impl FugcPlanManager {
     /// coordinator.wait_until_idle(Duration::from_millis(500));
     /// ```
     pub fn gc(&self) {
-        if let Some(mmtk) = self.mmtk {
+        if let Some(mmtk) = self.mmtk.get().copied() {
             // Integrate FUGC 8-step protocol with MMTk collection phases
             self.coordinate_fugc_with_mmtk_collection(mmtk);
         } else {
@@ -360,7 +360,8 @@ impl FugcPlanManager {
         let coordinator = Arc::clone(&self.fugc_coordinator);
 
         // Poll FUGC coordinator state and coordinate with MMTk phases
-        std::thread::spawn(move || {
+        crossbeam::scope(move |s| {
+            s.spawn(move |_| {
             // Wait for write barriers to be activated (Step 2 of FUGC protocol)
             // Use the coordinator's phase advancement helper which listens on the
             // internal channel for phase transitions instead of busy-waiting.
@@ -383,7 +384,8 @@ impl FugcPlanManager {
 
             // FUGC will complete its 8-step protocol including sweep coordination
             // MMTk handles the actual memory reclamation and page management
-        });
+            });
+        }).ok();
     }
 
     /// Determine if collection should be triggered based on allocation pressure

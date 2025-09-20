@@ -124,9 +124,10 @@ fn demonstrate_multithreaded_safepoints() {
 
     let container = DIContainer::new();
     let manager = container.safepoint_manager();
-    let handles: Vec<_> = (0..4)
+    use rayon::prelude::*;
+    let results: Vec<_> = (0..4)
+        .into_par_iter()
         .map(|thread_id| {
-            thread::spawn(move || {
                 println!("   Thread {} starting work", thread_id);
 
                 // Each thread does work with pollchecks
@@ -142,7 +143,7 @@ fn demonstrate_multithreaded_safepoints() {
                 }
 
                 println!("   Thread {} completed", thread_id);
-            })
+                thread_id
         })
         .collect();
 
@@ -155,10 +156,7 @@ fn demonstrate_multithreaded_safepoints() {
     //(Duration::from_millis(50));
     manager.clear_safepoint();
 
-    // Wait for all threads to complete
-    for handle in handles {
-        handle.join().unwrap();
-    }
+    // Rayon automatically joins all parallel work
 
     println!("   ✓ All threads coordinated through safepoints");
 }

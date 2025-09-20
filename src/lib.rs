@@ -16,6 +16,7 @@ pub mod di;
 pub mod error;
 pub mod fugc_coordinator;
 pub mod handshake;
+pub mod hot_counters;
 pub mod memory_management;
 pub mod plan;
 pub mod pollcheck_macros;

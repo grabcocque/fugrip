@@ -10,16 +10,16 @@
 
 use crossbeam_epoch::{self as epoch};
 use mmtk::util::{Address, ObjectReference};
+use rayon::prelude::*;
 use std::cmp::{max, min};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
 
-#[cfg(target_arch = "x86_64")]
-use std::arch::x86_64::*;
+use wide::*;
 
 /// Constants for SIMD sweeping optimization
 const BITS_PER_WORD: usize = 64;
-const WORDS_PER_SIMD_BLOCK: usize = 4; // 256-bit SIMD
+const WORDS_PER_SIMD_BLOCK: usize = 4; // Wide will choose best available SIMD width
 const BITS_PER_SIMD_BLOCK: usize = BITS_PER_WORD * WORDS_PER_SIMD_BLOCK;
 const OBJECTS_PER_CACHE_LINE: usize = 64 / 8; // Assume 8-byte objects
 const BITVECTOR_CACHE_LINE_SIZE: usize = 64;
@@ -52,145 +52,267 @@ const MIN_WORDS_FOR_SIMD: usize = WORDS_PER_SIMD_BLOCK; // Minimum words for SIM
 /// let stats = bitvector.simd_sweep();
 /// assert!(stats.objects_swept > 0);
 /// ```
+/// Simple, data-oriented bitvector designed for `wide` SIMD operations.
+///
+/// This struct is minimal - just the data and metadata needed.
+/// SIMD operations are provided as separate functions that operate on slices.
 pub struct SimdBitvector {
-    /// Base address of the heap
+    /// Raw u64 storage for mark bits (operated on by wide SIMD functions)
+    mark_words: Vec<u64>,
+
+    /// Raw u64 storage for sweep bits (separate for phase-specific access patterns)
+    sweep_words: Vec<u64>,
+
+    /// Total number of bits represented
+    num_bits: usize,
+
+    /// Heap metadata for address calculations
     heap_base: Address,
-    /// Size of the heap in bytes
-    heap_size: usize,
-    /// Object alignment (objects are aligned to this boundary)
     object_alignment: usize,
-    /// Bitvector storage (one bit per object slot)
-    bits: Vec<AtomicU64>,
-    /// Number of objects that can be represented
-    max_objects: usize,
-    /// Statistics counters
+
+    /// Simple statistics (updated by SIMD functions)
     objects_marked: AtomicUsize,
     objects_swept: AtomicUsize,
-    simd_operations: AtomicUsize,
-    /// Hybrid strategy infrastructure - dynamic chunk layout
-    /// Number of chunks in this heap layout
-    chunk_count: usize,
-    /// Objects per chunk (calculated based on heap size and object alignment)
-    objects_per_chunk: usize,
-    /// Words per chunk (derived from objects per chunk)
-    words_per_chunk: usize,
-    /// Actual chunk size in bytes (may differ from target for optimal alignment)
-    actual_chunk_size_bytes: usize,
-    /// Per-chunk population counters for density analysis
-    chunk_populations: Vec<AtomicUsize>,
-    /// Hybrid strategy performance counters
-    simd_chunks_processed: AtomicUsize,
-    sparse_chunks_processed: AtomicUsize,
-    // compare_exchange statistics removed - epoch provides better coordination patterns
-    /// Architecture-specific optimizations used
-    #[cfg(target_arch = "x86_64")]
-    avx2_operations: AtomicUsize,
 }
 
 impl SimdBitvector {
-    /// Create a new SIMD-optimized bitvector for the given heap
-    ///
-    /// # Arguments
-    ///
-    /// * `heap_base` - Base address of the managed heap
-    /// * `heap_size` - Total size of the heap in bytes
-    /// * `object_alignment` - Minimum object alignment (must be power of 2)
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use fugrip::simd_sweep::SimdBitvector;
-    /// use mmtk::util::Address;
-    ///
-    /// let heap_base = unsafe { Address::from_usize(0x10000000) };
-    /// let bitvector = SimdBitvector::new(heap_base, 1024 * 1024, 16);
-    /// assert_eq!(bitvector.max_objects(), 1024 * 1024 / 16);
-    /// ```
+    /// Create a new SIMD bitvector for object liveness tracking
     pub fn new(heap_base: Address, heap_size: usize, object_alignment: usize) -> Self {
-        assert!(
-            object_alignment.is_power_of_two(),
-            "Object alignment must be power of 2"
-        );
-
-        let max_objects = heap_size / object_alignment;
-        let words_needed = max_objects.div_ceil(BITS_PER_WORD);
-
-        // Align to SIMD block boundaries for optimal performance
-        let aligned_words = (words_needed + WORDS_PER_SIMD_BLOCK - 1) & !(WORDS_PER_SIMD_BLOCK - 1);
-
-        // Calculate dynamic chunk infrastructure for hybrid strategy
-        let (chunk_count, objects_per_chunk, words_per_chunk, actual_chunk_size_bytes) =
-            Self::calculate_chunk_layout(max_objects, object_alignment, aligned_words);
-        let chunk_populations = (0..chunk_count).map(|_| AtomicUsize::new(0)).collect();
+        let num_bits = heap_size / object_alignment;
+        let num_words = (num_bits + 63) / 64; // Equivalent to ceil(num_bits / 64.0)
 
         Self {
+            mark_words: vec![0; num_words],
+            sweep_words: vec![0; num_words],
+            num_bits,
             heap_base,
-            heap_size,
             object_alignment,
-            bits: (0..aligned_words).map(|_| AtomicU64::new(0)).collect(),
-            max_objects,
             objects_marked: AtomicUsize::new(0),
             objects_swept: AtomicUsize::new(0),
-            simd_operations: AtomicUsize::new(0),
-            chunk_count,
-            objects_per_chunk,
-            words_per_chunk,
-            actual_chunk_size_bytes,
-            chunk_populations,
-            simd_chunks_processed: AtomicUsize::new(0),
-            sparse_chunks_processed: AtomicUsize::new(0),
-            // compare_exchange statistics removed - epoch provides automatic coordination
-            #[cfg(target_arch = "x86_64")]
-            avx2_operations: AtomicUsize::new(0),
         }
     }
 
-    /// Calculate optimal chunk layout for dynamic heap configuration
-    ///
-    /// Determines chunk size, object count, and word count based on actual heap parameters
-    /// and object alignment, ensuring accurate density calculations and proper boundaries.
-    fn calculate_chunk_layout(
-        max_objects: usize,
-        object_alignment: usize,
-        total_words: usize,
-    ) -> (usize, usize, usize, usize) {
-        // Calculate target objects per chunk based on desired chunk size and alignment
-        let target_objects_per_chunk = TARGET_CHUNK_SIZE_BYTES / object_alignment;
+    /// Get mutable access to mark bits for SIMD operations
+    #[inline]
+    pub fn mark_words_mut(&mut self) -> &mut [u64] {
+        &mut self.mark_words
+    }
 
-        // Ensure we don't create chunks larger than necessary
-        let effective_objects_per_chunk = if target_objects_per_chunk > max_objects {
-            max_objects
-        } else {
-            target_objects_per_chunk
-        };
+    /// Get read access to mark bits for SIMD operations
+    #[inline]
+    pub fn mark_words(&self) -> &[u64] {
+        &self.mark_words
+    }
 
-        // Calculate words needed for this many objects
-        let words_needed_per_chunk = effective_objects_per_chunk.div_ceil(BITS_PER_WORD);
+    /// Get mutable access to sweep bits for SIMD operations
+    #[inline]
+    pub fn sweep_words_mut(&mut self) -> &mut [u64] {
+        &mut self.sweep_words
+    }
 
-        // Align to SIMD block boundaries for optimal vectorization
-        let aligned_words_per_chunk =
-            (words_needed_per_chunk + WORDS_PER_SIMD_BLOCK - 1) & !(WORDS_PER_SIMD_BLOCK - 1);
+    /// Get read access to sweep bits for SIMD operations
+    #[inline]
+    pub fn sweep_words(&self) -> &[u64] {
+        &self.sweep_words
+    }
 
-        // Don't exceed total available words
-        let final_words_per_chunk = aligned_words_per_chunk.min(total_words);
+    /// Get the number of bits this bitvector represents
+    #[inline]
+    pub fn num_bits(&self) -> usize {
+        self.num_bits
+    }
+}
 
-        // Calculate actual objects that fit in the aligned chunk
-        let objects_per_chunk = (final_words_per_chunk * BITS_PER_WORD).min(max_objects);
+/// Data-oriented SIMD operations using `wide` for maximum performance.
+/// These functions operate directly on u64 slices for optimal vectorization.
+use wide::u64x4;
 
-        // Calculate actual chunk size and count
-        let actual_chunk_size_bytes = objects_per_chunk * object_alignment;
-        let chunk_count = if objects_per_chunk > 0 {
-            max(max_objects.div_ceil(objects_per_chunk), 1)
-        } else {
-            1
-        };
+/// Copy mark bits to sweep bits using SIMD (prepare for sweep phase)
+pub fn simd_copy_mark_to_sweep(mark_words: &[u64], sweep_words: &mut [u64]) {
+    debug_assert_eq!(mark_words.len(), sweep_words.len());
 
-        (
-            chunk_count,
-            objects_per_chunk,
-            final_words_per_chunk,
-            actual_chunk_size_bytes,
-        )
+    let lane_count: usize = u64x4::LANES.into();
+    let mut dest_chunks = sweep_words.chunks_exact_mut(lane_count);
+    let mut src_chunks = mark_words.chunks_exact(lane_count);
+
+    for (dest_chunk, src_chunk) in dest_chunks.by_ref().zip(src_chunks.by_ref()) {
+        let src_vec = u64x4::new([src_chunk[0], src_chunk[1], src_chunk[2], src_chunk[3]]);
+        let result = src_vec.to_array();
+        dest_chunk.copy_from_slice(&result);
+    }
+
+    // Handle remaining elements
+    dest_chunks
+        .remainder()
+        .iter_mut()
+        .zip(src_chunks.remainder())
+        .for_each(|(dest, src)| *dest = *src);
+}
+
+/// Perform SIMD bitwise OR operation (useful for merging mark sets)
+pub fn simd_or_assign(dest: &mut [u64], src: &[u64]) {
+    debug_assert_eq!(dest.len(), src.len());
+
+    let lane_count: usize = u64x4::LANES.into();
+    let mut dest_chunks = dest.chunks_exact_mut(lane_count);
+    let mut src_chunks = src.chunks_exact(lane_count);
+
+    for (dest_chunk, src_chunk) in dest_chunks.by_ref().zip(src_chunks.by_ref()) {
+        let dest_vec = u64x4::new([dest_chunk[0], dest_chunk[1], dest_chunk[2], dest_chunk[3]]);
+        let src_vec = u64x4::new([src_chunk[0], src_chunk[1], src_chunk[2], src_chunk[3]]);
+
+        let result = dest_vec | src_vec;
+        let result_array = result.to_array();
+        dest_chunk.copy_from_slice(&result_array);
+    }
+
+    // Handle remaining elements
+    dest_chunks
+        .remainder()
+        .iter_mut()
+        .zip(src_chunks.remainder())
+        .for_each(|(d, s)| *d |= *s);
+}
+
+/// Count set bits using SIMD (for statistics and sweep decisions)
+pub fn simd_popcount(words: &[u64]) -> usize {
+    let mut total = 0usize;
+    let lane_count: usize = u64x4::LANES.into();
+    let mut chunks = words.chunks_exact(lane_count);
+
+    for chunk in chunks.by_ref() {
+        // Load chunk into SIMD register
+        let vec = u64x4::new([chunk[0], chunk[1], chunk[2], chunk[3]]);
+        let array = vec.to_array();
+
+        // Count bits in each element
+        total += array.iter().map(|x| x.count_ones() as usize).sum::<usize>();
+    }
+
+    // Handle remaining elements
+    total += chunks
+        .remainder()
+        .iter()
+        .map(|x| x.count_ones() as usize)
+        .sum::<usize>();
+
+    total
+}
+
+/// Clear bits using SIMD (for bulk reset operations)
+pub fn simd_clear(words: &mut [u64]) {
+    let zero_vec = u64x4::new([0, 0, 0, 0]);
+    let lane_count: usize = u64x4::LANES.into();
+    let mut chunks = words.chunks_exact_mut(lane_count);
+
+    for chunk in chunks.by_ref() {
+        let zeros = zero_vec.to_array();
+        chunk.copy_from_slice(&zeros);
+    }
+
+    // Handle remaining elements
+    chunks.remainder().fill(0);
+}
+
+impl SimdBitvector {
+    /// X86-64 specific SIMD implementation using AVX2
+    #[cfg(target_arch = "x86_64")]
+    fn simd_sweep_x86_64(&self, free_blocks: &mut Vec<FreeBlock>) -> usize {
+        let mut objects_swept = 0usize;
+
+        unsafe {
+            // Process bitvector in 256-bit (4x64-bit) chunks
+            let chunks = self.bits.chunks_exact(WORDS_PER_SIMD_BLOCK);
+            let remainder = chunks.remainder();
+            let chunks_len = chunks.len();
+
+            // Parallelize atomic loads for large sweeps to improve memory bandwidth utilization
+            const PARALLEL_THRESHOLD: usize = 1000; // Only parallelize for large sweeps
+
+            if chunks_len > PARALLEL_THRESHOLD {
+                // Parallel load: materialize each 256-bit chunk into a plain array for SIMD
+                let loaded: Vec<[u64; WORDS_PER_SIMD_BLOCK]> = (0..chunks_len)
+                    .into_par_iter()
+                    .map(|ci| {
+                        let base = ci * WORDS_PER_SIMD_BLOCK;
+                        let mut vals = [0u64; WORDS_PER_SIMD_BLOCK];
+                        for lane in 0..WORDS_PER_SIMD_BLOCK {
+                            vals[lane] = self.bits[base + lane].load(Ordering::Relaxed);
+                        }
+                        vals
+                    })
+                    .collect();
+
+                // Sequential SIMD compute + free block extraction
+                for (chunk_index, chunk_values) in loaded.iter().enumerate() {
+                    self.simd_operations.fetch_add(1, Ordering::Relaxed);
+
+                    // Load 4 u64 values using Wide's platform-agnostic SIMD
+                    let live_mask = u64x4::new([
+                        chunk_values[0],
+                        chunk_values[1],
+                        chunk_values[2],
+                        chunk_values[3],
+                    ]);
+                    let all_ones = u64x4::splat(!0u64);
+                    let dead_mask = live_mask ^ all_ones;
+
+                    let dead_count = self.count_dead_objects_simd(dead_mask);
+                    objects_swept += dead_count;
+                    if dead_count > 0 {
+                        self.extract_free_blocks_simd(chunk_index, dead_mask, free_blocks);
+                    }
+                }
+
+                // Parallel clear of processed chunks
+                (0..chunks_len).into_par_iter().for_each(|ci| {
+                    let base = ci * WORDS_PER_SIMD_BLOCK;
+                    for lane in 0..WORDS_PER_SIMD_BLOCK {
+                        self.bits[base + lane].store(0, Ordering::Relaxed);
+                    }
+                });
+            } else {
+                // Sequential path for smaller sweeps (avoids parallel overhead)
+                for (chunk_index, chunk) in chunks.enumerate() {
+                    self.simd_operations.fetch_add(1, Ordering::Relaxed);
+
+                    let mut chunk_values = [0u64; WORDS_PER_SIMD_BLOCK];
+                    for (i, atomic_word) in chunk.iter().enumerate() {
+                        chunk_values[i] = atomic_word.load(Ordering::Relaxed);
+                    }
+
+                    // Load 4 u64 values using Wide's platform-agnostic SIMD
+                    let live_mask = u64x4::new([
+                        chunk_values[0],
+                        chunk_values[1],
+                        chunk_values[2],
+                        chunk_values[3],
+                    ]);
+                    let all_ones = u64x4::splat(!0u64);
+                    let dead_mask = live_mask ^ all_ones;
+
+                    let dead_count = self.count_dead_objects_simd(dead_mask);
+                    objects_swept += dead_count;
+                    if dead_count > 0 {
+                        self.extract_free_blocks_simd(chunk_index, dead_mask, free_blocks);
+                    }
+
+                    for atomic_word in chunk.iter() {
+                        atomic_word.store(0, Ordering::Relaxed);
+                    }
+                }
+            }
+
+            // Handle remainder words with scalar operations
+            for (word_index, atomic_word) in remainder.iter().enumerate() {
+                let word = atomic_word.load(Ordering::Relaxed);
+                let base_index = chunks_len * WORDS_PER_SIMD_BLOCK + word_index;
+                objects_swept += self.process_remainder_word(base_index, word, free_blocks);
+                atomic_word.store(0, Ordering::Relaxed);
+            }
+        }
+
+        objects_swept
     }
 
     #[inline]
@@ -795,8 +917,7 @@ impl SimdBitvector {
         remaining_bits.min(BITS_PER_WORD)
     }
 
-    /// Process a single SIMD block with capacity-based masking (AVX2 optimized)
-    #[cfg(target_arch = "x86_64")]
+    /// Process a single SIMD block with capacity-based masking (Wide optimized)
     fn process_simd_block_capacity_masked(
         &self,
         start_word: usize,
@@ -822,13 +943,18 @@ impl SimdBitvector {
             }
 
             // Load into AVX2 register
-            let live_mask = _mm256_loadu_si256(word_values.as_ptr() as *const __m256i);
-            let all_ones = _mm256_set1_epi64x(-1i64);
-            let dead_mask = _mm256_xor_si256(live_mask, all_ones);
+            let live_mask = u64x4::new([
+                word_values[0],
+                word_values[1],
+                word_values[2],
+                word_values[3],
+            ]);
+            let all_ones = u64x4::splat(!0u64);
+            let dead_mask = live_mask ^ all_ones;
 
             // Apply masks to dead_mask to ensure we only consider valid object bits
-            let mask_simd = _mm256_loadu_si256(masks.as_ptr() as *const __m256i);
-            let masked_dead = _mm256_and_si256(dead_mask, mask_simd);
+            let mask_simd = u64x4::new([masks[0], masks[1], masks[2], masks[3]]);
+            let masked_dead = dead_mask & mask_simd;
 
             // Count dead objects
             let dead_count = self.count_dead_objects_simd(masked_dead);
@@ -836,8 +962,7 @@ impl SimdBitvector {
             // Extract free blocks if any dead objects found
             if dead_count > 0 {
                 // Convert SIMD register back to individual words for unified processing
-                let mut temp_words = [0u64; WORDS_PER_SIMD_BLOCK];
-                _mm256_storeu_si256(temp_words.as_mut_ptr() as *mut __m256i, masked_dead);
+                let temp_words = masked_dead.to_array();
 
                 for (i, &word) in temp_words.iter().enumerate() {
                     if word != 0 {
@@ -861,7 +986,6 @@ impl SimdBitvector {
     }
 
     /// Process a single SIMD block (4 x 64-bit words) using AVX2 with proper masking
-    #[cfg(target_arch = "x86_64")]
     fn process_simd_block_masked(
         &self,
         start_word: usize,
@@ -886,13 +1010,18 @@ impl SimdBitvector {
             }
 
             // Load into AVX2 register
-            let live_mask = _mm256_loadu_si256(word_values.as_ptr() as *const __m256i);
-            let all_ones = _mm256_set1_epi64x(-1i64);
-            let dead_mask = _mm256_xor_si256(live_mask, all_ones);
+            let live_mask = u64x4::new([
+                word_values[0],
+                word_values[1],
+                word_values[2],
+                word_values[3],
+            ]);
+            let all_ones = u64x4::splat(!0u64);
+            let dead_mask = live_mask ^ all_ones;
 
             // Apply masks to dead_mask to ensure we only consider valid object bits
-            let mask_simd = _mm256_loadu_si256(masks.as_ptr() as *const __m256i);
-            let masked_dead = _mm256_and_si256(dead_mask, mask_simd);
+            let mask_simd = u64x4::new([masks[0], masks[1], masks[2], masks[3]]);
+            let masked_dead = dead_mask & mask_simd;
 
             // Count dead objects
             let dead_count = self.count_dead_objects_simd(masked_dead);
@@ -900,8 +1029,7 @@ impl SimdBitvector {
             // Extract free blocks if any dead objects found
             if dead_count > 0 {
                 // Convert SIMD register back to individual words for unified processing
-                let mut temp_words = [0u64; WORDS_PER_SIMD_BLOCK];
-                _mm256_storeu_si256(temp_words.as_mut_ptr() as *mut __m256i, masked_dead);
+                let temp_words = masked_dead.to_array();
 
                 for (i, &word) in temp_words.iter().enumerate() {
                     if word != 0 {
@@ -925,7 +1053,6 @@ impl SimdBitvector {
     }
 
     /// Process a single SIMD block (4 x 64-bit words) using AVX2 (legacy method)
-    #[cfg(target_arch = "x86_64")]
     fn process_simd_block(&self, start_word: usize, free_blocks: &mut Vec<FreeBlock>) -> usize {
         unsafe {
             self.simd_operations.fetch_add(1, Ordering::Relaxed);
@@ -943,9 +1070,14 @@ impl SimdBitvector {
             }
 
             // Load into AVX2 register
-            let live_mask = _mm256_loadu_si256(word_values.as_ptr() as *const __m256i);
-            let all_ones = _mm256_set1_epi64x(-1i64);
-            let dead_mask = _mm256_xor_si256(live_mask, all_ones);
+            let live_mask = u64x4::new([
+                word_values[0],
+                word_values[1],
+                word_values[2],
+                word_values[3],
+            ]);
+            let all_ones = u64x4::splat(!0u64);
+            let dead_mask = live_mask ^ all_ones;
 
             // Count dead objects
             let dead_count = self.count_dead_objects_simd(dead_mask);
@@ -953,8 +1085,7 @@ impl SimdBitvector {
             // Extract free blocks if any dead objects found
             if dead_count > 0 {
                 // Convert SIMD register back to individual words for unified processing
-                let mut temp_words = [0u64; WORDS_PER_SIMD_BLOCK];
-                _mm256_storeu_si256(temp_words.as_mut_ptr() as *mut __m256i, dead_mask);
+                let temp_words = dead_mask.to_array();
 
                 for (i, &word) in temp_words.iter().enumerate() {
                     if word != 0 {
@@ -1079,92 +1210,26 @@ impl SimdBitvector {
         }
     }
 
-    /// X86-64 specific SIMD implementation using AVX2
-    #[cfg(target_arch = "x86_64")]
-    fn simd_sweep_x86_64(&self, free_blocks: &mut Vec<FreeBlock>) -> usize {
-        let mut objects_swept = 0usize;
-
-        unsafe {
-            // Process bitvector in 256-bit (4x64-bit) chunks
-            let chunks = self.bits.chunks_exact(WORDS_PER_SIMD_BLOCK);
-            let remainder = chunks.remainder();
-            let chunks_len = chunks.len();
-
-            for (chunk_index, chunk) in chunks.enumerate() {
-                self.simd_operations.fetch_add(1, Ordering::Relaxed);
-
-                // TODO: Parallelize atomic loads with rayon::par_chunks() for large sweeps
-                // chunk.par_iter().enumerate().collect() could be more efficient
-                // Load atomic values into a temporary array for SIMD processing
-                let mut chunk_values = [0u64; WORDS_PER_SIMD_BLOCK];
-                for (i, atomic_word) in chunk.iter().enumerate() {
-                    chunk_values[i] = atomic_word.load(Ordering::Relaxed);
-                }
-
-                // Load 256 bits of liveness data
-                let ptr = chunk_values.as_ptr() as *const __m256i;
-                let live_mask = _mm256_loadu_si256(ptr);
-
-                // Invert to get dead object mask (dead = available for sweeping)
-                let all_ones = _mm256_set1_epi64x(-1i64);
-                let dead_mask = _mm256_xor_si256(live_mask, all_ones);
-
-                // Count dead objects using population count
-                let dead_count = self.count_dead_objects_simd(dead_mask);
-                objects_swept += dead_count;
-
-                // Extract free blocks for this chunk
-                if dead_count > 0 {
-                    self.extract_free_blocks_simd(chunk_index, dead_mask, free_blocks);
-                }
-
-                // Clear the processed bits (reset for next cycle)
-                for atomic_word in chunk.iter() {
-                    atomic_word.store(0, Ordering::Relaxed);
-                }
-            }
-
-            // Handle remainder words with scalar operations
-            for (word_index, atomic_word) in remainder.iter().enumerate() {
-                let word = atomic_word.load(Ordering::Relaxed);
-                let base_index = chunks_len * WORDS_PER_SIMD_BLOCK + word_index;
-                objects_swept += self.process_remainder_word(base_index, word, free_blocks);
-                // Clear remainder word
-                atomic_word.store(0, Ordering::Relaxed);
-            }
-        }
-
-        objects_swept
-    }
-
     /// Count dead objects in a 256-bit SIMD register
-    #[cfg(target_arch = "x86_64")]
-    unsafe fn count_dead_objects_simd(&self, dead_mask: __m256i) -> usize {
-        // Extract 64-bit lanes and count set bits
-        let lane0 = unsafe { _mm256_extract_epi64(dead_mask, 0) } as u64;
-        let lane1 = unsafe { _mm256_extract_epi64(dead_mask, 1) } as u64;
-        let lane2 = unsafe { _mm256_extract_epi64(dead_mask, 2) } as u64;
-        let lane3 = unsafe { _mm256_extract_epi64(dead_mask, 3) } as u64;
+    fn count_dead_objects_simd(&self, dead_mask: u64x4) -> usize {
+        // Extract 64-bit lanes and count set bits using Wide
+        let lanes = dead_mask.to_array();
 
-        lane0.count_ones() as usize
-            + lane1.count_ones() as usize
-            + lane2.count_ones() as usize
-            + lane3.count_ones() as usize
+        lanes[0].count_ones() as usize
+            + lanes[1].count_ones() as usize
+            + lanes[2].count_ones() as usize
+            + lanes[3].count_ones() as usize
     }
 
     /// Extract contiguous free blocks from SIMD chunk
-    #[cfg(target_arch = "x86_64")]
     fn extract_free_blocks_simd(
         &self,
         chunk_index: usize,
-        dead_mask: __m256i,
+        dead_mask: u64x4,
         free_blocks: &mut Vec<FreeBlock>,
     ) {
-        // Convert SIMD register back to scalar for free block analysis
-        let mut temp_words = [0u64; WORDS_PER_SIMD_BLOCK];
-        unsafe {
-            _mm256_storeu_si256(temp_words.as_mut_ptr() as *mut __m256i, dead_mask);
-        }
+        // Convert SIMD register back to scalar for free block analysis using Wide
+        let temp_words = dead_mask.to_array();
 
         let base_bit_index = chunk_index * BITS_PER_SIMD_BLOCK;
 
@@ -1497,7 +1562,7 @@ impl SimdBitvector {
             bitvector_size_bytes: self.bits.len() * 8,
             dense_chunks_last: self.simd_chunks_processed.load(Ordering::Relaxed),
             sparse_chunks_last: self.sparse_chunks_processed.load(Ordering::Relaxed),
-            chunk_size_bytes: self.actual_chunk_size_bytes,
+            chunk_size_bytes: self.chunk_size_bytes,
         }
     }
 
@@ -1665,7 +1730,7 @@ impl SimdBitvector {
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         {
             if is_x86_feature_detected!("avx2") {
-                unsafe { return self.avx2_population_count(words) };
+                return self.wide_population_count(words);
             }
         }
 
@@ -1675,38 +1740,29 @@ impl SimdBitvector {
     /// Ultra-fast AVX2 population count for bit arrays
     ///
     /// Uses lookup table approach with 256-bit SIMD for maximum throughput.
-    /// This consolidates the optimized population counting from simd_bitvec.rs.
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    unsafe fn avx2_population_count(&self, words: &[u64]) -> usize {
-        const LOOKUP_BYTES: [i8; 32] = [
-            0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4, 0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2,
-            3, 3, 4,
-        ];
-
-        let lookup = unsafe { _mm256_loadu_si256(LOOKUP_BYTES.as_ptr() as *const __m256i) };
-        let low_mask = unsafe { _mm256_set1_epi8(0x0F) };
+    /// Optimized population counting using Wide's platform-agnostic SIMD
+    fn wide_population_count(&self, words: &[u64]) -> usize {
         let mut total = 0usize;
 
-        // Process in chunks of 4 u64 words (256 bits)
+        // Process in chunks of 4 u64 words using Wide
         let chunks = words.len() / 4;
         let remainder_start = chunks * 4;
 
         for i in 0..chunks {
             let chunk_start = i * 4;
-            unsafe {
-                let data = _mm256_loadu_si256(words.as_ptr().add(chunk_start) as *const __m256i);
-                let low = _mm256_and_si256(data, low_mask);
-                let high = _mm256_and_si256(_mm256_srli_epi16(data, 4), low_mask);
-                let cnt_low = _mm256_shuffle_epi8(lookup, low);
-                let cnt_high = _mm256_shuffle_epi8(lookup, high);
-                let counts = _mm256_add_epi8(cnt_low, cnt_high);
-                let sums = _mm256_sad_epu8(counts, _mm256_setzero_si256());
+            let simd_words = u64x4::new([
+                words[chunk_start],
+                words[chunk_start + 1],
+                words[chunk_start + 2],
+                words[chunk_start + 3],
+            ]);
 
-                total += _mm256_extract_epi64(sums, 0) as usize;
-                total += _mm256_extract_epi64(sums, 1) as usize;
-                total += _mm256_extract_epi64(sums, 2) as usize;
-                total += _mm256_extract_epi64(sums, 3) as usize;
-            }
+            // Count bits in each lane and sum them
+            let counts = simd_words.to_array();
+            total += counts[0].count_ones() as usize;
+            total += counts[1].count_ones() as usize;
+            total += counts[2].count_ones() as usize;
+            total += counts[3].count_ones() as usize;
         }
 
         // Handle remainder words with scalar operations

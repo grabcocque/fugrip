@@ -8,7 +8,8 @@ use mmtk::{
 use crate::binding::RustVM;
 use crate::core::{ObjectModel, RustObjectModel};
 use crate::thread::{MutatorThread, ThreadRegistry};
-use parking_lot::Mutex;
+use arc_swap::ArcSwap;
+use rayon::prelude::*;
 use std::sync::Arc;
 
 /// Stack-based root references for garbage collection
@@ -76,18 +77,47 @@ impl StackRoots {
 /// assert_eq!(roots[0], global_ptr1);
 /// assert_eq!(roots[1], global_ptr2);
 /// ```
-#[derive(Default)]
 pub struct GlobalRoots {
-    handles: Vec<usize>, // Store addresses as usize for thread safety
+    // Use ArcSwap over an Arc<Vec<usize>> so registrations can happen
+    // without a Mutex while reads get a cheap snapshot.
+    handles: arc_swap::ArcSwap<Vec<usize>>,
+}
+
+impl Clone for GlobalRoots {
+    fn clone(&self) -> Self {
+        let snapshot = self.handles.load_full();
+        let new_vec = (**snapshot).to_vec();
+        GlobalRoots {
+            handles: arc_swap::ArcSwap::from_pointee(new_vec),
+        }
+    }
+}
+
+impl Default for GlobalRoots {
+    fn default() -> Self {
+        Self {
+            handles: arc_swap::ArcSwap::from_pointee(Vec::new()),
+        }
+    }
 }
 
 impl GlobalRoots {
-    pub fn register(&mut self, handle: *mut u8) {
-        self.handles.push(handle as usize);
+    /// Register a global root. This is lock-free from the caller's perspective
+    /// by performing an RCU-style update of the underlying Vec.
+    pub fn register(&self, handle: *mut u8) {
+        self.handles.rcu(|current| {
+            let mut new_vec = (**current).clone();
+            new_vec.push(handle as usize);
+            std::sync::Arc::new(new_vec)
+        });
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = *mut u8> + '_ {
-        self.handles.iter().map(|&addr| addr as *mut u8)
+    /// Iterate over a snapshot of the current roots. Returns an iterator that
+    /// owns a temporary Vec so callers may iterate without holding locks.
+    pub fn iter(&self) -> impl Iterator<Item = *mut u8> {
+        let snapshot = self.handles.load_full();
+        let tmp: Vec<*mut u8> = snapshot.iter().map(|&addr| addr as *mut u8).collect();
+        tmp.into_iter()
     }
 }
 
@@ -148,24 +178,59 @@ impl Scanning<RustVM> for RustScanning {
 
         // For proper field tracing, we would use the vtable to get type information
         // and only visit actual reference fields. For now, we'll scan conservatively.
-        let body_size = header.body_size;
+        let body_size = header.body_size as usize;
         let num_potential_slots = body_size / std::mem::size_of::<*const u8>();
 
-        // TODO: Parallelize with rayon::par_iter() for large objects to reduce GC pause time
-        // (0..num_potential_slots).into_par_iter().for_each(|i| { ... })
-        for i in 0..num_potential_slots {
-            let slot_ptr = unsafe { body_start.add(i * std::mem::size_of::<*const u8>()) };
-            let potential_ref = unsafe { slot_ptr.cast::<*const u8>().read() };
+        // Parallelize slot scanning for large objects to reduce GC pause time
+        // Only enable parallel scanning for objects with many slots to avoid overhead
+        if num_potential_slots > 1000 {
+            // Convert to safe address arithmetic for thread safety
+            let body_start_addr = mmtk::util::Address::from_mut_ptr(body_start);
+            let slot_size = std::mem::size_of::<*const u8>();
 
-            // Check if this looks like a valid pointer within the managed heap
-            if !potential_ref.is_null() {
-                let slot_address = mmtk::util::Address::from_ptr(potential_ref);
-                if ObjectReference::from_raw_address(slot_address).is_some() {
-                    // This looks like a valid object reference, create a slot for it
-                    let vm_slot = mmtk::vm::slot::SimpleSlot::from_address(
-                        mmtk::util::Address::from_mut_ptr(slot_ptr),
-                    );
-                    slot_visitor.visit_slot(vm_slot);
+            // Parallel collection of valid slots using safe address arithmetic
+            let valid_slots: Vec<_> = (0..num_potential_slots)
+                .into_par_iter()
+                .filter_map(|i| {
+                    let slot_addr = body_start_addr + (i * slot_size);
+                    let slot_ptr: *mut u8 = slot_addr.to_mut_ptr();
+                    let potential_ref = unsafe { slot_ptr.cast::<*const u8>().read() };
+
+                    // Check if this looks like a valid pointer within the managed heap
+                    if !potential_ref.is_null() {
+                        let slot_address = mmtk::util::Address::from_ptr(potential_ref);
+                        if ObjectReference::from_raw_address(slot_address).is_some() {
+                            // This looks like a valid object reference
+                            Some(mmtk::vm::slot::SimpleSlot::from_address(slot_addr))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            // Sequential slot visiting (slot_visitor is not thread-safe)
+            for slot in valid_slots {
+                slot_visitor.visit_slot(slot);
+            }
+        } else {
+            // Sequential scanning for smaller objects to avoid parallel overhead
+            for i in 0..num_potential_slots {
+                let slot_ptr = unsafe { body_start.add(i * std::mem::size_of::<*const u8>()) };
+                let potential_ref = unsafe { slot_ptr.cast::<*const u8>().read() };
+
+                // Check if this looks like a valid pointer within the managed heap
+                if !potential_ref.is_null() {
+                    let slot_address = mmtk::util::Address::from_ptr(potential_ref);
+                    if ObjectReference::from_raw_address(slot_address).is_some() {
+                        // This looks like a valid object reference, create a slot for it
+                        let vm_slot = mmtk::vm::slot::SimpleSlot::from_address(
+                            mmtk::util::Address::from_mut_ptr(slot_ptr),
+                        );
+                        slot_visitor.visit_slot(vm_slot);
+                    }
                 }
             }
         }
@@ -186,20 +251,22 @@ impl Scanning<RustVM> for RustScanning {
 
         THREAD_STACK_ROOTS.with(|roots| {
             let roots = roots.borrow();
-            let mut slots = Vec::new();
 
-            // TODO: Parallelize stack root processing with rayon::par_iter() for multiple threads
-            // roots.frames.par_iter().for_each(|&frame_addr| { ... })
-            // Process each registered stack root
-            for &frame_addr in &roots.frames {
-                let frame_ptr = frame_addr as *mut u8;
-                if !frame_ptr.is_null() {
-                    let slot = mmtk::vm::slot::SimpleSlot::from_address(
-                        mmtk::util::Address::from_mut_ptr(frame_ptr),
-                    );
-                    slots.push(slot);
-                }
-            }
+            // Parallelize mapping stack frame addresses to VM slots.
+            let slots: Vec<mmtk::vm::slot::SimpleSlot> = roots
+                .frames
+                .par_iter()
+                .filter_map(|&frame_addr| {
+                    let frame_ptr = frame_addr as *mut u8;
+                    if frame_ptr.is_null() {
+                        None
+                    } else {
+                        Some(mmtk::vm::slot::SimpleSlot::from_address(
+                            mmtk::util::Address::from_mut_ptr(frame_ptr),
+                        ))
+                    }
+                })
+                .collect();
 
             if !slots.is_empty() {
                 factory.create_process_roots_work(slots);
@@ -211,18 +278,28 @@ impl Scanning<RustVM> for RustScanning {
         _tls: VMWorkerThread,
         mut factory: impl RootsWorkFactory<<RustVM as VMBinding>::VMSlot>,
     ) {
-        // Use a thread-safe global roots registry
-        static GLOBAL_ROOTS: std::sync::OnceLock<Mutex<GlobalRoots>> = std::sync::OnceLock::new();
+        // Use a lock-free global roots registry with arc_swap for better performance
+        use arc_swap::ArcSwap;
+        static GLOBAL_ROOTS: std::sync::OnceLock<ArcSwap<GlobalRoots>> = std::sync::OnceLock::new();
 
-        let global_roots = GLOBAL_ROOTS.get_or_init(|| Mutex::new(GlobalRoots::default()));
-        let roots = global_roots.lock();
+        let global_roots =
+            GLOBAL_ROOTS.get_or_init(|| ArcSwap::new(Arc::new(GlobalRoots::default())));
+        let roots = global_roots.load();
 
-        // Process all global root handles
-        let slots: Vec<mmtk::vm::slot::SimpleSlot> = roots
-            .iter()
-            .filter(|&ptr| !ptr.is_null())
-            .map(|ptr| {
-                mmtk::vm::slot::SimpleSlot::from_address(mmtk::util::Address::from_mut_ptr(ptr))
+        // Collect all pointer addresses as usize for thread safety, then parallel-map to slots
+        let addresses: Vec<usize> = roots.iter().map(|ptr| ptr as usize).collect();
+        drop(roots);
+
+        let slots: Vec<mmtk::vm::slot::SimpleSlot> = addresses
+            .par_iter()
+            .filter_map(|&addr| {
+                if addr == 0 {
+                    None
+                } else {
+                    Some(mmtk::vm::slot::SimpleSlot::from_address(unsafe {
+                        mmtk::util::Address::from_usize(addr)
+                    }))
+                }
             })
             .collect();
 
@@ -234,8 +311,8 @@ impl Scanning<RustVM> for RustScanning {
     fn notify_initial_thread_scan_complete(partial_scan: bool, _tls: VMWorkerThread) {
         let coordinator = {
             let manager = crate::binding::FUGC_PLAN_MANAGER
-                .get_or_init(|| parking_lot::Mutex::new(crate::plan::FugcPlanManager::new()))
-                .lock();
+                .get_or_init(|| ArcSwap::new(Arc::new(crate::plan::FugcPlanManager::new())))
+                .load();
             Arc::clone(manager.get_fugc_coordinator())
         };
 
@@ -251,8 +328,8 @@ impl Scanning<RustVM> for RustScanning {
     fn prepare_for_roots_re_scanning() {
         let coordinator = {
             let manager = crate::binding::FUGC_PLAN_MANAGER
-                .get_or_init(|| parking_lot::Mutex::new(crate::plan::FugcPlanManager::new()))
-                .lock();
+                .get_or_init(|| ArcSwap::new(Arc::new(crate::plan::FugcPlanManager::new())))
+                .load();
             Arc::clone(manager.get_fugc_coordinator())
         };
         // FUGC coordinator resets are handled internally during collection cycles
@@ -389,20 +466,25 @@ mod tests {
 
     #[test]
     fn test_global_roots_thread_safety() {
-        use parking_lot::Mutex;
+        use arc_swap::ArcSwap;
         use rayon::prelude::*;
-        let global_roots = Arc::new(Mutex::new(GlobalRoots::default()));
+        let global_roots = ArcSwap::new(Arc::new(GlobalRoots::default()));
 
-        // Test concurrent access with rayon instead of manual thread::spawn
+        // Test concurrent access with rayon instead of manual thread spawning
         (0..4).into_par_iter().for_each(|i| {
             for j in 0..10 {
                 let ptr = ((i * 100 + j) * 0x1000) as *mut u8;
-                global_roots.lock().register(ptr);
+                // Use ArcSwap's RCU pattern for lock-free updates
+                global_roots.rcu(|current| {
+                    let mut new_roots = (**current).clone();
+                    new_roots.register(ptr);
+                    Arc::new(new_roots)
+                });
             }
         });
 
         // Should have 40 total registrations
-        assert_eq!(global_roots.lock().iter().count(), 40);
+        assert_eq!(global_roots.load().iter().count(), 40);
     }
 
     #[test]

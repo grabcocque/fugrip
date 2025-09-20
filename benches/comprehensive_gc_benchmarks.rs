@@ -19,8 +19,6 @@ use fugrip::thread::MutatorThread;
 use mmtk::util::{Address, ObjectReference};
 use std::hint::black_box;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread;
 use std::time::Duration;
 
 const TEST_HEAP_BASE: usize = 0x10000000;

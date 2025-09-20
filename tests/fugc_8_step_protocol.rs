@@ -11,37 +11,24 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
-use std::thread;
 use std::time::Duration;
-
-fn spawn_mutator(mutator: MutatorThread) -> (thread::JoinHandle<()>, Arc<AtomicBool>) {
-    let running = Arc::new(AtomicBool::new(true));
-    let worker = mutator.clone();
-    let flag = Arc::clone(&running);
-
-    let handle = thread::spawn(move || {
-        while flag.load(Ordering::Relaxed) {
-            worker.poll_safepoint();
-            //(Duration::from_millis(1));
-        }
-    });
-
-    (handle, running)
-}
 
 /// Rayon-based mutator simulation (replaces complex manual thread management)
 fn simulate_mutators_with_rayon_pool(mutators: &[MutatorThread], iterations: usize) -> Vec<usize> {
     use rayon::prelude::*;
 
     // Use rayon parallel execution instead of manual thread spawning
-    mutators.par_iter().map(|mutator| {
-        let mut polls = 0;
-        for _ in 0..iterations {
-            mutator.poll_safepoint();
-            polls += 1;
-        }
-        polls
-    }).collect()
+    mutators
+        .par_iter()
+        .map(|mutator| {
+            let mut polls = 0;
+            for _ in 0..iterations {
+                mutator.poll_safepoint();
+                polls += 1;
+            }
+            polls
+        })
+        .collect()
 }
 
 /// Simulate mutator behavior using Rayon for parallel execution
@@ -82,24 +69,44 @@ fn complete_fugc_8_step_protocol() {
     registered_mutator1.register_stack_root(stack1.as_usize() as *mut u8);
     registered_mutator2.register_stack_root(stack2.as_usize() as *mut u8);
 
-    let (handle1, running1) = spawn_mutator(registered_mutator1);
-    let (handle2, running2) = spawn_mutator(registered_mutator2);
+    // Spawn scoped mutator threads using crossbeam to avoid unscoped OS threads
+    let running1 = Arc::new(AtomicBool::new(true));
+    let running2 = Arc::new(AtomicBool::new(true));
+    let r1 = Arc::clone(&running1);
+    let r2 = Arc::clone(&running2);
 
-    {
-        let mut roots = global_roots.lock();
-        let r1 = unsafe { Address::from_usize(heap_base.as_usize() + 0x100) };
-        let r2 = unsafe { Address::from_usize(heap_base.as_usize() + 0x200) };
-        roots.register(r1.as_usize() as *mut u8);
-        roots.register(r2.as_usize() as *mut u8);
-    }
+    crossbeam::scope(|s| {
+        let m1 = registered_mutator1.clone();
+        let m2 = registered_mutator2.clone();
 
-    coordinator.trigger_gc();
-    assert!(coordinator.wait_until_idle(Duration::from_millis(5000)));
+        s.spawn(move |_| {
+            while r1.load(Ordering::Relaxed) {
+                m1.poll_safepoint();
+            }
+        });
 
-    running1.store(false, Ordering::Relaxed);
-    running2.store(false, Ordering::Relaxed);
-    handle1.join().unwrap();
-    handle2.join().unwrap();
+        s.spawn(move |_| {
+            while r2.load(Ordering::Relaxed) {
+                m2.poll_safepoint();
+            }
+        });
+
+        {
+            let roots = global_roots.load();
+            let r1 = unsafe { Address::from_usize(heap_base.as_usize() + 0x100) };
+            let r2 = unsafe { Address::from_usize(heap_base.as_usize() + 0x200) };
+            roots.register(r1.as_usize() as *mut u8);
+            roots.register(r2.as_usize() as *mut u8);
+        }
+
+        coordinator.trigger_gc();
+        assert!(coordinator.wait_until_idle(Duration::from_millis(5000)));
+
+        running1.store(false, Ordering::Relaxed);
+        running2.store(false, Ordering::Relaxed);
+
+        // Scope will join the spawned mutator threads here
+    }).unwrap();
     thread_registry.unregister(mutator1.id());
     thread_registry.unregister(mutator2.id());
 
@@ -165,7 +172,7 @@ fn step_4_global_root_marking_reachability() {
     let coordinator = Arc::clone(&fixture.coordinator);
     let global_roots = Arc::clone(fixture.global_roots());
 
-    let mut roots = global_roots.lock();
+    let roots = global_roots.load();
     let r1 = unsafe { Address::from_usize(heap_base.as_usize() + 0x100) };
     let r2 = unsafe { Address::from_usize(heap_base.as_usize() + 0x200) };
     roots.register(r1.as_usize() as *mut u8);
@@ -260,7 +267,7 @@ fn step_8_page_based_sweep_allocation_coloring() {
     let coordinator = Arc::clone(&fixture.coordinator);
     let global_roots = Arc::clone(fixture.global_roots());
     {
-        let mut roots = global_roots.lock();
+        let roots = global_roots.load();
         let root_addr = unsafe { Address::from_usize(heap_base.as_usize() + 0x100) };
         roots.register(root_addr.as_usize() as *mut u8);
     }
@@ -304,7 +311,7 @@ fn fugc_statistics_accuracy() {
     let (handle, running) = spawn_mutator(registered_mutator);
 
     {
-        let mut roots = global_roots.lock();
+        let roots = global_roots.load();
         let r = unsafe { Address::from_usize(heap_base.as_usize() + 0x150) };
         roots.register(r.as_usize() as *mut u8);
     }
@@ -344,7 +351,7 @@ fn fugc_concurrent_collection_stress() {
     }
 
     {
-        let mut roots = global_roots.lock();
+        let roots = global_roots.load();
         let r = unsafe { Address::from_usize(heap_base.as_usize() + 0x200) };
         roots.register(r.as_usize() as *mut u8);
     }

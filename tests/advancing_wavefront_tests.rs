@@ -141,10 +141,7 @@ fn test_incremental_update_collector_property() {
     .unwrap();
 
     // Register root object
-    {
-        let mut roots = global_roots.lock();
-        roots.register(root.to_raw_address().as_usize() as *mut u8);
-    }
+    global_roots.load().register(root.to_raw_address().as_usize() as *mut u8);
 
     // Initially, root is live, obj1 is reachable through root, obj2 is reachable through obj1
     coordinator.write_barrier().activate();
@@ -328,11 +325,9 @@ fn test_concurrent_marking_with_mutator_interference() {
         .collect();
 
     // Register some objects as roots
-    {
-        let mut roots = global_roots.lock();
-        for &obj in &objects[0..3] {
-            roots.register(obj.to_raw_address().as_usize() as *mut u8);
-        }
+    let roots = global_roots.load();
+    for &obj in &objects[0..3] {
+        roots.register(obj.to_raw_address().as_usize() as *mut u8);
     }
 
     // Start concurrent marking
@@ -351,76 +346,79 @@ fn test_concurrent_marking_with_mutator_interference() {
     let mutator_objects = objects.clone();
     let barrier_hits = Arc::clone(&write_barrier_hits);
 
-    let mutator_handle = thread::spawn(move || {
-        // Wait for marking to start
-        marking_start_receiver.recv().unwrap();
+    crossbeam::scope(|s| {
+        let mutator_handle = s.spawn(move |_| {
+            // Wait for marking to start
+            marking_start_receiver.recv().unwrap();
 
-        let mut modification_count = 0;
-        let target_modifications = 50; // Reduced for faster test execution
+            let mut modification_count = 0;
+            let target_modifications = 50; // Reduced for faster test execution
 
-        while modification_count < target_modifications {
-            // Simulate mutator creating new references
-            for i in 0..mutator_objects.len() - 1 {
-                let src = mutator_objects[i];
-                let dst = mutator_objects[i + 1];
+            while modification_count < target_modifications {
+                // Simulate mutator creating new references
+                for i in 0..mutator_objects.len() - 1 {
+                    let src = mutator_objects[i];
+                    let dst = mutator_objects[i + 1];
 
-                // This goes through write barrier
-                unsafe {
-                    mutator_coordinator.write_barrier().write_barrier_fast(
-                        &src as *const ObjectReference as *mut ObjectReference,
-                        dst,
-                    );
+                    // This goes through write barrier
+                    unsafe {
+                        mutator_coordinator.write_barrier().write_barrier_fast(
+                            &src as *const ObjectReference as *mut ObjectReference,
+                            dst,
+                        );
+                    }
+
+                    barrier_hits.fetch_add(1, Ordering::Relaxed);
+                    modification_count += 1;
+
+                    // Brief yield to allow marking thread to make progress
+                    if modification_count % 10 == 0 {
+                        thread::yield_now();
+                    }
                 }
+            }
 
-                barrier_hits.fetch_add(1, Ordering::Relaxed);
-                modification_count += 1;
+            // Signal completion
+            mutator_complete_sender.send(modification_count).unwrap();
+            modification_count
+        });
 
-                // Brief yield to allow marking thread to make progress
-                if modification_count % 10 == 0 {
-                    thread::yield_now();
-                }
+        // Perform concurrent marking while mutator is active
+        for &obj in &objects[0..3] {
+            coordinator
+                .tricolor_marking()
+                .set_color(obj, ObjectColor::Grey);
+        }
+
+        // Signal mutator to start
+        marking_start_sender.send(()).unwrap();
+
+        // Process marking work
+        for &obj in &objects {
+            if coordinator.tricolor_marking().get_color(obj) == ObjectColor::Grey {
+                coordinator.tricolor_marking().transition_color(
+                    obj,
+                    ObjectColor::Grey,
+                    ObjectColor::Black,
+                );
             }
         }
 
-        // Signal completion
-        mutator_complete_sender.send(modification_count).unwrap();
-        modification_count
-    });
+        // Signal marking completion
+        marking_complete_sender.send(()).unwrap();
 
-    // Perform concurrent marking while mutator is active
-    for &obj in &objects[0..3] {
-        coordinator
-            .tricolor_marking()
-            .set_color(obj, ObjectColor::Grey);
-    }
-
-    // Signal mutator to start
-    marking_start_sender.send(()).unwrap();
-
-    // Process marking work
-    for &obj in &objects {
-        if coordinator.tricolor_marking().get_color(obj) == ObjectColor::Grey {
-            coordinator.tricolor_marking().transition_color(
-                obj,
-                ObjectColor::Grey,
-                ObjectColor::Black,
-            );
-        }
-    }
-
-    // Signal marking completion
-    marking_complete_sender.send(()).unwrap();
-
-    // Wait for mutator to complete with timeout
-    let modifications = match mutator_complete_receiver.recv_timeout(Duration::from_secs(5)) {
-        Ok(count) => {
-            mutator_handle.join().unwrap();
-            count
-        }
-        Err(_) => {
-            panic!("Mutator thread did not complete within timeout");
-        }
-    };
+        // Wait for mutator to complete with timeout
+        let modifications = match mutator_complete_receiver.recv_timeout(Duration::from_secs(5)) {
+            Ok(count) => {
+                mutator_handle.join().unwrap();
+                count
+            }
+            Err(_) => {
+                panic!("Mutator thread did not complete within timeout");
+            }
+        };
+        modifications
+    }).unwrap();
 
     // Verify advancing wavefront properties
     let barrier_hit_count = write_barrier_hits.load(Ordering::Relaxed);
@@ -477,10 +475,7 @@ fn test_complete_advancing_wavefront_cycle() {
     })
     .unwrap();
 
-    {
-        let mut roots = global_roots.lock();
-        roots.register(root.to_raw_address().as_usize() as *mut u8);
-    }
+    global_roots.load().register(root.to_raw_address().as_usize() as *mut u8);
 
     // Phase 2: Start advancing wavefront collection
     assert_eq!(coordinator.current_phase(), FugcPhase::Idle);

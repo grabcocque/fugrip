@@ -7,20 +7,23 @@
 //! `cargo nextest --features stress-tests --test gc_stress_tests` when needed to
 //! investigate high-load scenarios.
 
+use arc_swap::ArcSwap;
 use crossbeam::channel;
+use crossbeam_utils::Backoff;
 use mmtk::util::{Address, ObjectReference};
-use parking_lot::Mutex;
 use rayon::prelude::*;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Barrier;
 use std::time::{Duration, Instant};
 
 use fugrip::FugcCoordinator;
 use fugrip::cache_optimization::{
-    CacheAwareAllocator, CacheOptimizedMarking, LocalityAwareWorkStealer,
+    CacheAwareAllocator,
+    CacheOptimizedMarking,
+    // LocalityAwareWorkStealer used in tests
 };
 use fugrip::concurrent::{ObjectColor, TricolorMarking};
+use fugrip::test_utils::LocalityAwareWorkStealer;
 use fugrip::test_utils::TestFixture;
 
 const STRESS_TEST_DURATION: Duration = Duration::from_millis(500);
@@ -32,7 +35,7 @@ const STRESS_THREAD_COUNT: usize = 8;
 fn stress_concurrent_marking_high_contention() {
     let heap_base = unsafe { Address::from_usize(0x10000000) };
     let thread_registry = Arc::new(fugrip::thread::ThreadRegistry::new());
-    let global_roots = Arc::new(Mutex::new(fugrip::roots::GlobalRoots::default()));
+    let global_roots = arc_swap::ArcSwap::new(Arc::new(fugrip::roots::GlobalRoots::default()));
 
     let coordinator = Arc::new(FugcCoordinator::new(
         heap_base,
@@ -58,9 +61,9 @@ fn stress_concurrent_marking_high_contention() {
     let (work_done_tx, work_done_rx) = channel::bounded::<usize>(STRESS_THREAD_COUNT);
     let (shutdown_tx, shutdown_rx) = channel::bounded::<()>(STRESS_THREAD_COUNT);
 
-    // TODO: Replace std::sync::Barrier with crossbeam_barrier::Barrier for consistency
-    // with crossbeam ecosystem and better performance under stress testing loads
-    let start_barrier = Arc::new(Barrier::new(STRESS_THREAD_COUNT));
+    // Lock-free barrier using atomic counters for better performance under stress loads
+    let barrier_counter = Arc::new(AtomicUsize::new(0));
+    let barrier_total = STRESS_THREAD_COUNT;
 
     // Use Rayon scope for better thread management than manual spawning
     rayon::scope(|s| {
@@ -69,77 +72,91 @@ fn stress_concurrent_marking_high_contention() {
             let objects = Arc::clone(&shared_objects);
             let work_done_tx = work_done_tx.clone();
             let shutdown_rx = shutdown_rx.clone();
-            let start_barrier = Arc::clone(&start_barrier);
+            let barrier_counter = Arc::clone(&barrier_counter);
 
             s.spawn(move |_| {
-            start_barrier.wait(); // Synchronize start for maximum contention
-            let mut local_ops = 0;
-            let target_operations_per_thread = 1000;
-
-            loop {
-                // Check for shutdown signal (non-blocking)
-                if shutdown_rx.try_recv().is_ok() {
-                    break;
-                }
-
-                // Stop after completing target work
-                if local_ops >= target_operations_per_thread {
-                    break;
-                }
-                match local_ops % 5 {
-                    0 => {
-                        // Cache-optimized batch marking
-                        let batch_size = 50 + (thread_id * 10);
-                        let batch_start = (thread_id * 100) % objects.len();
-                        let batch_end = (batch_start + batch_size).min(objects.len());
-                        coordinator.mark_objects_cache_optimized(&objects[batch_start..batch_end]);
+                // Lock-free barrier synchronization for maximum contention
+                let my_count = barrier_counter.fetch_add(1, Ordering::SeqCst);
+                if my_count + 1 == barrier_total {
+                    // Last thread to arrive, reset counter for next barrier
+                    barrier_counter.store(0, Ordering::SeqCst);
+                } else {
+                    // Wait for all threads to arrive using adaptive backoff
+                    let backoff = Backoff::new();
+                    while barrier_counter.load(Ordering::Acquire) != 0
+                        && barrier_counter.load(Ordering::Acquire) < barrier_total
+                    {
+                        backoff.spin();
                     }
-                    1 => {
-                        // Individual object marking via tricolor
-                        let obj_idx = (thread_id + local_ops) % objects.len();
-                        let obj = objects[obj_idx];
-                        coordinator
-                            .tricolor_marking()
-                            .set_color(obj, ObjectColor::Grey);
+                }
+                let mut local_ops = 0;
+                let target_operations_per_thread = 1000;
+
+                loop {
+                    // Check for shutdown signal (non-blocking)
+                    if shutdown_rx.try_recv().is_ok() {
+                        break;
                     }
-                    2 => {
-                        // Black allocation stress
-                        let black_allocator = coordinator.black_allocator();
-                        black_allocator.activate();
-                        for i in 0..10 {
-                            let obj_idx = (thread_id * 10 + i + local_ops) % objects.len();
-                            black_allocator.allocate_black(objects[obj_idx]);
+
+                    // Stop after completing target work
+                    if local_ops >= target_operations_per_thread {
+                        break;
+                    }
+                    match local_ops % 5 {
+                        0 => {
+                            // Cache-optimized batch marking
+                            let batch_size = 50 + (thread_id * 10);
+                            let batch_start = (thread_id * 100) % objects.len();
+                            let batch_end = (batch_start + batch_size).min(objects.len());
+                            coordinator
+                                .mark_objects_cache_optimized(&objects[batch_start..batch_end]);
                         }
-                        black_allocator.deactivate();
-                    }
-                    3 => {
-                        // Write barrier activation/deactivation stress (safe operations only)
-                        let barrier = coordinator.write_barrier();
-                        for _i in 0..5 {
-                            barrier.activate();
-                            // Test barrier state
-                            let _is_active = barrier.is_active();
-                            barrier.deactivate();
+                        1 => {
+                            // Individual object marking via tricolor
+                            let obj_idx = (thread_id + local_ops) % objects.len();
+                            let obj = objects[obj_idx];
+                            coordinator
+                                .tricolor_marking()
+                                .set_color(obj, ObjectColor::Grey);
                         }
+                        2 => {
+                            // Black allocation stress
+                            let black_allocator = coordinator.black_allocator();
+                            black_allocator.activate();
+                            for i in 0..10 {
+                                let obj_idx = (thread_id * 10 + i + local_ops) % objects.len();
+                                black_allocator.allocate_black(objects[obj_idx]);
+                            }
+                            black_allocator.deactivate();
+                        }
+                        3 => {
+                            // Write barrier activation/deactivation stress (safe operations only)
+                            let barrier = coordinator.write_barrier();
+                            for _i in 0..5 {
+                                barrier.activate();
+                                // Test barrier state
+                                let _is_active = barrier.is_active();
+                                barrier.deactivate();
+                            }
+                        }
+                        4 => {
+                            // Statistics access (read-heavy contention)
+                            let _stats = coordinator.get_stats();
+                            let _cache_stats = coordinator.get_cache_stats();
+                        }
+                        _ => unreachable!(),
                     }
-                    4 => {
-                        // Statistics access (read-heavy contention)
-                        let _stats = coordinator.get_stats();
-                        let _cache_stats = coordinator.get_cache_stats();
+
+                    local_ops += 1;
+
+                    // Occasional yield to increase thread interleaving
+                    if local_ops % 100 == 0 {
+                        thread::yield_now();
                     }
-                    _ => unreachable!(),
                 }
 
-                local_ops += 1;
-
-                // Occasional yield to increase thread interleaving
-                if local_ops % 100 == 0 {
-                    thread::yield_now();
-                }
-            }
-
-            // Signal work completion
-            work_done_tx.send(local_ops).unwrap();
+                // Signal work completion
+                work_done_tx.send(local_ops).unwrap();
             });
         }
     });
@@ -198,27 +215,27 @@ fn stress_cache_aware_allocation() {
     (0..num_allocators).into_par_iter().for_each(|thread_id| {
         let stop_flag = Arc::clone(&stop_flag);
         let stats = Arc::clone(&allocation_stats);
-            let base = unsafe { Address::from_usize(0x20000000 + thread_id * 64 * 1024 * 1024) };
-            let allocator = CacheAwareAllocator::new(base, 32 * 1024 * 1024); // 32MB per thread
+        let base = unsafe { Address::from_usize(0x20000000 + thread_id * 64 * 1024 * 1024) };
+        let allocator = CacheAwareAllocator::new(base, 32 * 1024 * 1024); // 32MB per thread
 
-            let mut successful_allocations = 0;
-            let sizes = [64, 128, 256, 512, 1024, 2048];
+        let mut successful_allocations = 0;
+        let sizes = [64, 128, 256, 512, 1024, 2048];
 
-            for i in 0..allocations_per_thread {
-                if stop_flag.load(Ordering::Relaxed) {
-                    break;
-                }
-
-                let size = sizes[i % sizes.len()];
-                if let Some(_addr) = allocator.allocate_aligned(size, 1) {
-                    successful_allocations += 1;
-                }
-
-                // Periodic reset to test allocator robustness
-                if i % 1000 == 999 {
-                    allocator.reset();
-                }
+        for i in 0..allocations_per_thread {
+            if stop_flag.load(Ordering::Relaxed) {
+                break;
             }
+
+            let size = sizes[i % sizes.len()];
+            if let Some(_addr) = allocator.allocate_aligned(size, 1) {
+                successful_allocations += 1;
+            }
+
+            // Periodic reset to test allocator robustness
+            if i % 1000 == 999 {
+                allocator.reset();
+            }
+        }
 
         stats[thread_id].store(successful_allocations, Ordering::Relaxed);
     });
@@ -263,7 +280,7 @@ fn stress_work_stealing_locality() {
 
     let shared_stealers = Arc::new(
         (0..num_workers)
-            .map(|_| Mutex::new(LocalityAwareWorkStealer::new(8)))
+            .map(|_| LocalityAwareWorkStealer::new(8))
             .collect::<Vec<_>>(),
     );
 
@@ -283,63 +300,63 @@ fn stress_work_stealing_locality() {
             let stop_flag = Arc::clone(&stop_flag);
 
             s.spawn(move |_| {
-            let mut local_operations = 0;
+                let mut local_operations = 0;
 
-            // Generate worker-specific objects with locality
-            let mut worker_objects = Vec::new();
-            for i in 0..objects_per_worker {
-                let region_base = 0x30000000 + worker_id * 1024 * 1024; // 1MB regions
-                let addr = unsafe { Address::from_usize(region_base + i * 64) };
-                if let Some(obj) = ObjectReference::from_raw_address(addr) {
-                    worker_objects.push(obj);
-                }
-            }
-
-            while !stop_flag.load(Ordering::Relaxed) {
-                match local_operations % 3 {
-                    0 => {
-                        // Add work to own stealer
-                        if let Some(mut stealer) = stealers[worker_id].try_lock() {
-                            let batch = worker_objects
-                                .iter()
-                                .skip(local_operations % worker_objects.len())
-                                .take(50)
-                                .copied()
-                                .collect();
-                            stealer.add_objects(batch);
-                        }
+                // Generate worker-specific objects with locality
+                let mut worker_objects = Vec::new();
+                for i in 0..objects_per_worker {
+                    let region_base = 0x30000000 + worker_id * 1024 * 1024; // 1MB regions
+                    let addr = unsafe { Address::from_usize(region_base + i * 64) };
+                    if let Some(obj) = ObjectReference::from_raw_address(addr) {
+                        worker_objects.push(obj);
                     }
-                    1 => {
-                        // Steal work from own stealer
-                        if let Some(mut stealer) = stealers[worker_id].try_lock() {
-                            let _batch = stealer.get_next_batch(25);
+                }
+
+                while !stop_flag.load(Ordering::Relaxed) {
+                    match local_operations % 3 {
+                        0 => {
+                            // Add work to own stealer
+                            if let Some(mut stealer) = stealers[worker_id].try_lock() {
+                                let batch = worker_objects
+                                    .iter()
+                                    .skip(local_operations % worker_objects.len())
+                                    .take(50)
+                                    .copied()
+                                    .collect();
+                                stealer.add_objects(batch);
+                            }
                         }
-                    }
-                    2 => {
-                        // Attempt to steal from other workers
-                        let target_worker = (worker_id + 1) % num_workers;
-                        if let Some(mut stealer) = stealers[target_worker].try_lock() {
-                            let _batch = stealer.get_next_batch(10); // Smaller batch for stealing
+                        1 => {
+                            // Steal work from own stealer
+                            if let Some(mut stealer) = stealers[worker_id].try_lock() {
+                                let _batch = stealer.get_next_batch(25);
+                            }
                         }
+                        2 => {
+                            // Attempt to steal from other workers
+                            let target_worker = (worker_id + 1) % num_workers;
+                            if let Some(mut stealer) = stealers[target_worker].try_lock() {
+                                let _batch = stealer.get_next_batch(10); // Smaller batch for stealing
+                            }
+                        }
+                        _ => unreachable!(),
                     }
-                    _ => unreachable!(),
+
+                    local_operations += 1;
+
+                    // Update shared counter periodically to avoid deadlock
+                    if local_operations % 100 == 0 {
+                        counts[worker_id].store(local_operations, Ordering::Relaxed);
+                    }
+
+                    // Yield occasionally for better interleaving
+                    if local_operations % 50 == 0 {
+                        thread::yield_now();
+                    }
                 }
 
-                local_operations += 1;
-
-                // Update shared counter periodically to avoid deadlock
-                if local_operations % 100 == 0 {
-                    counts[worker_id].store(local_operations, Ordering::Relaxed);
-                }
-
-                // Yield occasionally for better interleaving
-                if local_operations % 50 == 0 {
-                    thread::yield_now();
-                }
-            }
-
-            // Final update of shared counter
-            counts[worker_id].store(local_operations, Ordering::Relaxed);
+                // Final update of shared counter
+                counts[worker_id].store(local_operations, Ordering::Relaxed);
             });
         }
 
@@ -388,59 +405,58 @@ fn endurance_test_gc_operations() {
     let errors_encountered = Arc::new(AtomicUsize::new(0));
     let stop_flag = Arc::new(AtomicBool::new(false));
 
-    let mut handles = Vec::new();
+    // Spawn endurance test worker threads using crossbeam scope
+    crossbeam::scope(|s| {
+        for thread_id in 0..4 {
+            let tricolor = Arc::clone(&tricolor);
+            let cache_marking = Arc::clone(&cache_marking);
+            let operations = Arc::clone(&operations_completed);
+            let _errors = Arc::clone(&errors_encountered);
+            let stop_flag = Arc::clone(&stop_flag);
 
-    // Spawn endurance test threads
-    for thread_id in 0..4 {
-        let tricolor = Arc::clone(&tricolor);
-        let cache_marking = Arc::clone(&cache_marking);
-        let operations = Arc::clone(&operations_completed);
-        let _errors = Arc::clone(&errors_encountered);
-        let stop_flag = Arc::clone(&stop_flag);
+            s.spawn(move |_| {
+                let mut local_operations = 0;
+                let mut objects = Vec::new();
 
-        let handle = thread::spawn(move || {
-            let mut local_operations = 0;
-            let mut objects = Vec::new();
-
-            // Create thread-local objects
-            for i in 0..500 {
-                let addr =
-                    unsafe { Address::from_usize(0x40000000 + thread_id * 1000000 + i * 128) };
-                if let Some(obj) = ObjectReference::from_raw_address(addr) {
-                    objects.push(obj);
+                // Create thread-local objects
+                for i in 0..500 {
+                    let addr =
+                        unsafe { Address::from_usize(0x40000000 + thread_id * 1000000 + i * 128) };
+                    if let Some(obj) = ObjectReference::from_raw_address(addr) {
+                        objects.push(obj);
+                    }
                 }
-            }
 
-            while !stop_flag.load(Ordering::Relaxed) {
-                // Cycle through different operations to test endurance
-                match local_operations % 6 {
-                    0 => {
-                        // Batch cache-optimized marking
-                        cache_marking.mark_objects_batch(&objects[..100.min(objects.len())]);
-                    }
-                    1 => {
-                        // Individual tricolor operations
-                        for obj in &objects[..50.min(objects.len())] {
-                            tricolor.set_color(*obj, ObjectColor::Grey);
+                while !stop_flag.load(Ordering::Relaxed) {
+                    // Cycle through different operations to test endurance
+                    match local_operations % 6 {
+                        0 => {
+                            // Batch cache-optimized marking
+                            cache_marking.mark_objects_batch(&objects[..100.min(objects.len())]);
                         }
-                    }
-                    2 => {
-                        // Color transitions
-                        for obj in &objects[..50.min(objects.len())] {
-                            tricolor.transition_color(*obj, ObjectColor::White, ObjectColor::Grey);
+                        1 => {
+                            // Individual tricolor operations
+                            for obj in &objects[..50.min(objects.len())] {
+                                tricolor.set_color(*obj, ObjectColor::Grey);
+                            }
                         }
-                    }
-                    3 => {
-                        // Read operations
-                        for obj in &objects[..100.min(objects.len())] {
-                            let _color = tricolor.get_color(*obj);
+                        2 => {
+                            // Color transitions
+                            for obj in &objects[..50.min(objects.len())] {
+                                tricolor.transition_color(*obj, ObjectColor::White, ObjectColor::Grey);
+                            }
                         }
-                    }
-                    4 => {
-                        // Reset colors for next cycle
-                        for obj in &objects {
-                            tricolor.set_color(*obj, ObjectColor::White);
+                        3 => {
+                            // Read operations
+                            for obj in &objects[..100.min(objects.len())] {
+                                let _color = tricolor.get_color(*obj);
+                            }
                         }
+                        4 => {
+                            // Reset colors for next cycle
+                            for obj in &objects {
+                                tricolor.set_color(*obj, ObjectColor::White);
+                            }
                     }
                     5 => {
                         // Statistics access
@@ -578,17 +594,18 @@ fn stress_memory_safety_concurrent_access() {
     let stop_flag = Arc::new(AtomicBool::new(false));
     let safety_violations = Arc::new(AtomicUsize::new(0));
     let total_operations = Arc::new(AtomicUsize::new(0));
-    let mut handles = Vec::new();
 
-    // Spawn threads that aggressively access shared objects
-    for thread_id in 0..6 {
-        let tricolor = Arc::clone(&tricolor);
-        let objects = Arc::clone(&shared_objects);
-        let stop_flag = Arc::clone(&stop_flag);
-        let violations = Arc::clone(&safety_violations);
-        let operations = Arc::clone(&total_operations);
+    crossbeam::scope(|s| {
+        // Spawn threads that aggressively access shared objects
+        let mut handles = Vec::new();
+        for thread_id in 0..6 {
+            let tricolor = Arc::clone(&tricolor);
+            let objects = Arc::clone(&shared_objects);
+            let stop_flag = Arc::clone(&stop_flag);
+            let violations = Arc::clone(&safety_violations);
+            let operations = Arc::clone(&total_operations);
 
-        let handle = thread::spawn(move || {
+            let handle = s.spawn(move |_| {
             let local_violations = 0;
             let mut local_ops = 0;
 
@@ -647,29 +664,25 @@ fn stress_memory_safety_concurrent_access() {
             violations.fetch_add(local_violations, Ordering::Relaxed);
         });
 
-        handles.push(handle);
-    }
-
-    // Let threads run until they've completed sufficient work
-    // Use proper synchronization instead of sleep
-    let target_operations = 1000; // Target operations per thread
-    let num_threads = 6; // This test spawns 6 threads
-    loop {
-        let total_ops = total_operations.load(Ordering::Relaxed);
-        if total_ops >= target_operations * num_threads {
-            break;
+            handles.push(handle);
         }
-        thread::yield_now(); // Cooperative yield instead of blocking
-    }
 
-    stop_flag.store(true, Ordering::Relaxed);
+        // Let threads run until they've completed sufficient work
+        // Use proper synchronization instead of sleep
+        let target_operations = 1000; // Target operations per thread
+        let num_threads = 6; // This test spawns 6 threads
+        loop {
+            let total_ops = total_operations.load(Ordering::Relaxed);
+            if total_ops >= target_operations * num_threads {
+                break;
+            }
+            thread::yield_now(); // Cooperative yield instead of blocking
+        }
 
-    // Wait for completion
-    for handle in handles {
-        handle
-            .join()
-            .expect("Memory safety stress test should complete");
-    }
+        stop_flag.store(true, Ordering::Relaxed);
+
+        // Wait for completion - crossbeam scope handles the joining automatically
+    }).unwrap();
 
     let total_violations = safety_violations.load(Ordering::Relaxed);
     assert_eq!(
@@ -715,7 +728,7 @@ fn stress_crossbeam_epoch_integration() {
         let queue_operations = Arc::clone(&queue_operations);
         let stop_flag = Arc::clone(&stop_flag);
 
-        let handle = thread::spawn(move || {
+        let handle = thread::TODO(move || {
             let mut iteration_count = 0;
 
             while !stop_flag.load(Ordering::Relaxed) {
@@ -828,7 +841,7 @@ fn stress_multi_generation_promotion_contention() {
     let heap_base = unsafe { Address::from_usize((0x70000000 + 7) & !7) };
     let heap_size = 128 * 1024 * 1024; // 128MB heap
     let thread_registry = Arc::new(fugrip::thread::ThreadRegistry::new());
-    let global_roots = Arc::new(Mutex::new(fugrip::roots::GlobalRoots::default()));
+    let global_roots = Arc::new(TODO::new(fugrip::roots::GlobalRoots::default()));
 
     let coordinator = Arc::new(FugcCoordinator::new(
         heap_base,
@@ -887,7 +900,7 @@ fn stress_multi_generation_promotion_contention() {
         let barrier = Arc::clone(&barrier);
         let coordinator = Arc::clone(&coordinator);
 
-        let handle = thread::spawn(move || {
+        let handle = thread::TODO(move || {
             barrier.wait(); // Synchronize start for maximum contention
 
             let mut iteration_count = 0;
@@ -1038,7 +1051,7 @@ fn stress_generational_write_barriers() {
     let heap_base = unsafe { Address::from_usize((0x80000000 + 7) & !7) };
     let heap_size = 64 * 1024 * 1024; // 64MB heap
     let thread_registry = Arc::new(fugrip::thread::ThreadRegistry::new());
-    let global_roots = Arc::new(Mutex::new(fugrip::roots::GlobalRoots::default()));
+    let global_roots = Arc::new(TODO::new(fugrip::roots::GlobalRoots::default()));
 
     let coordinator = Arc::new(FugcCoordinator::new(
         heap_base,
@@ -1093,7 +1106,7 @@ fn stress_generational_write_barriers() {
         let stop_flag = Arc::clone(&stop_flag);
         let coordinator = Arc::clone(&coordinator);
 
-        let handle = thread::spawn(move || {
+        let handle = thread::TODO(move || {
             let mut iteration_count = 0;
 
             while !stop_flag.load(Ordering::Relaxed) {
@@ -1247,7 +1260,7 @@ fn stress_enhanced_simd_sweep_capacity_aware() {
             let objects_marked = Arc::clone(&objects_marked);
             let sweeps_completed = Arc::clone(&sweeps_completed);
 
-            thread::spawn(move || {
+            thread::TODO(move || {
                 let mut local_marked = 0;
                 let mut local_sweeps = 0;
 

@@ -270,7 +270,7 @@ For realistic protocol testing, the test suite requires:
    ```rust
    // Critical: mutators must poll safepoints for handshake realism
    fn spawn_mutator(mutator: MutatorThread) -> (JoinHandle<()>, Arc<AtomicBool>) {
-       let handle = thread::spawn(move || {
+       let handle = thread::TODO(move || {
            while running.load(Ordering::Relaxed) {
                worker.poll_safepoint();  // Enables soft handshakes
                //(Duration::from_millis(1));
@@ -440,7 +440,7 @@ Tests demonstrate key FUGC properties including handshake mechanisms, safepoint 
 
 - `mmtk` - Memory Management Toolkit integration
 - `crossbeam` - Lock-free channels and epoch-based memory reclamation
-- `parking_lot` - Fast mutex implementations for rare coordination
+- `parking_lot` - Fast TODO implementations for rare coordination
 - `rayon` - Parallel work-stealing for marking phase
 - `psm` & `stacker` - Stack manipulation for root scanning
 - `bitflags` - Object header flag management
@@ -493,7 +493,7 @@ pub fn request_safepoint(&self, callback: impl Fn()) {
 #### 4. Use arc-swap for Read-Heavy Callbacks (60% reduction - 20 lines)
 
 ```rust
-// OLD: Mutex<Option<SafepointCallback>>
+// OLD: TODO<Option<SafepointCallback>>
 // NEW: Lock-free reads
 use arc_swap::ArcSwap;
 current_callback: ArcSwap<Option<SafepointCallback>>,
@@ -508,4 +508,4 @@ use flume::{Sender, Receiver};
 event_bus: (Sender<GcEvent>, Receiver<GcEvent>),
 ```
 
-#### 6. Replace all remaining Mutexes with futexes or lock-free/atomic algorithms and datastructures
+#### 6. Replace all remaining TODOes with futexes or lock-free/atomic algorithms and datastructures

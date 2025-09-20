@@ -9,7 +9,6 @@ use fugrip::test_utils::TestFixture;
 use fugrip::{bounded_work, gc_alloc, gc_function, gc_loop};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::thread;
 use std::time::Duration;
 
 /// Test that gc_loop macro inserts pollchecks automatically
@@ -173,21 +172,23 @@ fn test_bounded_progress_under_load() {
     let stop_threads = Arc::new(AtomicBool::new(false));
     let threads_completed = Arc::new(AtomicUsize::new(0));
 
-    let mut handles = Vec::new();
     let (start_tx, start_rx) = channel::bounded(0);
     let (started_tx, started_rx) = channel::bounded(4);
     let (finished_tx, finished_rx) = channel::bounded(4);
 
-    // Spawn multiple threads using macro-based pollchecks
-    for _thread_id in 0..4 {
-        let stop = Arc::clone(&stop_threads);
-        let completed = Arc::clone(&threads_completed);
+    crossbeam::scope(|s| {
+        let mut handles = Vec::new();
 
-        let start_rx = start_rx.clone();
-        let started_tx = started_tx.clone();
-        let finished_tx = finished_tx.clone();
+        // Spawn multiple threads using macro-based pollchecks
+        for _thread_id in 0..4 {
+            let stop = Arc::clone(&stop_threads);
+            let completed = Arc::clone(&threads_completed);
 
-        let handle = thread::spawn(move || {
+            let start_rx = start_rx.clone();
+            let started_tx = started_tx.clone();
+            let finished_tx = finished_tx.clone();
+
+            let handle = s.spawn(move |_| {
             start_rx.recv().unwrap();
             started_tx.send(()).unwrap();
 
@@ -216,46 +217,44 @@ fn test_bounded_progress_under_load() {
             work_done
         });
 
-        handles.push(handle);
-    }
+            handles.push(handle);
+        }
 
-    drop(start_rx);
+        drop(start_rx);
 
-    // Start all threads
-    all_threads_started.store(true, Ordering::Relaxed);
-    for _ in 0..4 {
-        start_tx.send(()).unwrap();
-    }
+        // Start all threads
+        all_threads_started.store(true, Ordering::Relaxed);
+        for _ in 0..4 {
+            start_tx.send(()).unwrap();
+        }
 
-    for _ in 0..4 {
-        started_rx.recv().unwrap();
-    }
+        for _ in 0..4 {
+            started_rx.recv().unwrap();
+        }
 
-    // Request a safepoint that will stop all threads
-    let stop_clone = Arc::clone(&stop_threads);
-    manager.request_safepoint(Box::new(move || {
-        stop_clone.store(true, Ordering::Relaxed);
-    }));
+        // Request a safepoint that will stop all threads
+        let stop_clone = Arc::clone(&stop_threads);
+        manager.request_safepoint(Box::new(move || {
+            stop_clone.store(true, Ordering::Relaxed);
+        }));
 
-    // Wait for safepoint to take effect
-    let timeout = Duration::from_millis(200);
-    for _ in 0..4 {
-        finished_rx
-            .recv_timeout(timeout)
-            .expect("Thread did not finish within timeout");
-    }
+        // Wait for safepoint to take effect
+        let timeout = Duration::from_millis(200);
+        for _ in 0..4 {
+            finished_rx
+                .recv_timeout(timeout)
+                .expect("Thread did not finish within timeout");
+        }
 
-    // Cleanup
-    stop_threads.store(true, Ordering::Relaxed);
-    manager.clear_safepoint();
+        // Cleanup
+        stop_threads.store(true, Ordering::Relaxed);
+        manager.clear_safepoint();
 
-    drop(finished_tx);
-    drop(started_tx);
+        drop(finished_tx);
+        drop(started_tx);
 
-    // Wait for all threads to complete
-    for handle in handles {
-        let _work_done = handle.join().expect("Thread should complete");
-    }
+        // Crossbeam scope automatically joins all spawned threads
+    }).unwrap();
 
     let final_completed = threads_completed.load(Ordering::Relaxed);
     println!("  📊 Threads that reached safepoint: {}/4", final_completed);

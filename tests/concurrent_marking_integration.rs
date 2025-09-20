@@ -4,7 +4,7 @@ use fugrip::concurrent::{
     BlackAllocator, ObjectColor, ParallelMarkingCoordinator, TricolorMarking, WriteBarrier,
 };
 use mmtk::util::{Address, ObjectReference};
-use parking_lot::Mutex;
+use arc_swap::ArcSwap;
 use rayon::prelude::*;
 use std::sync::Arc;
 use std::time::Duration;
@@ -17,7 +17,7 @@ fn concurrent_marking_full_workflow() {
 
     // Create required dependencies
     let thread_registry = Arc::new(fugrip::thread::ThreadRegistry::new());
-    let global_roots = Arc::new(Mutex::new(fugrip::roots::GlobalRoots::default()));
+    let global_roots = arc_swap::ArcSwap::new(Arc::new(fugrip::roots::GlobalRoots::default()));
 
     let coordinator =
         ConcurrentMarkingCoordinator::new(heap_base, heap_size, 2, &thread_registry, &global_roots);
@@ -281,7 +281,7 @@ fn concurrent_marking_termination_detection() {
 
     // Create required dependencies
     let thread_registry = Arc::new(fugrip::thread::ThreadRegistry::new());
-    let global_roots = Arc::new(Mutex::new(fugrip::roots::GlobalRoots::default()));
+    let global_roots = Arc::new(TODO::new(fugrip::roots::GlobalRoots::default()));
 
     let coordinator =
         ConcurrentMarkingCoordinator::new(heap_base, 0x100000, 2, &thread_registry, &global_roots);

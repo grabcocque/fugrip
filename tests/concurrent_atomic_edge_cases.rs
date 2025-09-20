@@ -6,12 +6,12 @@
 
 #[cfg(test)]
 mod concurrent_tests {
+    use crossbeam_utils::thread as crossbeam_thread;
     use fugrip::concurrent::{
         ObjectColor, ParallelMarkingCoordinator, TricolorMarking, WriteBarrier,
     };
     use mmtk::util::{Address, ObjectReference};
     use rayon::prelude::*;
-    use crossbeam_utils::thread as crossbeam_thread;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     // Removed std::thread - using Rayon for parallel execution
@@ -59,31 +59,34 @@ mod concurrent_tests {
             let operations_completed = Arc::new(AtomicUsize::new(0));
 
             // Use Rayon for parallel marking
-            let ops_completed = (0..8).into_par_iter().map(|thread_id| {
-                let mut local_ops = 0;
-                for i in 0..100 {
-                    let obj_addr =
-                        heap_base + 0x100usize + (thread_id as usize) * 1000 + (i as usize) * 8;
-                    let obj = unsafe { ObjectReference::from_raw_address_unchecked(obj_addr) };
+            let ops_completed = (0..8)
+                .into_par_iter()
+                .map(|thread_id| {
+                    let mut local_ops = 0;
+                    for i in 0..100 {
+                        let obj_addr =
+                            heap_base + 0x100usize + (thread_id as usize) * 1000 + (i as usize) * 8;
+                        let obj = unsafe { ObjectReference::from_raw_address_unchecked(obj_addr) };
 
-                    // Set object color
-                    let target_color = if i % 2 == 0 {
-                        ObjectColor::Grey
-                    } else {
-                        ObjectColor::Black
-                    };
-                    tricolor.set_color(obj, target_color);
-                    local_ops += 1;
+                        // Set object color
+                        let target_color = if i % 2 == 0 {
+                            ObjectColor::Grey
+                        } else {
+                            ObjectColor::Black
+                        };
+                        tricolor.set_color(obj, target_color);
+                        local_ops += 1;
 
-                    // Verify color was set
-                    let read_color = tricolor.get_color(obj);
-                    assert!(matches!(
-                        read_color,
-                        ObjectColor::White | ObjectColor::Grey | ObjectColor::Black
-                    ));
-                }
-                local_ops
-            }).sum::<usize>();
+                        // Verify color was set
+                        let read_color = tricolor.get_color(obj);
+                        assert!(matches!(
+                            read_color,
+                            ObjectColor::White | ObjectColor::Grey | ObjectColor::Black
+                        ));
+                    }
+                    local_ops
+                })
+                .sum::<usize>();
 
             operations_completed.store(ops_completed, Ordering::Relaxed);
 
@@ -139,37 +142,40 @@ mod concurrent_tests {
             let consistency_violations = Arc::new(AtomicUsize::new(0));
 
             // Use Rayon for parallel color consistency testing
-            let violations = (0..4).into_par_iter().map(|thread_id| {
-                let mut local_violations = 0;
-                for i in 0..500 {
-                    // Set color with different patterns
-                    let color = match (thread_id + i) % 3 {
-                        0 => ObjectColor::White,
-                        1 => ObjectColor::Grey,
-                        2 => ObjectColor::Black,
-                        _ => ObjectColor::White,
-                    };
-                    tricolor.set_color(obj, color);
+            let violations = (0..4)
+                .into_par_iter()
+                .map(|thread_id| {
+                    let mut local_violations = 0;
+                    for i in 0..500 {
+                        // Set color with different patterns
+                        let color = match (thread_id + i) % 3 {
+                            0 => ObjectColor::White,
+                            1 => ObjectColor::Grey,
+                            2 => ObjectColor::Black,
+                            _ => ObjectColor::White,
+                        };
+                        tricolor.set_color(obj, color);
 
-                    // Immediately read back to check consistency
-                    let _read_color = tricolor.get_color(obj);
+                        // Immediately read back to check consistency
+                        let _read_color = tricolor.get_color(obj);
 
-                    // Check for consistency violations
-                    if thread_id == 0 && i % 100 == 0 {
-                        // One thread does extra consistency checks
-                        std::thread::yield_now(); // Force potential reordering
-                        let recheck_color = tricolor.get_color(obj);
-                        // Color may change due to concurrent updates, so we just verify it's valid
-                        if !matches!(
-                            recheck_color,
-                            ObjectColor::White | ObjectColor::Grey | ObjectColor::Black
-                        ) {
-                            local_violations += 1;
+                        // Check for consistency violations
+                        if thread_id == 0 && i % 100 == 0 {
+                            // One thread does extra consistency checks
+                            std::thread::yield_now(); // Force potential reordering
+                            let recheck_color = tricolor.get_color(obj);
+                            // Color may change due to concurrent updates, so we just verify it's valid
+                            if !matches!(
+                                recheck_color,
+                                ObjectColor::White | ObjectColor::Grey | ObjectColor::Black
+                            ) {
+                                local_violations += 1;
+                            }
                         }
                     }
-                }
-                local_violations
-            }).sum::<usize>();
+                    local_violations
+                })
+                .sum::<usize>();
 
             consistency_violations.store(violations, Ordering::Relaxed);
 
@@ -185,24 +191,27 @@ mod concurrent_tests {
             let tricolor = Arc::new(TricolorMarking::new(heap_base, heap_size));
 
             // High frequency color changes to test memory ordering using Rayon
-            let total_changes = (0..8).into_par_iter().map(|_| {
-                let mut local_changes = 0;
-                for i in 0..1000 {
-                    let obj_addr = heap_base + ((i as usize) * 8) % heap_size;
-                    let obj = unsafe { ObjectReference::from_raw_address_unchecked(obj_addr) };
+            let total_changes = (0..8)
+                .into_par_iter()
+                .map(|_| {
+                    let mut local_changes = 0;
+                    for i in 0..1000 {
+                        let obj_addr = heap_base + ((i as usize) * 8) % heap_size;
+                        let obj = unsafe { ObjectReference::from_raw_address_unchecked(obj_addr) };
 
-                    let current_color = tricolor.get_color(obj);
-                    let new_color = match current_color {
-                        ObjectColor::White => ObjectColor::Grey,
-                        ObjectColor::Grey => ObjectColor::Black,
-                        ObjectColor::Black => ObjectColor::White,
-                    };
+                        let current_color = tricolor.get_color(obj);
+                        let new_color = match current_color {
+                            ObjectColor::White => ObjectColor::Grey,
+                            ObjectColor::Grey => ObjectColor::Black,
+                            ObjectColor::Black => ObjectColor::White,
+                        };
 
-                    tricolor.set_color(obj, new_color);
-                    local_changes += 1;
-                }
-                local_changes
-            }).sum::<usize>();
+                        tricolor.set_color(obj, new_color);
+                        local_changes += 1;
+                    }
+                    local_changes
+                })
+                .sum::<usize>();
 
             // Should have completed many operations
             assert_eq!(total_changes, 8000); // 8 threads * 1000 operations
@@ -245,36 +254,39 @@ mod concurrent_tests {
             let tricolor = Arc::new(TricolorMarking::new(heap_base, heap_size));
 
             // High contention stress test using Rayon
-            let total_ops = (0..16).into_par_iter().map(|thread_id| {
-                let mut local_ops = 0;
-                for i in 0..200 {
-                    // Create overlap by having threads work on similar address ranges
-                    let obj_addr = heap_base
-                        + (((thread_id as usize) * 64 + (i as usize) * 8) % heap_size);
-                    let obj = unsafe { ObjectReference::from_raw_address_unchecked(obj_addr) };
+            let total_ops = (0..16)
+                .into_par_iter()
+                .map(|thread_id| {
+                    let mut local_ops = 0;
+                    for i in 0..200 {
+                        // Create overlap by having threads work on similar address ranges
+                        let obj_addr = heap_base
+                            + (((thread_id as usize) * 64 + (i as usize) * 8) % heap_size);
+                        let obj = unsafe { ObjectReference::from_raw_address_unchecked(obj_addr) };
 
-                    // Rapid color changes
-                    let color = match (thread_id + i) % 3 {
-                        0 => ObjectColor::White,
-                        1 => ObjectColor::Grey,
-                        2 => ObjectColor::Black,
-                        _ => ObjectColor::White,
-                    };
+                        // Rapid color changes
+                        let color = match (thread_id + i) % 3 {
+                            0 => ObjectColor::White,
+                            1 => ObjectColor::Grey,
+                            2 => ObjectColor::Black,
+                            _ => ObjectColor::White,
+                        };
 
-                    tricolor.set_color(obj, color);
-                    local_ops += 1;
+                        tricolor.set_color(obj, color);
+                        local_ops += 1;
 
-                    // Occasionally verify
-                    if i % 50 == 0 {
-                        let _read_color = tricolor.get_color(obj);
-                        assert!(matches!(
-                            _read_color,
-                            ObjectColor::White | ObjectColor::Grey | ObjectColor::Black
-                        ));
+                        // Occasionally verify
+                        if i % 50 == 0 {
+                            let _read_color = tricolor.get_color(obj);
+                            assert!(matches!(
+                                _read_color,
+                                ObjectColor::White | ObjectColor::Grey | ObjectColor::Black
+                            ));
+                        }
                     }
-                }
-                local_ops
-            }).sum::<usize>();
+                    local_ops
+                })
+                .sum::<usize>();
 
             // Should have completed all operations despite contention
             assert_eq!(total_ops, 3200); // 16 threads * 200 operations
@@ -378,38 +390,41 @@ mod concurrent_tests {
             let counter = Arc::new(AtomicUsize::new(0));
 
             // High contention compare-and-swap operations using Rayon parallel iterator
-            let total_successful: usize = (0..32).into_par_iter().map(|_| {
-                let counter_clone = Arc::clone(&counter);
-                let mut successful_ops = 0;
-                for _ in 0..1000 {
-                    let current = counter_clone.load(Ordering::Relaxed);
-                    // CAS that will often fail due to contention
-                    let result = counter_clone.compare_exchange_weak(
-                        current,
-                        current.wrapping_add(1),
-                        Ordering::Relaxed,
-                        Ordering::Relaxed,
-                    );
-                    if result.is_ok() {
-                        successful_ops += 1;
-                    } else {
-                        // Retry failed operations to ensure all complete
-                        while counter_clone
-                            .compare_exchange_weak(
-                                counter_clone.load(Ordering::Relaxed),
-                                counter_clone.load(Ordering::Relaxed).wrapping_add(1),
-                                Ordering::Relaxed,
-                                Ordering::Relaxed,
-                            )
-                            .is_err()
-                        {
-                            // Keep trying until successful
+            let total_successful: usize = (0..32)
+                .into_par_iter()
+                .map(|_| {
+                    let counter_clone = Arc::clone(&counter);
+                    let mut successful_ops = 0;
+                    for _ in 0..1000 {
+                        let current = counter_clone.load(Ordering::Relaxed);
+                        // CAS that will often fail due to contention
+                        let result = counter_clone.compare_exchange_weak(
+                            current,
+                            current.wrapping_add(1),
+                            Ordering::Relaxed,
+                            Ordering::Relaxed,
+                        );
+                        if result.is_ok() {
+                            successful_ops += 1;
+                        } else {
+                            // Retry failed operations to ensure all complete
+                            while counter_clone
+                                .compare_exchange_weak(
+                                    counter_clone.load(Ordering::Relaxed),
+                                    counter_clone.load(Ordering::Relaxed).wrapping_add(1),
+                                    Ordering::Relaxed,
+                                    Ordering::Relaxed,
+                                )
+                                .is_err()
+                            {
+                                // Keep trying until successful
+                            }
+                            successful_ops += 1;
                         }
-                        successful_ops += 1;
                     }
-                }
-                successful_ops
-            }).sum();
+                    successful_ops
+                })
+                .sum();
 
             // Total should be 32000 (32 threads * 1000 operations)
             let final_value = counter.load(Ordering::Relaxed);
@@ -523,10 +538,11 @@ mod concurrent_tests {
                                     0 => heap_base + ((i as usize * usize::MAX / 100) & !0x7), // Very large but aligned
                                     1 => heap_base + ((i as usize).wrapping_mul(1000) & !0x7), // Wrapping but aligned
                                     2 => heap_base + (((i as usize) << 20) & !0x7), // Bit shifted but aligned
-                                    _ => heap_base + (i as usize) * 8,              // Normal addresses
+                                    _ => heap_base + (i as usize) * 8, // Normal addresses
                                 };
-                                let obj =
-                                    unsafe { ObjectReference::from_raw_address_unchecked(obj_addr) };
+                                let obj = unsafe {
+                                    ObjectReference::from_raw_address_unchecked(obj_addr)
+                                };
 
                                 tricolor_clone.set_color(obj, ObjectColor::Black);
                             }
@@ -537,7 +553,8 @@ mod concurrent_tests {
                         }
                     });
                 }
-            }).unwrap();
+            })
+            .unwrap();
 
             // Some panics are expected due to extreme arithmetic overflow conditions
             let panics = panic_count.load(Ordering::Relaxed);
@@ -614,7 +631,8 @@ mod concurrent_tests {
                         for i in 0..100 {
                             // Each wave processes objects in its region
                             let obj_addr = heap_base + wave_id * 8000 + i * 32;
-                            let obj = unsafe { ObjectReference::from_raw_address_unchecked(obj_addr) };
+                            let obj =
+                                unsafe { ObjectReference::from_raw_address_unchecked(obj_addr) };
 
                             // Mark object grey
                             tricolor_clone.set_color(obj, ObjectColor::Grey);
@@ -630,7 +648,8 @@ mod concurrent_tests {
                         }
                     });
                 }
-            }).unwrap();
+            })
+            .unwrap();
 
             // Wavefront should have advanced
             let max_front = wave_front.load(Ordering::Relaxed);
@@ -678,7 +697,8 @@ mod concurrent_tests {
                         }
                     });
                 }
-            }).unwrap();
+            })
+            .unwrap();
 
             let total_allocations = allocation_count.load(Ordering::Relaxed);
             assert_eq!(total_allocations, 600); // 6 threads * 100 allocations

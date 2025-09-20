@@ -70,11 +70,11 @@ fn tricolor_marking_concurrent_test() {
     let num_threads = 4;
     let objects_per_thread = 25;
 
-    let handles: Vec<_> = (0..num_threads)
-        .map(|thread_id| {
+    crossbeam::scope(|s| {
+        for thread_id in 0..num_threads {
             let marking = Arc::clone(&marking);
 
-            thread::spawn(move || {
+            s.spawn(move |_| {
                 for i in 0..objects_per_thread {
                     let offset = (thread_id * objects_per_thread + i) * 0x100usize;
                     let obj =
@@ -94,13 +94,10 @@ fn tricolor_marking_concurrent_test() {
                     assert!(success);
                     assert_eq!(marking.get_color(obj), ObjectColor::Black);
                 }
-            })
-        })
-        .collect();
-
-    for handle in handles {
-        handle.join().unwrap();
-    }
+            });
+        }
+    })
+    .unwrap();
 }
 
 #[test]
@@ -117,11 +114,11 @@ fn parallel_marking_work_distribution() {
     assert!(coordinator.has_work());
 
     let num_workers = 3;
-    let handles: Vec<_> = (0..num_workers)
-        .map(|_| {
+    let results: Vec<usize> = crossbeam::scope(|s| {
+        let mut handles = Vec::new();
+        for _ in 0..num_workers {
             let coordinator = Arc::clone(&coordinator);
-
-            thread::spawn(move || {
+            handles.push(s.spawn(move |_| {
                 let mut total_work = 0;
 
                 for _ in 0..10 {
@@ -129,23 +126,20 @@ fn parallel_marking_work_distribution() {
                     total_work += stolen.len();
 
                     if !stolen.is_empty() {
-                        //(Duration::from_millis(1));
-
                         // Share some work back
                         if stolen.len() > 2 {
                             coordinator.share_work(stolen[stolen.len() / 2..].to_vec());
                         }
                     }
-
-                    //(Duration::from_millis(2));
                 }
 
                 total_work
-            })
-        })
-        .collect();
+            }));
+        }
 
-    let results: Vec<usize> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    })
+    .unwrap();
     let total_processed: usize = results.iter().sum();
 
     assert!(total_processed > 0);

@@ -12,8 +12,8 @@ mod edge_case_tests {
         use fugrip::FugcPhase;
         use fugrip::test_utils::TestFixture;
 
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
         use std::time::Duration;
 
         #[test]
@@ -239,7 +239,7 @@ mod edge_case_tests {
     mod multiple_gc_tests {
 
         use fugrip::test_utils::TestFixture;
-    use std::sync::Arc;
+        use std::sync::Arc;
         use std::time::Duration;
 
         #[test]
@@ -322,7 +322,7 @@ mod edge_case_tests {
     mod worker_thread_tests {
 
         use fugrip::test_utils::TestFixture;
-    use std::sync::Arc;
+        use std::sync::Arc;
 
         #[test]
         fn test_worker_thread_start_stop() {
@@ -547,11 +547,11 @@ mod edge_case_tests {
     /// Test page allocation and coloring edge cases
     mod page_allocation_tests {
 
-    use fugrip::AllocationColor;
-    use fugrip::test_utils::TestFixture;
-    use mmtk::util::Address;
-    use std::sync::Arc;
-    use std::time::Duration;
+        use fugrip::AllocationColor;
+        use fugrip::test_utils::TestFixture;
+        use mmtk::util::Address;
+        use std::sync::Arc;
+        use std::time::Duration;
 
         #[test]
         fn test_page_allocation_color_out_of_bounds() {
@@ -571,7 +571,7 @@ mod edge_case_tests {
 
             // Add a root to create some allocation activity
             {
-                let mut roots = global_roots.lock();
+                let roots = global_roots.load();
                 let root_addr = unsafe { Address::from_usize(0x29000100) };
                 roots.register(root_addr.as_usize() as *mut u8);
             }
@@ -611,8 +611,8 @@ mod edge_case_tests {
     /// Test statistics and metrics edge cases
     mod statistics_tests {
 
-    use fugrip::test_utils::TestFixture;
-    use std::sync::Arc;
+        use fugrip::test_utils::TestFixture;
+        use std::sync::Arc;
         use std::time::Duration;
 
         #[test]

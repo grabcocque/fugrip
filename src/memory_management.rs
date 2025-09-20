@@ -12,9 +12,10 @@
 //! - **Weak Maps**: JavaScript-style WeakMap with iteration support
 
 use crate::fugc_coordinator::FugcCoordinator;
-use flume::{Receiver, Sender};
-use crossbeam_epoch::{self as epoch, Atomic, Owned, Guard};
+use crossbeam_epoch::{self as epoch, Atomic, Guard, Owned};
+use crossbeam_utils::Backoff;
 use dashmap::DashMap;
+use flume::{Receiver, Sender};
 use mmtk::util::{Address, ObjectReference};
 use rayon;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -515,7 +516,8 @@ impl FreeObjectManager {
 
         // Use epoch-based deferred cleanup for entries older than 1 second
         let now = Instant::now();
-        let objects_to_remove: Vec<_> = self.freed_objects
+        let objects_to_remove: Vec<_> = self
+            .freed_objects
             .iter()
             .filter(|entry| now.duration_since(*entry.value()).as_secs() >= 1)
             .map(|entry| entry.key().clone())
@@ -696,13 +698,11 @@ impl FinalizerQueue {
         // Create new node with the finalizer data
         let mut new_node = Owned::new(FinalizerNode::new(Some((object, finalizer))));
 
+        let backoff = Backoff::new();
         loop {
             let head = self.pending_head.load(Ordering::Acquire, guard);
             new_node.next.store(head, Ordering::Relaxed);
 
-            // TODO: Add crossbeam_utils::Backoff here for finalizer queue contention
-            // Expected 10-20% reduction in CPU spinning during finalizer registration bursts
-            // Changes: Add backoff.spin() on CAS failure to reduce memory bus contention
             match self.pending_head.compare_exchange_weak(
                 head,
                 new_node,
@@ -711,7 +711,15 @@ impl FinalizerQueue {
                 guard,
             ) {
                 Ok(_) => break,
-                Err(e) => new_node = e.new,
+                Err(e) => {
+                    new_node = e.new;
+                    // Adaptive backoff reduces memory bus contention during bursts.
+                    // We use `backoff.spin()` because finalizer registration
+                    // is usually short-lived and benefits from brief spins to
+                    // avoid the overhead of yielding immediately under light
+                    // contention.
+                    backoff.spin();
+                }
             }
         }
 
@@ -1825,15 +1833,14 @@ mod tests {
         let num_threads = 4;
         let operations_per_thread = 100;
 
-        // Use rayon parallel iteration instead of manual thread::spawn
+        // Use rayon parallel iteration instead of manual thread::TODO
         (0..num_threads).into_par_iter().for_each(|thread_id| {
             for i in 0..operations_per_thread {
                 // Create test objects with word-aligned addresses
                 let aligned_addr = 0x10000 + thread_id * 1000 * 8 + i * 8;
-                let obj = ObjectReference::from_raw_address(unsafe {
-                    Address::from_usize(aligned_addr)
-                })
-                .unwrap();
+                let obj =
+                    ObjectReference::from_raw_address(unsafe { Address::from_usize(aligned_addr) })
+                        .unwrap();
 
                 // Test free object operations
                 if i % 3 == 0 {
@@ -1902,7 +1909,7 @@ mod tests {
             1024 * 1024,
             4,
             &Arc::new(crate::thread::ThreadRegistry::new()),
-            &Arc::new(parking_lot::Mutex::new(crate::roots::GlobalRoots::default())),
+            &arc_swap::ArcSwap::new(Arc::new(crate::roots::GlobalRoots::default())),
         )));
 
         manager.set_fugc_coordinator(coordinator_weak);

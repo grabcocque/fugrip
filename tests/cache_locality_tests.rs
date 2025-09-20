@@ -3,13 +3,16 @@
 //! These tests measure and validate cache-friendly optimizations
 //! in realistic garbage collection scenarios.
 
-use parking_lot::Mutex;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use fugrip::cache_optimization::*;
+use fugrip::cache_optimization::{
+    CACHE_LINE_SIZE, CacheAwareAllocator, CacheOptimizedMarking, MemoryLayoutOptimizer,
+    MetadataColocation,
+};
 use fugrip::concurrent::{ObjectColor, TricolorMarking};
 use fugrip::fugc_coordinator::FugcCoordinator;
+use fugrip::test_utils::LocalityAwareWorkStealer;
 use mmtk::util::{Address, ObjectReference};
 
 /// Generate objects with controlled spatial locality patterns
@@ -217,7 +220,7 @@ fn concurrent_marking_cache_integration() {
     let objects = create_objects_with_locality(1000, 0.7);
     let heap_base = unsafe { Address::from_usize(0x10000000) };
     let thread_registry = Arc::new(fugrip::thread::ThreadRegistry::new());
-    let global_roots = Arc::new(Mutex::new(fugrip::roots::GlobalRoots::default()));
+    let global_roots = arc_swap::ArcSwap::new(Arc::new(fugrip::roots::GlobalRoots::default()));
 
     let coordinator = FugcCoordinator::new(
         heap_base,

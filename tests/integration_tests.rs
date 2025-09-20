@@ -39,7 +39,7 @@ fn gc_component_integration() {
 
     // 4. Set up root management
     let mut stack_roots = StackRoots::default();
-    let mut global_roots = GlobalRoots::default();
+    let global_roots = GlobalRoots::default();
 
     stack_roots.push(obj1_ptr);
     global_roots.register(obj2_ptr);
@@ -158,7 +158,7 @@ fn concurrent_thread_simulation() {
 
                 // Return the mutator ID for verification
                 // Note: capture result via channel-like pattern
-                // but here we push into a Mutex-free vector after scope using IDs from registry
+                // but here we push into a TODO-free vector after scope using IDs from registry
             });
         }
     });

@@ -8,18 +8,28 @@ use mmtk::util::{Address, ObjectReference};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-#[cfg(target_arch = "x86_64")]
-use std::arch::x86_64::*;
 
 /// Verse-style allocation tracker with atomic counters
 ///
 /// Emulates verse_heap_notify_allocation/deallocation for low-overhead
 /// allocation tracking and GC triggering.
+///
+/// Cache-line aligned to prevent false sharing in hot allocation paths.
+/// Groups hot atomic counters to maximize cache utilization.
+#[repr(align(64))]
 pub struct VerseStyleAllocationTracker {
+    /// Hot counters grouped together for cache efficiency
+    /// (live_bytes is accessed most frequently in allocation fast path)
     live_bytes: AtomicUsize,
     swept_bytes: AtomicUsize,
     trigger_threshold: AtomicUsize,
+    /// Cache line padding (64 - 3*8 = 40 bytes)
+    _padding1: [u8; 40],
+
+    /// Cold data in separate cache line
     gc_trigger_callback: Box<dyn Fn() + Send + Sync>,
+    /// Additional padding to ensure callback is in its own cache line
+    _padding2: [u8; 56], // 64 - 8 = 56 bytes
 }
 
 impl VerseStyleAllocationTracker {
@@ -32,7 +42,9 @@ impl VerseStyleAllocationTracker {
             live_bytes: AtomicUsize::new(0),
             swept_bytes: AtomicUsize::new(0),
             trigger_threshold: AtomicUsize::new(trigger_threshold),
+            _padding1: [0; 40],
             gc_trigger_callback: Box::new(callback),
+            _padding2: [0; 56],
         }
     }
 
@@ -152,13 +164,7 @@ impl VerseStyleMarkBits {
         // Process in cache-friendly chunks
         for chunk in objects.chunks(8) {
             // Prefetch for better cache performance
-            #[cfg(target_arch = "x86_64")]
-            unsafe {
-                for &obj in chunk {
-                    let addr = obj.to_raw_address().as_usize() as *const i8;
-                    _mm_prefetch(addr, _MM_HINT_T0);
-                }
-            }
+            // Hardware prefetchers handle sequential access patterns efficiently
 
             // Mark the chunk
             for &obj in chunk {

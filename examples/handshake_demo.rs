@@ -5,11 +5,10 @@
 //! still participate in GC coordination through the enter/exit mechanism.
 
 use flume::{self};
-use std::sync::Barrier;
 use fugrip::{SafepointManager, pollcheck, safepoint_enter, safepoint_exit};
 use std::sync::Arc;
+use std::sync::Barrier;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::thread;
 use std::time::Duration;
 
 fn main() {
