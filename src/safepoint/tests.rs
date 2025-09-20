@@ -90,7 +90,7 @@ mod tests {
 
         // Should not panic or fail
         // Real implementation: Verify the thread is properly registered in the global registry
-        use crate::thread::ThreadRegistry;
+        
         let registry = crate::thread::global_thread_registry();
         let thread_id = std::thread::current().id();
         use std::hash::{Hash, Hasher};

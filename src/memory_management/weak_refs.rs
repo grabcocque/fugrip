@@ -1,6 +1,6 @@
 //! Weak reference implementation with automatic nulling
 
-use crate::compat::ObjectReference;
+use crate::frontend::types::ObjectReference;
 use dashmap::DashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
@@ -200,7 +200,7 @@ impl WeakRefRegistry {
     ///
     /// ```ignore
     /// use fugrip::memory_management::{WeakRefRegistry, WeakReference};
-    /// use crate::compat::ObjectReference;
+    /// use crate::frontend::types::ObjectReference;
     /// use std::sync::Arc;
     ///
     /// let registry = WeakRefRegistry::new();
@@ -234,7 +234,7 @@ impl WeakRefRegistry {
     ///
     /// ```ignore
     /// use fugrip::memory_management::WeakRefRegistry;
-    /// use crate::compat::ObjectReference;
+    /// use crate::frontend::types::ObjectReference;
     ///
     /// let registry = WeakRefRegistry::new();
     /// let obj = ObjectReference::from_raw_address(unsafe {

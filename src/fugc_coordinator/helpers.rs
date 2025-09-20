@@ -1,6 +1,6 @@
 //! Helper methods for FugcCoordinator
 
-use crate::compat::{Address, ObjectReference};
+use crate::frontend::types::{Address, ObjectReference};
 use dashmap::DashMap;
 use std::sync::{Arc, atomic::Ordering};
 use std::time::{Duration, Instant};
@@ -105,7 +105,7 @@ impl FugcCoordinator {
     /// # use fugrip::thread::ThreadRegistry;
     /// # use fugrip::roots::GlobalRoots;
     /// # use fugrip::FugcCoordinator;
-    /// # use crate::compat::Address;
+    /// # use crate::frontend::types::Address;
     /// # use std::sync::Arc;
     /// # let heap_base = unsafe { Address::from_usize(0x1000_0000) };
     /// # let heap_size = 32 * 1024 * 1024;

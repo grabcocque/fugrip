@@ -6,7 +6,7 @@
 
 use std::sync::{Arc, Weak};
 
-use crate::compat::ObjectReference;
+use crate::frontend::types::ObjectReference;
 use dashmap::DashMap;
 
 use crate::fugc_coordinator::FugcCoordinator;
@@ -14,7 +14,6 @@ use crate::fugc_coordinator::FugcCoordinator;
 use super::finalizers::{FinalizerQueue, FinalizerQueueStats};
 use super::free_objects::{FreeObjectManager, FreeObjectStats};
 use super::weak_maps::{WeakMap, WeakMapTrait};
-use super::weak_refs::WeakRefTrait;
 use super::weak_refs::{WeakRefRegistry, WeakRefStats, WeakReference};
 
 /// Global memory management coordinator
@@ -254,7 +253,7 @@ impl Default for MemoryManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compat::Address;
+    use crate::frontend::types::Address;
     use std::sync::Arc;
 
     #[test]

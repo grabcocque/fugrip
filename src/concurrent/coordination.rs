@@ -1,6 +1,6 @@
 //! Concurrent root scanning and worker coordination
 
-use crate::compat::{Address, ObjectReference};
+use crate::frontend::types::{Address, ObjectReference};
 use arc_swap::ArcSwap;
 use flume::{Receiver, Sender};
 use std::sync::{Arc, atomic::AtomicUsize};

@@ -3,7 +3,7 @@
 #[cfg(test)]
 mod tests {
     use super::super::*;
-    use crate::compat::ObjectReference;
+    use mmtk::util::ObjectReference;
     use crate::thread::MutatorThread;
     use mmtk::AllocationSemantics;
     use mmtk::vm::{Collection, ReferenceGlue, VMBinding};
@@ -565,7 +565,7 @@ mod tests {
     fn test_write_barrier_sad_paths() {
         // Test write barrier component access without dangerous memory writes
         let plan_manager = FUGC_PLAN_MANAGER.get_or_init(|| {
-            arc_swap::ArcSwap::new(std::sync::Arc::new(crate::plan::FugcPlanManager::new()))
+            arc_swap::ArcSwap::new(std::sync::Arc::new(crate::backends::mmtk::FugcPlanManager::new()))
         });
 
         let manager = plan_manager.load();

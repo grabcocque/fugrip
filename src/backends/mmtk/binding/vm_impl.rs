@@ -1,11 +1,8 @@
 //! VM binding trait implementations for MMTk integration
 
-use crate::core::RustObjectModel;
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
-use mmtk::util::ObjectReference;
 use mmtk::util::opaque_pointer::{VMMutatorThread, VMThread, VMWorkerThread};
-use mmtk::vm::ObjectModel;
 use mmtk::vm::slot::SimpleSlot;
 
 /// Simple implementation of MemorySlice for Rust VM
@@ -32,7 +29,7 @@ impl RustMemorySlice {
         &self,
         addr: mmtk::util::Address,
     ) -> Option<mmtk::util::ObjectReference> {
-        use crate::core::RustObjectModel;
+        
 
         // Object headers are typically at word-aligned addresses
         const OBJECT_ALIGNMENT: usize = std::mem::align_of::<usize>();
@@ -98,7 +95,7 @@ impl RustMemorySlice {
 
         match panic::catch_unwind(|| {
             use crate::core::RustObjectModel;
-            use mmtk::vm::ObjectModel;
+            
 
             let addr = obj_ref.to_raw_address();
 
@@ -136,7 +133,7 @@ impl RustMemorySliceSlotIterator {
 
     /// Real implementation: Validate if a word-sized value could be an object reference
     fn is_potential_object_reference(&self, value: usize) -> bool {
-        use crate::compat::Address;
+        use mmtk::util::Address;
 
         // Basic heuristics for object reference detection:
         // 1. Must be word-aligned
@@ -163,7 +160,7 @@ impl Iterator for RustMemorySliceSlotIterator {
     type Item = SimpleSlot;
 
     fn next(&mut self) -> Option<Self::Item> {
-        use crate::compat::Address;
+        use mmtk::util::Address;
         use std::mem::size_of;
 
         // Real implementation: Scan for object references in the memory slice
@@ -227,8 +224,9 @@ impl mmtk::vm::slot::MemorySlice for RustMemorySlice {
 use mmtk::vm::{Collection, GCThreadContext, ReferenceGlue, VMBinding};
 use std::sync::{Arc, OnceLock};
 
-use super::{FUGC_PLAN_MANAGER, mutator::*};
-use crate::plan::FugcPlanManager;
+use crate::binding::FUGC_PLAN_MANAGER;
+use super::mutator::*;
+use crate::backends::mmtk::FugcPlanManager;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct RustVM;
@@ -303,9 +301,9 @@ impl Collection<RustVM> for RustCollection {
     }
 }
 
-static REFERENT_MAP: OnceLock<DashMap<ObjectReference, ObjectReference>> = OnceLock::new();
+static REFERENT_MAP: OnceLock<DashMap<mmtk::util::ObjectReference, mmtk::util::ObjectReference>> = OnceLock::new();
 
-type FinalizationQueue = crossbeam::queue::SegQueue<(ObjectReference, Option<ObjectReference>)>;
+type FinalizationQueue = crossbeam::queue::SegQueue<(mmtk::util::ObjectReference, Option<mmtk::util::ObjectReference>)>;
 static FINALIZATION_QUEUE: OnceLock<FinalizationQueue> = OnceLock::new();
 
 #[derive(Default)]
@@ -314,24 +312,24 @@ pub struct RustReferenceGlue;
 impl ReferenceGlue<RustVM> for RustReferenceGlue {
     type FinalizableType = crate::weak::WeakRefHeader;
 
-    fn set_referent(reference: ObjectReference, referent: ObjectReference) {
+    fn set_referent(reference: mmtk::util::ObjectReference, referent: mmtk::util::ObjectReference) {
         REFERENT_MAP
             .get_or_init(DashMap::new)
             .insert(reference, referent);
     }
 
-    fn get_referent(object: ObjectReference) -> Option<ObjectReference> {
+    fn get_referent(object: mmtk::util::ObjectReference) -> Option<mmtk::util::ObjectReference> {
         REFERENT_MAP
             .get_or_init(DashMap::new)
             .get(&object)
             .map(|v| *v.value())
     }
 
-    fn clear_referent(object: ObjectReference) {
+    fn clear_referent(object: mmtk::util::ObjectReference) {
         let _ = REFERENT_MAP.get_or_init(DashMap::new).remove(&object);
     }
 
-    fn enqueue_references(references: &[ObjectReference], _tls: VMWorkerThread) {
+    fn enqueue_references(references: &[mmtk::util::ObjectReference], _tls: VMWorkerThread) {
         if references.is_empty() {
             return;
         }
@@ -404,7 +402,7 @@ impl mmtk::vm::ActivePlan<RustVM> for RustActivePlan {
 /// Drain the queue of references that were enqueued for finalization by MMTk.
 /// This allows the VM to process weak references or other finalizable objects
 /// after a collection cycle completes.
-pub fn take_enqueued_references() -> Vec<(ObjectReference, Option<ObjectReference>)> {
+pub fn take_enqueued_references() -> Vec<(mmtk::util::ObjectReference, Option<mmtk::util::ObjectReference>)> {
     let queue = FINALIZATION_QUEUE.get_or_init(|| crossbeam::queue::SegQueue::new());
     let mut result = Vec::new();
     while let Some(item) = queue.pop() {

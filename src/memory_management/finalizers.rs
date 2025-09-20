@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
-use crate::compat::{Address, ObjectReference};
+use crate::frontend::types::{Address, ObjectReference};
 use flume::{Receiver, Sender};
 use rayon;
 
@@ -27,7 +27,7 @@ impl FinalizerNode {
     }
 
     /// Execute the finalizer and consume the node
-    fn execute(mut self) {
+    fn execute(self) {
         (self.callback)();
     }
 }
@@ -83,7 +83,7 @@ impl FinalizerQueue {
     ///
     /// ```ignore
     /// use fugrip::memory_management::finalizers::FinalizerQueue;
-    /// use crate::compat::{Address, ObjectReference};
+    /// use crate::frontend::types::{Address, ObjectReference};
     ///
     /// let queue = FinalizerQueue::new("test_queue");
     /// let obj = ObjectReference::from_raw_address(Address::ZERO).unwrap();

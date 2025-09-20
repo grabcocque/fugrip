@@ -59,7 +59,7 @@ impl FugcCoordinator {
     /// # use fugrip::thread::ThreadRegistry;
     /// # use fugrip::roots::GlobalRoots;
     /// # use fugrip::FugcCoordinator;
-    /// # use crate::compat::Address;
+    /// # use crate::frontend::Address;
     /// # use std::sync::Arc;
     /// # use std::time::Duration;
     /// # let heap_base = unsafe { Address::from_usize(0x1000_0000) };
@@ -92,7 +92,7 @@ impl FugcCoordinator {
     /// # use fugrip::thread::ThreadRegistry;
     /// # use fugrip::roots::GlobalRoots;
     /// # use fugrip::{FugcCoordinator, FugcPhase};
-    /// # use crate::compat::Address;
+    /// # use crate::frontend::Address;
     /// # use std::sync::Arc;
     /// # let heap_base = unsafe { Address::from_usize(0x1000_0000) };
     /// # let heap_size = 32 * 1024 * 1024;
@@ -147,7 +147,7 @@ impl FugcCoordinator {
     /// # use fugrip::thread::ThreadRegistry;
     /// # use fugrip::roots::GlobalRoots;
     /// # use fugrip::{FugcCoordinator, FugcPhase};
-    /// # use crate::compat::Address;
+    /// # use crate::frontend::Address;
     /// # use std::sync::Arc;
     /// # let heap_base = unsafe { Address::from_usize(0x1000_0000) };
     /// # let heap_size = 32 * 1024 * 1024;
@@ -204,7 +204,7 @@ impl FugcCoordinator {
     /// # use fugrip::thread::ThreadRegistry;
     /// # use fugrip::roots::GlobalRoots;
     /// # use fugrip::FugcCoordinator;
-    /// # use crate::compat::Address;
+    /// # use crate::frontend::Address;
     /// # use std::sync::Arc;
     /// # let heap_base = unsafe { Address::from_usize(0x1000_0000) };
     /// # let heap_size = 32 * 1024 * 1024;
@@ -227,7 +227,7 @@ impl FugcCoordinator {
     /// # use fugrip::thread::ThreadRegistry;
     /// # use fugrip::roots::GlobalRoots;
     /// # use fugrip::{FugcCoordinator, AllocationColor};
-    /// # use crate::compat::Address;
+    /// # use crate::frontend::Address;
     /// # use std::sync::Arc;
     /// # let heap_base = unsafe { Address::from_usize(0x1000_0000) };
     /// # let heap_size = 32 * 1024 * 1024;

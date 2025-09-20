@@ -5,8 +5,8 @@
 
 use fugrip::{
     alloc_facade::{allocate, init_facade, post_alloc, register_mutator, register_plan},
-    compat::{Address, AllocationSemantics, ObjectReference},
     core::ObjectHeader,
+    frontend::types::{Address, CopySemantics, ObjectReference},
     zero_cost_allocator::ZeroCostAllocator,
 };
 

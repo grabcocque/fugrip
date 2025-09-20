@@ -5,7 +5,6 @@ use crossbeam_epoch::{self as epoch};
 use crossbeam_utils::atomic::AtomicCell;
 use dashmap::{DashMap, DashSet};
 use flume::{Receiver, RecvTimeoutError, Sender, TryRecvError};
-use psm;
 use std::{
     sync::Arc,
     time::{Duration, Instant},

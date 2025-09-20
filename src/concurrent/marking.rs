@@ -1,7 +1,7 @@
 //! Parallel marking coordination and worker management
 
-use crate::compat::ObjectReference;
-use crate::concurrent::{TricolorMarking, WriteBarrier};
+use crate::frontend::types::ObjectReference;
+use crate::concurrent::WriteBarrier;
 use crate::thread::MutatorThread;
 use crossbeam::queue::SegQueue;
 use rayon::prelude::*;
@@ -22,7 +22,7 @@ pub type HandshakeCallback = Box<dyn Fn(&MutatorThread) + Send + Sync>;
 ///
 /// ```
 /// use fugrip::concurrent::ParallelMarkingCoordinator;
-/// use fugrip::compat::{Address, ObjectReference};
+/// use fugrip::frontend::types::{Address, ObjectReference};
 ///
 /// let coordinator = ParallelMarkingCoordinator::new(4);
 /// assert!(!coordinator.has_work());
@@ -97,7 +97,7 @@ impl TestBlackAllocator {
         // This is used during FUGC Step 3 (Black Allocation) phase
         // In a production implementation, this would integrate with MMTk's allocation
 
-        use crate::compat::Address;
+        
         unsafe {
             // Mark the object header to indicate it's allocated black
             // This prevents the need for barrier operations during the marking phase
@@ -241,7 +241,7 @@ impl ParallelMarkingCoordinator {
         // Real implementation: Return the actual write barrier for testing
         // This integrates with FUGC's tricolor marking system
 
-        use crate::compat::Address;
+        use crate::frontend::types::Address;
         use crate::concurrent::{TricolorMarking, WriteBarrier};
 
         // Create a real write barrier instance connected to the marking system
@@ -268,7 +268,7 @@ impl ParallelMarkingCoordinator {
         // This uses CPU cache-friendly patterns for better performance
 
         use crate::cache_optimization::CacheOptimizedMarking;
-        use crate::compat::Address;
+        use crate::frontend::types::Address;
         use crate::concurrent::TricolorMarking;
 
         // Create cache-optimized marking instance

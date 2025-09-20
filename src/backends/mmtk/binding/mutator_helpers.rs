@@ -4,10 +4,10 @@
 //! various sources, abstracting away the differences between MMTk and jemalloc.
 
 use crate::{
-    alloc_facade::MutatorContext,
     thread::MutatorThread,
-    error::{GcError, GcResult},
+    error::GcResult,
 };
+use mmtk::MutatorContext;
 
 /// Create a mutator context from a thread
 /// This works for both MMTk and jemalloc backends
@@ -35,7 +35,7 @@ pub fn create_and_bind_mutator(
 ) -> GcResult<MutatorContext> {
     #[cfg(feature = "use_mmtk")]
     {
-        use crate::plan::FugcPlanManager;
+        use crate::backends::mmtk::FugcPlanManager;
         
         // Try to get MMTk instance and create proper mutator
         if let Some(plan_manager) = FugcPlanManager::global() {
@@ -61,8 +61,8 @@ pub fn create_and_bind_mutator(
 #[cfg(feature = "use_mmtk")]
 fn get_mmtk_mutator_for_thread(thread_id: usize) -> Option<*mut mmtk::Mutator<super::RustVM>> {
     use super::{MUTATOR_MAP, mutator_thread_key};
-    use crate::compat::vm::opaque_pointer::{VMMutatorThread, VMThread, OpaquePointer};
-    use crate::compat::Address;
+    use mmtk::util::opaque_pointer::{VMMutatorThread, VMThread, OpaquePointer};
+    use mmtk::util::Address;
     
     let tls = VMMutatorThread(VMThread(OpaquePointer::from_address(unsafe {
         Address::from_usize(thread_id)
@@ -78,7 +78,7 @@ fn get_mmtk_mutator_for_thread(thread_id: usize) -> Option<*mut mmtk::Mutator<su
 pub fn is_mmtk_available() -> bool {
     #[cfg(feature = "use_mmtk")]
     {
-        use crate::plan::FugcPlanManager;
+        use crate::backends::mmtk::FugcPlanManager;
         FugcPlanManager::global()
             .and_then(|pm| pm.mmtk().ok())
             .is_some()

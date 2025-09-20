@@ -3,15 +3,6 @@
 //! This module contains comprehensive tests for all memory management components
 //! including weak references, finalizers, free object management, and weak maps.
 
-use super::*;
-use crate::compat::{Address, ObjectReference};
-use crate::fugc_coordinator::FugcCoordinator;
-use crate::memory_management::weak_refs::WeakRefTrait;
-use crate::roots::GlobalRoots;
-use crate::thread::ThreadRegistry;
-use arc_swap::ArcSwap;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 #[test]
 fn test_free_object_manager() {

@@ -1,6 +1,6 @@
 //! Write barriers for concurrent marking with generational optimization
 
-use crate::compat::{Address, ObjectReference};
+use crate::frontend::types::{Address, ObjectReference};
 use arc_swap::ArcSwap;
 use crossbeam_epoch as epoch;
 use std::sync::{
@@ -77,7 +77,7 @@ pub struct OldGenBarrierState {
 ///
 /// ```
 /// use fugrip::concurrent::{WriteBarrier, TricolorMarking, ParallelMarkingCoordinator, ObjectColor};
-/// use crate::compat::{Address, ObjectReference};
+/// use crate::frontend::types::{Address, ObjectReference};
 /// use std::sync::Arc;
 ///
 /// let heap_base = unsafe { Address::from_usize(0x10000000) };

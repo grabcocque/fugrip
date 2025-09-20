@@ -1,6 +1,6 @@
 //! Black allocation manager for concurrent marking
 
-use crate::compat::ObjectReference;
+use crate::frontend::types::ObjectReference;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, AtomicUsize, Ordering},

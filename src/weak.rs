@@ -21,8 +21,8 @@
 //! let registry = WeakRefRegistry::new();
 //! ```
 
-use crate::compat::ObjectReference;
 use crate::core::{Gc, ObjectFlags, ObjectHeader};
+use crate::frontend::types::ObjectReference;
 use crossbeam::queue::SegQueue;
 use crossbeam_epoch::{self as epoch};
 use mmtk::vm::Finalizable;
@@ -304,7 +304,7 @@ impl Default for WeakRefRegistry {
 }
 
 impl Finalizable for WeakRefHeader {
-    fn get_reference(&self) -> ObjectReference {
+    fn get_reference(&self) -> mmtk::util::ObjectReference {
         // For weak references, we return the target if it exists
         let target = self.get_target();
         if target.is_null() {
@@ -334,7 +334,7 @@ impl Finalizable for WeakRefHeader {
         }
     }
 
-    fn set_reference(&mut self, object: ObjectReference) {
+    fn set_reference(&mut self, object: mmtk::util::ObjectReference) {
         if object.to_raw_address().as_usize() == 0xDEADBEF0 {
             // Use aligned address
             self.clear_target();

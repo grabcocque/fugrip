@@ -3,7 +3,7 @@
 //! This module implements optimizations inspired by Epic's Verse heap design,
 //! particularly the high-performance mark bit operations and allocation tracking.
 
-use crate::compat::{Address, ObjectReference};
+use crate::frontend::types::{Address, ObjectReference};
 use crate::concurrent::{ObjectColor, TricolorMarking};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -247,26 +247,16 @@ impl VerseStyleHeapConfig {
         trigger_threshold: usize,
     ) -> Self {
         let allocation_tracker = VerseStyleAllocationTracker::new(trigger_threshold, move || {
-            // Trigger GC through the plan manager
-            use crate::plan::FugcPlanManager;
+            // Trigger GC through opaque handle API (respects blackwall)
+            use crate::opaque_handles::{OpaqueAllocator, default_plan};
+            let plan_id = default_plan();
+            let _ = OpaqueAllocator::trigger_gc(plan_id);
 
-            // Get the global plan manager and trigger GC
-            if let Some(plan_manager) = FugcPlanManager::global() {
-                plan_manager.gc();
-
-                #[cfg(debug_assertions)]
-                eprintln!(
-                    "GC triggered: allocation threshold {} bytes reached",
-                    trigger_threshold
-                );
-            } else {
-                // Fallback: create a local plan manager for GC triggering
-                #[cfg(debug_assertions)]
-                eprintln!(
-                    "GC triggered: allocation threshold {} bytes reached (fallback)",
-                    trigger_threshold
-                );
-            }
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "GC triggered: allocation threshold {} bytes reached",
+                trigger_threshold
+            );
         });
 
         let mark_bits = VerseStyleMarkBits::new(marking, heap_base, heap_size);
@@ -320,7 +310,7 @@ impl VerseStyleHeapConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compat::Address;
+    use crate::frontend::types::Address;
     use std::sync::Arc;
 
     #[test]

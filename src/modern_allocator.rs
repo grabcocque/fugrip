@@ -4,11 +4,10 @@
 //! both jemalloc and MMTk backends through the allocation facade.
 
 use crate::{
-    alloc_facade::{MutatorHandle, global_allocator, register_mutator},
-    compat::{ObjectReference, constants::MIN_OBJECT_SIZE},
     core::ObjectHeader,
     error::{GcError, GcResult},
-    facade_allocator::{CleanAllocator, FacadeAllocator},
+    frontend::alloc_facade::{AllocatorFacade, MutatorHandle, global_allocator, register_mutator},
+    frontend::types::{Address, ObjectReference, constants::MIN_OBJECT_SIZE},
     thread::MutatorThread,
 };
 
@@ -36,14 +35,14 @@ pub struct AllocationStats {
 /// The modern facade-based allocator
 /// This is what new code should use instead of the legacy MMTkAllocator
 pub struct FugcAllocator {
-    facade: FacadeAllocator,
+    facade: AllocatorFacade,
     handle: Option<MutatorHandle>,
 }
 
 impl FugcAllocator {
     pub fn new() -> Self {
         FugcAllocator {
-            facade: FacadeAllocator::new(),
+            facade: AllocatorFacade::new_jemalloc(),
             handle: None,
         }
     }
@@ -51,7 +50,7 @@ impl FugcAllocator {
     /// Create an allocator with a specific mutator handle
     pub fn with_handle(handle: MutatorHandle) -> Self {
         FugcAllocator {
-            facade: FacadeAllocator::new(),
+            facade: AllocatorFacade::new_jemalloc(),
             handle: Some(handle),
         }
     }
@@ -63,12 +62,20 @@ impl FugcAllocator {
 
     /// Allocate using the global facade
     pub fn alloc_global(header: ObjectHeader, body_bytes: usize) -> GcResult<ObjectReference> {
-        global_allocator().allocate_object(header, body_bytes)
+        match global_allocator().allocate_object(header, body_bytes) {
+            Ok(ptr) => {
+                // Convert raw pointer to ObjectReference
+                let addr = Address::from_mut_ptr(ptr);
+                unsafe { Ok(ObjectReference::from_raw_address_unchecked(addr)) }
+            }
+            Err(e) => Err(e),
+        }
     }
 
     /// Deallocate using the global facade
     pub fn dealloc_global(obj: ObjectReference, size: usize) {
-        global_allocator().deallocate_object(obj, size);
+        let ptr = obj.to_raw_address().to_mut_ptr();
+        global_allocator().deallocate_object(ptr, size);
     }
 }
 
@@ -84,7 +91,14 @@ impl ModernAllocator for FugcAllocator {
         header: ObjectHeader,
         body_bytes: usize,
     ) -> GcResult<ObjectReference> {
-        self.facade.allocate_object(header, body_bytes)
+        match self.facade.allocate_object(header, body_bytes) {
+            Ok(ptr) => {
+                // Convert raw pointer to ObjectReference
+                let addr = Address::from_mut_ptr(ptr);
+                unsafe { Ok(ObjectReference::from_raw_address_unchecked(addr)) }
+            }
+            Err(e) => Err(e),
+        }
     }
 
     fn poll_gc(&self, thread: &MutatorThread) {

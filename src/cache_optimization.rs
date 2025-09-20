@@ -3,7 +3,7 @@
 //! This module provides cache-aware data structures and algorithms to improve
 //! the performance of garbage collection operations through better memory locality.
 
-use crate::compat::{Address, ObjectReference};
+use crate::frontend::types::{Address, ObjectReference};
 use crossbeam::queue::SegQueue;
 use itertools::izip;
 use rayon::prelude::*;
@@ -30,7 +30,7 @@ pub const OBJECTS_PER_CACHE_LINE: usize = CACHE_LINE_SIZE / 8;
 ///
 /// ```
 /// use fugrip::cache_optimization::CacheAwareAllocator;
-/// use crate::compat::Address;
+/// use crate::frontend::types::Address;
 ///
 /// let base = unsafe { Address::from_usize(0x1_0000_0000) };
 /// let allocator = CacheAwareAllocator::new(base, 4096);
@@ -56,7 +56,7 @@ impl CacheAwareAllocator {
     ///
     /// ```
     /// # use fugrip::cache_optimization::CacheAwareAllocator;
-    /// # use crate::compat::Address;
+    /// # use crate::frontend::types::Address;
     /// let base = unsafe { Address::from_usize(0x1_0000_0000) };
     /// let allocator = CacheAwareAllocator::new(base, 1024);
     /// assert_eq!(allocator.get_allocated_bytes(), 0);
@@ -77,7 +77,7 @@ impl CacheAwareAllocator {
     ///
     /// ```
     /// # use fugrip::cache_optimization::CacheAwareAllocator;
-    /// # use crate::compat::Address;
+    /// # use crate::frontend::types::Address;
     /// let base = unsafe { Address::from_usize(0x1_0000_0000) };
     /// let allocator = CacheAwareAllocator::new(base, 1024);
     /// let addr = allocator.allocate(32, 8).expect("allocation");
@@ -130,7 +130,7 @@ impl CacheAwareAllocator {
     ///
     /// ```
     /// # use fugrip::cache_optimization::CacheAwareAllocator;
-    /// # use crate::compat::Address;
+    /// # use crate::frontend::types::Address;
     /// let base = unsafe { Address::from_usize(0x1_0000_0000) };
     /// let allocator = CacheAwareAllocator::new(base, 1024);
     /// let addr = allocator.allocate_aligned(16, 128).expect("aligned allocation");
@@ -144,7 +144,7 @@ impl CacheAwareAllocator {
     ///
     /// ```
     /// # use fugrip::cache_optimization::CacheAwareAllocator;
-    /// # use crate::compat::Address;
+    /// # use crate::frontend::types::Address;
     /// let base = unsafe { Address::from_usize(0x1_0000_0000) };
     /// let allocator = CacheAwareAllocator::new(base, 1024);
     /// let _ = allocator.allocate(32, 8);
@@ -161,7 +161,7 @@ impl CacheAwareAllocator {
     ///
     /// ```
     /// # use fugrip::cache_optimization::CacheAwareAllocator;
-    /// # use crate::compat::Address;
+    /// # use crate::frontend::types::Address;
     /// let base = unsafe { Address::from_usize(0x1_0000_0000) };
     /// let allocator = CacheAwareAllocator::new(base, 1024);
     /// assert_eq!(allocator.get_allocated_bytes(), 0);
@@ -174,7 +174,7 @@ impl CacheAwareAllocator {
     ///
     /// ```
     /// # use fugrip::cache_optimization::CacheAwareAllocator;
-    /// # use crate::compat::Address;
+    /// # use crate::frontend::types::Address;
     /// let base = unsafe { Address::from_usize(0x1_0000_0000) };
     /// let allocator = CacheAwareAllocator::new(base, 1024);
     /// let stats = allocator.get_stats();
@@ -229,7 +229,7 @@ impl CacheOptimizedMarking {
     /// ```
     /// # use fugrip::cache_optimization::CacheOptimizedMarking;
     /// # use fugrip::concurrent::TricolorMarking;
-    /// # use crate::compat::Address;
+    /// # use crate::frontend::types::Address;
     /// # use std::sync::Arc;
     /// let heap_base = unsafe { Address::from_usize(0x1_0000_0000) };
     /// let tricolor = Arc::new(TricolorMarking::new(heap_base, 1024));
@@ -251,7 +251,7 @@ impl CacheOptimizedMarking {
     ///
     /// ```
     /// # use fugrip::cache_optimization::CacheOptimizedMarking;
-    /// # use crate::compat::{Address, ObjectReference};
+    /// # use crate::frontend::types::{Address, ObjectReference};
     /// let marking = CacheOptimizedMarking::new(4);
     /// let obj = ObjectReference::from_raw_address(unsafe { Address::from_usize(0x1_0000_0100) }).unwrap();
     /// marking.mark_object(obj);
@@ -281,7 +281,7 @@ impl CacheOptimizedMarking {
     ///
     /// ```
     /// # use fugrip::cache_optimization::CacheOptimizedMarking;
-    /// # use crate::compat::{Address, ObjectReference};
+    /// # use crate::frontend::types::{Address, ObjectReference};
     /// let marking = CacheOptimizedMarking::new(4);
     /// let objects: Vec<ObjectReference> = (0..2)
     ///     .map(|i| ObjectReference::from_raw_address(unsafe { Address::from_usize(0x1_0000_0100 + i * 8) }).unwrap())
@@ -528,7 +528,7 @@ impl MemoryLayoutOptimizer {
     ///
     /// ```
     /// # use fugrip::cache_optimization::MemoryLayoutOptimizer;
-    /// # use crate::compat::Address;
+    /// # use crate::frontend::types::Address;
     /// let optimizer = MemoryLayoutOptimizer::new();
     /// let layouts = optimizer.calculate_object_layout(&[16, 24]);
     /// assert_eq!(layouts.len(), 2);
@@ -608,7 +608,7 @@ impl MemoryLayoutOptimizer {
     ///
     /// ```no_run
     /// use fugrip::cache_optimization::MemoryLayoutOptimizer;
-    /// use crate::compat::Address;
+    /// use crate::frontend::types::Address;
     ///
     /// let optimizer = MemoryLayoutOptimizer::new();
     /// let base = unsafe { Address::from_usize(0x1_0000_0000) };
@@ -636,7 +636,7 @@ impl Default for MemoryLayoutOptimizer {
 ///
 /// ```
 /// use fugrip::cache_optimization::process_objects_parallel;
-/// use crate::compat::{Address, ObjectReference};
+/// use crate::frontend::types::{Address, ObjectReference};
 ///
 /// let objects = vec![
 ///     ObjectReference::from_raw_address(unsafe { Address::from_usize(0x1_0000_0100) }).unwrap()

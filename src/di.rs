@@ -8,7 +8,7 @@ use crate::fugc_coordinator::FugcCoordinator;
 use crate::roots::GlobalRoots;
 use crate::safepoint::SafepointManager;
 use crate::thread::ThreadRegistry;
-use crate::types::Address;
+use crate::frontend::types::Address;
 use arc_swap::ArcSwap;
 use std::sync::{Arc, OnceLock};
 
@@ -181,7 +181,7 @@ impl Drop for DIScope {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compat::Address;
+    use crate::frontend::types::Address;
 
     #[test]
     fn test_di_container_creation() {

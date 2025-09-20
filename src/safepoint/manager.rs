@@ -167,7 +167,7 @@ impl SafepointManager {
     /// use fugrip::{safepoint::SafepointManager, fugc_coordinator::FugcCoordinator};
     /// use fugrip::roots::GlobalRoots;
     /// use fugrip::thread::ThreadRegistry;
-    /// use crate::compat::Address;
+    /// use crate::frontend::types::Address;
     /// use std::sync::Arc;
     /// use arc_swap::ArcSwap;
     ///

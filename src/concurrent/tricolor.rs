@@ -1,6 +1,6 @@
 //! Tricolor marking state management for concurrent garbage collection
 
-use crate::compat::{Address, ObjectReference};
+use crate::frontend::types::{Address, ObjectReference};
 use crossbeam_utils::Backoff;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -13,7 +13,7 @@ use super::core::ObjectColor;
 ///
 /// ```
 /// use fugrip::concurrent::{TricolorMarking, ObjectColor};
-/// use crate::compat::{Address, ObjectReference};
+/// use crate::frontend::types::{Address, ObjectReference};
 /// use std::sync::Arc;
 ///
 /// let heap_base = unsafe { Address::from_usize(0x10000000) };
@@ -57,7 +57,7 @@ impl TricolorMarking {
     ///
     /// ```
     /// use fugrip::concurrent::TricolorMarking;
-    /// use crate::compat::Address;
+    /// use crate::frontend::types::Address;
     ///
     /// let heap_base = unsafe { Address::from_usize(0x10000000) };
     /// let marking = TricolorMarking::new(heap_base, 64 * 1024 * 1024); // 64MB
@@ -88,7 +88,7 @@ impl TricolorMarking {
     ///
     /// ```
     /// use fugrip::concurrent::{TricolorMarking, ObjectColor};
-    /// use crate::compat::{Address, ObjectReference};
+    /// use crate::frontend::types::{Address, ObjectReference};
     ///
     /// let heap_base = unsafe { Address::from_usize(0x10000000) };
     /// let marking = TricolorMarking::new(heap_base, 1024 * 1024);
@@ -128,7 +128,7 @@ impl TricolorMarking {
     ///
     /// ```
     /// use fugrip::concurrent::{TricolorMarking, ObjectColor};
-    /// use crate::compat::{Address, ObjectReference};
+    /// use crate::frontend::types::{Address, ObjectReference};
     ///
     /// let heap_base = unsafe { Address::from_usize(0x10000000) };
     /// let marking = TricolorMarking::new(heap_base, 1024 * 1024);
@@ -207,7 +207,7 @@ impl TricolorMarking {
     ///
     /// ```
     /// use fugrip::concurrent::{TricolorMarking, ObjectColor};
-    /// use crate::compat::{Address, ObjectReference};
+    /// use crate::frontend::types::{Address, ObjectReference};
     ///
     /// let heap_base = unsafe { Address::from_usize(0x10000000) };
     /// let marking = TricolorMarking::new(heap_base, 1024 * 1024);
@@ -317,7 +317,7 @@ impl TricolorMarking {
     ///
     /// ```
     /// use fugrip::concurrent::{TricolorMarking, ObjectColor};
-    /// use crate::compat::{Address, ObjectReference};
+    /// use crate::frontend::types::{Address, ObjectReference};
     ///
     /// let heap_base = unsafe { Address::from_usize(0x10000000) };
     /// let marking = TricolorMarking::new(heap_base, 1024 * 1024);
@@ -367,7 +367,7 @@ impl TricolorMarking {
     ///
     /// ```
     /// use fugrip::concurrent::{TricolorMarking, ObjectColor};
-    /// use crate::compat::{Address, ObjectReference};
+    /// use crate::frontend::types::{Address, ObjectReference};
     ///
     /// let heap_base = unsafe { Address::from_usize(0x10000000) };
     /// let marking = TricolorMarking::new(heap_base, 1024 * 1024);

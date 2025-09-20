@@ -4,10 +4,13 @@
 //! in the public API. All MMTk interaction goes through these handles.
 
 use crate::{
-    compat::{Address, ObjectReference},
+    frontend::types::{Address, ObjectReference},
     core::ObjectHeader,
     error::{GcError, GcResult},
 };
+
+#[cfg(feature = "use_mmtk")]
+use crate::backends::mmtk::binding::vm_impl::RustVM;
 use std::collections::HashMap;
 use std::sync::{
     Mutex, OnceLock,
@@ -59,13 +62,13 @@ struct MutatorEntry {
     thread_id: usize,
     backend: BackendType,
     #[cfg(feature = "use_mmtk")]
-    mmtk_mutator: Option<*mut mmtk::Mutator<crate::binding::RustVM>>,
+    mmtk_mutator: Option<*mut mmtk::Mutator<RustVM>>,
 }
 
 struct PlanEntry {
     backend: BackendType,
     #[cfg(feature = "use_mmtk")]
-    mmtk_instance: Option<&'static mmtk::MMTK<crate::binding::RustVM>>,
+    mmtk_instance: Option<&'static mmtk::MMTK<RustVM>>,
 }
 
 struct ObjectEntry {
@@ -257,7 +260,7 @@ impl OpaqueAllocator {
         header: ObjectHeader,
         body_bytes: usize,
     ) -> GcResult<ObjectId> {
-        use crate::alloc_facade::global_allocator;
+        use crate::frontend::alloc_facade::global_allocator;
 
         let facade = global_allocator();
         let obj_ref = facade.allocate_object(header, body_bytes)?;
@@ -301,7 +304,7 @@ impl OpaqueAllocator {
         };
 
         // Delegate to facade without exposing backend
-        use crate::alloc_facade::global_allocator;
+        use crate::frontend::alloc_facade::global_allocator;
         let facade = global_allocator();
         let obj_ref =
             unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(address)) };
@@ -320,7 +323,7 @@ impl OpaqueAllocator {
 
     /// Get allocation statistics - no MMTk types exposed
     pub fn stats() -> AllocatorStats {
-        use crate::alloc_facade::global_allocator;
+        use crate::frontend::alloc_facade::global_allocator;
         let facade_stats = global_allocator().stats();
 
         AllocatorStats {
@@ -339,9 +342,12 @@ impl OpaqueAllocator {
             }
             Some(BackendType::MMTk) => {
                 // Trigger FUGC coordinator without exposing MMTk
-                use crate::plan::FugcPlanManager;
-                if let Some(plan_manager) = FugcPlanManager::global() {
-                    plan_manager.gc();
+                #[cfg(feature = "use_mmtk")]
+                {
+                    use crate::backends::mmtk::FugcPlanManager;
+                    if let Some(plan_manager) = FugcPlanManager::global() {
+                        plan_manager.gc();
+                    }
                 }
                 Ok(())
             }
@@ -381,7 +387,7 @@ pub fn current_mutator() -> MutatorId {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::ObjectFlags;
+    
 
     #[test]
     fn test_opaque_mutator_creation() {

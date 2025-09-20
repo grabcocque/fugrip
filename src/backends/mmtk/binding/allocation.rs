@@ -1,12 +1,14 @@
 //! Allocation APIs with FUGC optimizations
 
-use crate::compat::{Address, ObjectReference, SimpleSlot};
-use crate::plan::FugcPlanManager;
+use mmtk::util::{Address, ObjectReference};
+use mmtk::vm::slot::SimpleSlot;
+use crate::backends::mmtk::FugcPlanManager;
 use anyhow;
 use arc_swap::ArcSwap;
 use std::sync::Arc;
 
-use super::{FUGC_PLAN_MANAGER, vm_impl::RustVM};
+use crate::binding::FUGC_PLAN_MANAGER;
+use super::vm_impl::RustVM;
 
 /// Allocate an object using MMTk with FUGC optimizations.
 /// This performs the actual allocation through MMTk's allocator infrastructure
@@ -87,7 +89,7 @@ pub fn fugc_alloc_info(size: usize, align: usize) -> (usize, usize) {
 ///
 /// ```
 /// use fugrip::binding::fugc_post_alloc;
-/// use crate::compat::{Address, ObjectReference};
+/// use crate::frontend::types::{Address, ObjectReference};
 ///
 /// // Create an object reference for demonstration
 /// let addr = unsafe { Address::from_usize(0x10000000) };

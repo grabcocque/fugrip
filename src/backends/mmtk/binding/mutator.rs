@@ -1,6 +1,6 @@
 //! Mutator registration and management for MMTk VM binding
 
-use crate::compat::vm::opaque_pointer::{VMMutatorThread, VMThread};
+use mmtk::util::opaque_pointer::{VMMutatorThread, VMThread};
 use crate::thread::MutatorThread;
 use dashmap::DashMap;
 use std::ops::{Deref, DerefMut};

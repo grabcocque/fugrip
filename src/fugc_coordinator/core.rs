@@ -5,7 +5,7 @@ use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
-use crate::compat::Address;
+use crate::frontend::types::Address;
 use crate::{
     concurrent::{BlackAllocator, ParallelMarkingCoordinator, TricolorMarking, WriteBarrier},
     roots::GlobalRoots,
@@ -298,7 +298,7 @@ impl FugcCoordinator {
     }
 
     /// Mark objects using cache-optimized approach
-    pub fn mark_objects_cache_optimized(&self, objects: &[crate::types::ObjectReference]) {
+    pub fn mark_objects_cache_optimized(&self, objects: &[crate::frontend::types::ObjectReference]) {
         // Use cache-optimized marking if available
         for &obj in objects {
             self.tricolor_marking.mark_grey(obj);
@@ -306,7 +306,7 @@ impl FugcCoordinator {
     }
 
     /// Check if an object is marked
-    pub fn is_object_marked(&self, obj: crate::types::ObjectReference) -> bool {
+    pub fn is_object_marked(&self, obj: crate::frontend::types::ObjectReference) -> bool {
         self.tricolor_marking.get_color(obj) == crate::concurrent::ObjectColor::Black
     }
 }

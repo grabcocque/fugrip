@@ -1,6 +1,6 @@
 //! FUGC 8-step protocol implementation
 
-use crate::compat::{Address, ObjectReference};
+use crate::frontend::types::{Address, ObjectReference};
 use rayon::prelude::*;
 use std::sync::{
     Arc,

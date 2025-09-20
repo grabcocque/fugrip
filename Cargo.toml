@@ -53,6 +53,7 @@ default = ["use_jemalloc"]
 # Allocation backend selection (mutually exclusive)
 use_mmtk = []
 use_jemalloc = ["jemallocator"]
+use_stub = []  # Testing backend that always fails allocation
 
 # Enable lightweight smoke tests that validate high-level GC semantics
 smoke = []

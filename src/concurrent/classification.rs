@@ -1,6 +1,6 @@
 //! Object classification for generational and concurrent marking
 
-use crate::compat::ObjectReference;
+use crate::frontend::types::ObjectReference;
 use crossbeam::queue::SegQueue;
 use dashmap::DashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
