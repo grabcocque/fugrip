@@ -2151,7 +2151,10 @@ mod tests {
             assert!(bitvector.chunk_count > 0, "Should have at least one chunk");
             assert_eq!(
                 bitvector.chunk_count,
-                bitvector.max_objects.div_ceil(bitvector.objects_per_chunk).max(1),
+                bitvector
+                    .max_objects
+                    .div_ceil(bitvector.objects_per_chunk)
+                    .max(1),
                 "Chunk count calculation mismatch for heap_size={}, alignment={}",
                 heap_size,
                 alignment
@@ -2268,7 +2271,8 @@ mod tests {
         assert!(
             stats.simd_chunks_processed > 0,
             "Should use SIMD for dense chunk with {} marked objects out of {} capacity ({:.1}% density)",
-            stats.objects_swept, chunk_capacity,
+            stats.objects_swept,
+            chunk_capacity,
             (stats.objects_swept as f64 / chunk_capacity as f64) * 100.0
         );
         assert!(stats.objects_swept > 0, "Should sweep marked objects");
@@ -2301,7 +2305,10 @@ mod tests {
             stats.sparse_chunks_processed > 0,
             "Should use sparse for low-density chunk"
         );
-        assert_eq!(stats.objects_swept, expected_dead_count, "Should sweep all dead objects");
+        assert_eq!(
+            stats.objects_swept, expected_dead_count,
+            "Should sweep all dead objects"
+        );
     }
 
     #[test]
@@ -2346,7 +2353,8 @@ mod tests {
         assert!(
             stats.objects_swept > 0,
             "Should sweep some dead objects, got {} swept, {} marked total",
-            stats.objects_swept, total_marked
+            stats.objects_swept,
+            total_marked
         );
     }
 
@@ -2365,14 +2373,8 @@ mod tests {
         }
 
         // Verify populations are set
-        assert_eq!(
-            bitvector.chunk_populations[0].load(Ordering::Relaxed),
-            100
-        );
-        assert_eq!(
-            bitvector.chunk_populations[1].load(Ordering::Relaxed),
-            100
-        );
+        assert_eq!(bitvector.chunk_populations[0].load(Ordering::Relaxed), 100);
+        assert_eq!(bitvector.chunk_populations[1].load(Ordering::Relaxed), 100);
 
         // Clear and verify all chunk stats are reset
         bitvector.clear_all_marks();
@@ -2408,7 +2410,9 @@ mod tests {
 
         // Verify last word mask handles boundary correctly
         if !mask_last.word_masks.is_empty() {
-            let total_bits_in_all_words: usize = mask_last.word_masks.iter()
+            let total_bits_in_all_words: usize = mask_last
+                .word_masks
+                .iter()
                 .map(|mask| mask.count_ones() as usize)
                 .sum();
 
@@ -2439,7 +2443,9 @@ mod tests {
         let word_start_obj = word_idx * BITS_PER_WORD;
         let chunk_end_obj = chunk_capacity;
         if word_start_obj < chunk_end_obj {
-            let valid_bits = chunk_end_obj.saturating_sub(word_start_obj).min(BITS_PER_WORD);
+            let valid_bits = chunk_end_obj
+                .saturating_sub(word_start_obj)
+                .min(BITS_PER_WORD);
             let expected = if valid_bits == 64 {
                 !0u64
             } else {
@@ -2492,7 +2498,8 @@ mod tests {
         for i in 0..objects_to_mark {
             let sparse_index = i * 10; // Create gaps between marked objects
             if sparse_index < total_objects {
-                let obj_addr = unsafe { Address::from_usize(heap_base.as_usize() + sparse_index * 16) };
+                let obj_addr =
+                    unsafe { Address::from_usize(heap_base.as_usize() + sparse_index * 16) };
                 bitvector.mark_live(obj_addr);
             }
         }
@@ -2549,18 +2556,31 @@ mod tests {
         }
 
         // Verify pattern densities
-        let chunk0_density = bitvector.chunk_populations[0].load(Ordering::Relaxed) as f64 / objects_per_chunk as f64;
-        let chunk1_density = bitvector.chunk_populations[1].load(Ordering::Relaxed) as f64 / objects_per_chunk as f64;
-        let chunk2_density = bitvector.chunk_populations[2].load(Ordering::Relaxed) as f64 / objects_per_chunk as f64;
+        let chunk0_density = bitvector.chunk_populations[0].load(Ordering::Relaxed) as f64
+            / objects_per_chunk as f64;
+        let chunk1_density = bitvector.chunk_populations[1].load(Ordering::Relaxed) as f64
+            / objects_per_chunk as f64;
+        let chunk2_density = bitvector.chunk_populations[2].load(Ordering::Relaxed) as f64
+            / objects_per_chunk as f64;
 
         assert!(chunk0_density >= 0.70, "Chunk 0 should be dense");
         assert!(chunk1_density <= 0.20, "Chunk 1 should be sparse");
-        assert!((0.40..=0.50).contains(&chunk2_density), "Chunk 2 should be medium: {:.2}%", chunk2_density * 100.0);
+        assert!(
+            (0.40..=0.50).contains(&chunk2_density),
+            "Chunk 2 should be medium: {:.2}%",
+            chunk2_density * 100.0
+        );
 
         // Run sweep and verify strategy dispatch
         let stats = bitvector.hybrid_sweep();
-        assert!(stats.simd_chunks_processed >= 1, "Should have at least one dense chunk");
-        assert!(stats.sparse_chunks_processed >= 1, "Should have at least one sparse chunk");
+        assert!(
+            stats.simd_chunks_processed >= 1,
+            "Should have at least one dense chunk"
+        );
+        assert!(
+            stats.sparse_chunks_processed >= 1,
+            "Should have at least one sparse chunk"
+        );
     }
 
     #[test]
@@ -2598,13 +2618,15 @@ mod tests {
             if target_density <= 25 {
                 // Should prefer sparse for low density (check operation counters)
                 assert!(
-                    bitvector.simd_operations.load(Ordering::Relaxed) == 0 || stats.objects_swept > 0,
+                    bitvector.simd_operations.load(Ordering::Relaxed) == 0
+                        || stats.objects_swept > 0,
                     "Low density should minimize SIMD usage"
                 );
             } else if target_density >= 75 {
                 // Should prefer SIMD for high density (check SIMD counters)
                 assert!(
-                    bitvector.simd_operations.load(Ordering::Relaxed) > 0 || stats.objects_swept > 0,
+                    bitvector.simd_operations.load(Ordering::Relaxed) > 0
+                        || stats.objects_swept > 0,
                     "High density should use SIMD strategy"
                 );
             }

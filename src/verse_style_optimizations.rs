@@ -383,13 +383,15 @@ mod tests {
         let mark_bits = VerseStyleMarkBits::new(
             Arc::new(crate::concurrent::TricolorMarking::new(
                 unsafe { mmtk::util::Address::from_usize(0x1000000) },
-                1024 * 1024
+                1024 * 1024,
             )),
             unsafe { mmtk::util::Address::from_usize(0x1000000) },
-            1024 * 1024
+            1024 * 1024,
         );
-        let obj1 = unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(0x1001000)) };
-        let obj2 = unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(0x1002000)) };
+        let obj1 =
+            unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(0x1001000)) };
+        let obj2 =
+            unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(0x1002000)) };
 
         // Test rapid marking/unmarking patterns
         for i in 0..50 {
@@ -406,16 +408,18 @@ mod tests {
         let mark_bits = VerseStyleMarkBits::new(
             Arc::new(crate::concurrent::TricolorMarking::new(
                 unsafe { mmtk::util::Address::from_usize(0x1000000) },
-                1024 * 1024
+                1024 * 1024,
             )),
             unsafe { mmtk::util::Address::from_usize(0x1000000) },
-            1024 * 1024
+            1024 * 1024,
         );
 
         // Create a batch of objects within the heap range
         let objects: Vec<ObjectReference> = (0..10)
             .map(|i| unsafe {
-                ObjectReference::from_raw_address_unchecked(Address::from_usize(0x1000000 + i * 0x100))
+                ObjectReference::from_raw_address_unchecked(Address::from_usize(
+                    0x1000000 + i * 0x100,
+                ))
             })
             .collect();
 
@@ -470,16 +474,17 @@ mod tests {
             1024 * 1024,
             Arc::new(crate::concurrent::TricolorMarking::new(
                 unsafe { mmtk::util::Address::from_usize(0x1000000) },
-                1024 * 1024
+                1024 * 1024,
             )),
-            1024
+            1024,
         );
 
         // Test combined operations
         optimizer.notify_allocation(1024);
         optimizer.notify_allocation(2048);
 
-        let obj = unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(0x3000)) };
+        let obj =
+            unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(0x3000)) };
 
         // Mark object
         assert!(optimizer.set_object_marked(obj, true));
@@ -522,23 +527,24 @@ mod tests {
         let mark_bits = VerseStyleMarkBits::new(
             Arc::new(crate::concurrent::TricolorMarking::new(
                 unsafe { mmtk::util::Address::from_usize(0x1000000) },
-                1024 * 1024
+                1024 * 1024,
             )),
             unsafe { mmtk::util::Address::from_usize(0x1000000) },
-            1024 * 1024
+            1024 * 1024,
         );
 
         // Test with various address patterns within heap range
         let addresses = [
-            0x1000000,        // Heap base
-            0x1008000,        // Higher address within heap
-            0x1080000,        // Even higher within heap
-            0x10F0000,        // Near end of heap
-            0x10FF000,        // Very close to end of heap
+            0x1000000, // Heap base
+            0x1008000, // Higher address within heap
+            0x1080000, // Even higher within heap
+            0x10F0000, // Near end of heap
+            0x10FF000, // Very close to end of heap
         ];
 
         for addr in addresses {
-            let obj = unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(addr)) };
+            let obj =
+                unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(addr)) };
 
             // Test marking at various addresses
             assert!(!mark_bits.is_marked_fast(obj));
@@ -554,10 +560,10 @@ mod tests {
         let mark_bits = VerseStyleMarkBits::new(
             Arc::new(crate::concurrent::TricolorMarking::new(
                 unsafe { mmtk::util::Address::from_usize(0x1000000) },
-                1024 * 1024
+                1024 * 1024,
             )),
             unsafe { mmtk::util::Address::from_usize(0x1000000) },
-            1024 * 1024
+            1024 * 1024,
         );
 
         // Test empty batch
@@ -566,7 +572,8 @@ mod tests {
         assert_eq!(marked_count, 0);
 
         // Test single object batch
-        let single_obj = unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(0x4000)) };
+        let single_obj =
+            unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(0x4000)) };
         let single_batch = vec![single_obj];
         let marked_count = mark_bits.mark_batch(&single_batch, true);
         assert_eq!(marked_count, 1);
@@ -580,9 +587,9 @@ mod tests {
             1024 * 1024,
             Arc::new(crate::concurrent::TricolorMarking::new(
                 unsafe { mmtk::util::Address::from_usize(0x1000000) },
-                1024 * 1024
+                1024 * 1024,
             )),
-            1024
+            1024,
         );
 
         // Test rapid state changes

@@ -60,7 +60,10 @@ mod safepoint_coverage_tests {
         let fixture = TestFixture::new_with_config(0x50000000, 16 * 1024 * 1024, 2);
         let coordinator = Arc::clone(&fixture.coordinator);
         let manager2 = SafepointManager::with_coordinator(&coordinator);
-        assert_eq!(Arc::as_ptr(manager2.get_fugc_coordinator()), Arc::as_ptr(&coordinator));
+        assert_eq!(
+            Arc::as_ptr(manager2.get_fugc_coordinator()),
+            Arc::as_ptr(&coordinator)
+        );
 
         // Test global()
         let global_manager = SafepointManager::global();
@@ -78,7 +81,10 @@ mod safepoint_coverage_tests {
         // Hit rate might be NaN when there's no activity (0/0 division), so we check if it's either valid OR NaN
         let hit_rate_is_valid = stats.hit_rate >= 0.0 && stats.hit_rate <= 1.0;
         let hit_rate_is_nan = stats.hit_rate.is_nan();
-        assert!(hit_rate_is_valid || hit_rate_is_nan, "Hit rate should be valid or NaN for zero activity");
+        assert!(
+            hit_rate_is_valid || hit_rate_is_nan,
+            "Hit rate should be valid or NaN for zero activity"
+        );
         assert!(stats.avg_safepoint_interval_ms >= 0.0 || stats.avg_safepoint_interval_ms.is_nan());
     }
 
@@ -143,7 +149,10 @@ mod safepoint_coverage_tests {
         // Hit rate might be NaN when there's no activity (0/0 division), so we check if it's either valid OR NaN
         let hit_rate_is_valid = stats.hit_rate >= 0.0 && stats.hit_rate <= 1.0;
         let hit_rate_is_nan = stats.hit_rate.is_nan();
-        assert!(hit_rate_is_valid || hit_rate_is_nan, "Hit rate should be valid or NaN for minimal activity");
+        assert!(
+            hit_rate_is_valid || hit_rate_is_nan,
+            "Hit rate should be valid or NaN for minimal activity"
+        );
     }
 
     #[test]
@@ -245,8 +254,10 @@ mod safepoint_coverage_tests {
 
         // Verify stats remain unchanged when no callbacks are set
         let stats_after_no_callbacks = manager.get_stats();
-        assert_eq!(stats_after_no_callbacks.total_polls, initial_polls,
-                   "Polls should not increase when executing empty callbacks");
+        assert_eq!(
+            stats_after_no_callbacks.total_polls, initial_polls,
+            "Polls should not increase when executing empty callbacks"
+        );
 
         // Set up actual callbacks to test execution
         let callback_executed = Arc::new(AtomicBool::new(false));
@@ -258,13 +269,17 @@ mod safepoint_coverage_tests {
 
         // Execute the safepoint callback - it should run and set the flag
         manager.execute_safepoint_callback();
-        assert!(callback_executed.load(Ordering::Acquire),
-               "Safepoint callback should have been executed");
+        assert!(
+            callback_executed.load(Ordering::Acquire),
+            "Safepoint callback should have been executed"
+        );
 
         // Verify that the callback was cleared after execution
         manager.execute_safepoint_callback(); // Should not execute again
-        assert!(callback_executed.load(Ordering::Acquire),
-               "Flag should remain true, callback should not execute twice");
+        assert!(
+            callback_executed.load(Ordering::Acquire),
+            "Flag should remain true, callback should not execute twice"
+        );
 
         // Test handshake callback setup (execution requires proper thread coordination)
         let handshake_executed = Arc::new(AtomicBool::new(false));
@@ -278,8 +293,10 @@ mod safepoint_coverage_tests {
         // Verify callback was set up correctly (execution requires full handshake protocol)
         // The important thing is that the API works and doesn't panic
         let stats_after_setup = manager.get_stats();
-        assert!(stats_after_setup.total_polls >= initial_polls,
-               "Stats should remain valid after handshake callback setup");
+        assert!(
+            stats_after_setup.total_polls >= initial_polls,
+            "Stats should remain valid after handshake callback setup"
+        );
     }
 
     #[test]
@@ -301,8 +318,10 @@ mod safepoint_coverage_tests {
 
         // Verify hit count behavior (should not decrease)
         let stats_after_wait = manager.get_stats();
-        assert!(stats_after_wait.total_hits >= initial_hits,
-                   "Hit count should not decrease during wait");
+        assert!(
+            stats_after_wait.total_hits >= initial_hits,
+            "Hit count should not decrease during wait"
+        );
 
         // Test waiting with safepoint requested - should succeed
         let callback_executed = Arc::new(AtomicBool::new(false));
@@ -317,16 +336,23 @@ mod safepoint_coverage_tests {
 
         // Now wait_for_safepoint should succeed because hit count increased
         let result_with_safepoint = manager.wait_for_safepoint(Duration::from_millis(100));
-        assert!(result_with_safepoint, "wait_for_safepoint should succeed when safepoint was hit");
+        assert!(
+            result_with_safepoint,
+            "wait_for_safepoint should succeed when safepoint was hit"
+        );
 
         // Verify callback was executed
-        assert!(callback_executed.load(Ordering::Acquire),
-               "Callback should have been executed during safepoint");
+        assert!(
+            callback_executed.load(Ordering::Acquire),
+            "Callback should have been executed during safepoint"
+        );
 
         // Verify hit count increased
         let stats_after_safepoint = manager.get_stats();
-        assert!(stats_after_safepoint.total_hits > initial_hits,
-               "Hit count should increase after safepoint execution");
+        assert!(
+            stats_after_safepoint.total_hits > initial_hits,
+            "Hit count should increase after safepoint execution"
+        );
 
         // Clear the safepoint for cleanup
         manager.clear_safepoint();
@@ -363,8 +389,10 @@ mod safepoint_coverage_tests {
 
         // Verify stats changed appropriately
         let stats_after_transitions = manager.get_stats();
-        assert!(stats_after_transitions.total_polls > initial_polls,
-               "Poll count should increase after state transitions and pollchecks");
+        assert!(
+            stats_after_transitions.total_polls > initial_polls,
+            "Poll count should increase after state transitions and pollchecks"
+        );
 
         // Now test with actual safepoint execution
         let second_callback = Arc::new(AtomicBool::new(false));
@@ -378,13 +406,17 @@ mod safepoint_coverage_tests {
         pollcheck();
 
         // Verify callback was executed
-        assert!(second_callback.load(Ordering::Acquire),
-               "Callback should be executed when in active state");
+        assert!(
+            second_callback.load(Ordering::Acquire),
+            "Callback should be executed when in active state"
+        );
 
         // Verify hit count increased
         let final_stats = manager.get_stats();
-        assert!(final_stats.total_hits > initial_hits,
-               "Hit count should increase after safepoint execution");
+        assert!(
+            final_stats.total_hits > initial_hits,
+            "Hit count should increase after safepoint execution"
+        );
 
         // Verify safepoint request flag is cleared by testing that new pollchecks don't execute callbacks
         let test_callback = Arc::new(AtomicBool::new(false));
@@ -399,8 +431,10 @@ mod safepoint_coverage_tests {
 
         // Pollcheck should not execute the callback after clearing
         pollcheck();
-        assert!(!test_callback.load(Ordering::Acquire),
-               "Callback should not execute after safepoint is cleared");
+        assert!(
+            !test_callback.load(Ordering::Acquire),
+            "Callback should not execute after safepoint is cleared"
+        );
 
         // Test multiple rapid state transitions
         for i in 0..5 {
@@ -417,8 +451,10 @@ mod safepoint_coverage_tests {
             safepoint_enter();
 
             // Verify state transitions work consistently
-            assert!(manager.get_stats().total_polls > initial_polls + i,
-                   "Polls should increase with each transition cycle");
+            assert!(
+                manager.get_stats().total_polls > initial_polls + i,
+                "Polls should increase with each transition cycle"
+            );
         }
 
         // Clear any remaining safepoint

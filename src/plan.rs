@@ -192,7 +192,8 @@ impl FugcPlanManager {
             // Special case: can't align to usize::MAX, return size as-is (saturated)
             size
         } else {
-            size.saturating_add(corrected_align.saturating_sub(1)) & !(corrected_align.saturating_sub(1))
+            size.saturating_add(corrected_align.saturating_sub(1))
+                & !(corrected_align.saturating_sub(1))
         };
 
         if self.is_concurrent_collection_enabled() {
@@ -631,19 +632,39 @@ mod tests {
         let plan_manager = FugcPlanManager::new();
 
         // Initial stats should be zero
-        let initial_allocated = plan_manager.allocation_stats.total_allocated.load(Ordering::Relaxed);
-        let initial_count = plan_manager.allocation_stats.allocation_count.load(Ordering::Relaxed);
+        let initial_allocated = plan_manager
+            .allocation_stats
+            .total_allocated
+            .load(Ordering::Relaxed);
+        let initial_count = plan_manager
+            .allocation_stats
+            .allocation_count
+            .load(Ordering::Relaxed);
         assert_eq!(initial_allocated, 0);
         assert_eq!(initial_count, 0);
 
         // Track some allocations using post_alloc
-        let obj1 = unsafe { mmtk::util::ObjectReference::from_raw_address_unchecked(mmtk::util::Address::from_usize(0x1000)) };
-        let obj2 = unsafe { mmtk::util::ObjectReference::from_raw_address_unchecked(mmtk::util::Address::from_usize(0x2000)) };
+        let obj1 = unsafe {
+            mmtk::util::ObjectReference::from_raw_address_unchecked(
+                mmtk::util::Address::from_usize(0x1000),
+            )
+        };
+        let obj2 = unsafe {
+            mmtk::util::ObjectReference::from_raw_address_unchecked(
+                mmtk::util::Address::from_usize(0x2000),
+            )
+        };
         plan_manager.post_alloc(obj1, 1024);
         plan_manager.post_alloc(obj2, 2048);
 
-        let after_allocated = plan_manager.allocation_stats.total_allocated.load(Ordering::Relaxed);
-        let after_count = plan_manager.allocation_stats.allocation_count.load(Ordering::Relaxed);
+        let after_allocated = plan_manager
+            .allocation_stats
+            .total_allocated
+            .load(Ordering::Relaxed);
+        let after_count = plan_manager
+            .allocation_stats
+            .allocation_count
+            .load(Ordering::Relaxed);
         assert_eq!(after_allocated, 3072);
         assert_eq!(after_count, 2);
     }
@@ -656,12 +677,21 @@ mod tests {
         assert!(!plan_manager.should_trigger_collection());
 
         // Large allocation should consider triggering
-        plan_manager.allocation_stats.total_allocated.store(33 * 1024 * 1024, Ordering::Relaxed);
+        plan_manager
+            .allocation_stats
+            .total_allocated
+            .store(33 * 1024 * 1024, Ordering::Relaxed);
         assert!(plan_manager.should_trigger_collection());
 
         // Reset and test object count threshold
-        plan_manager.allocation_stats.total_allocated.store(0, Ordering::Relaxed);
-        plan_manager.allocation_stats.allocation_count.store(10_001, Ordering::Relaxed);
+        plan_manager
+            .allocation_stats
+            .total_allocated
+            .store(0, Ordering::Relaxed);
+        plan_manager
+            .allocation_stats
+            .allocation_count
+            .store(10_001, Ordering::Relaxed);
         assert!(plan_manager.should_trigger_collection());
     }
 
@@ -675,7 +705,10 @@ mod tests {
         // Test phase queries
         let phase = plan_manager.fugc_phase();
         // Should be in idle state initially
-        assert_eq!(format!("{:?}", phase), format!("{:?}", crate::fugc_coordinator::FugcPhase::Idle));
+        assert_eq!(
+            format!("{:?}", phase),
+            format!("{:?}", crate::fugc_coordinator::FugcPhase::Idle)
+        );
     }
 
     #[test]
@@ -710,7 +743,7 @@ mod tests {
             Ok(_options) => {
                 // If successful, verify some basic properties
                 // Note: We can't test internal state easily due to MMTk's design
-            },
+            }
             Err(e) => {
                 // Error is acceptable in test environment
                 assert!(e.to_string().contains("Failed") || e.to_string().contains("set"));
@@ -723,15 +756,29 @@ mod tests {
         let plan_manager = FugcPlanManager::new();
 
         // Test zero allocation
-        let obj = unsafe { mmtk::util::ObjectReference::from_raw_address_unchecked(mmtk::util::Address::from_usize(0x3000)) };
+        let obj = unsafe {
+            mmtk::util::ObjectReference::from_raw_address_unchecked(
+                mmtk::util::Address::from_usize(0x3000),
+            )
+        };
         plan_manager.post_alloc(obj, 0);
-        let count = plan_manager.allocation_stats.allocation_count.load(Ordering::Relaxed);
+        let count = plan_manager
+            .allocation_stats
+            .allocation_count
+            .load(Ordering::Relaxed);
         assert_eq!(count, 1); // Still counts as an allocation event
 
         // Test large allocation
-        let obj2 = unsafe { mmtk::util::ObjectReference::from_raw_address_unchecked(mmtk::util::Address::from_usize(0x4000)) };
+        let obj2 = unsafe {
+            mmtk::util::ObjectReference::from_raw_address_unchecked(
+                mmtk::util::Address::from_usize(0x4000),
+            )
+        };
         plan_manager.post_alloc(obj2, usize::MAX - 1000);
-        let total = plan_manager.allocation_stats.total_allocated.load(Ordering::Relaxed);
+        let total = plan_manager
+            .allocation_stats
+            .total_allocated
+            .load(Ordering::Relaxed);
         // Should handle large values without overflow (may wrap)
         assert!(total > 0);
     }
@@ -743,12 +790,12 @@ mod tests {
         // Create valid object references for testing
         let _src = unsafe {
             mmtk::util::ObjectReference::from_raw_address_unchecked(
-                mmtk::util::Address::from_usize(0x1000)
+                mmtk::util::Address::from_usize(0x1000),
             )
         };
         let _target = unsafe {
             mmtk::util::ObjectReference::from_raw_address_unchecked(
-                mmtk::util::Address::from_usize(0x2000)
+                mmtk::util::Address::from_usize(0x2000),
             )
         };
 

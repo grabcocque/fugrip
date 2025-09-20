@@ -3,13 +3,13 @@
 //! Tests end-to-end integration between FugcCoordinator and SimdBitvector,
 //! ensuring stats propagation, chunk capacity handling, and proper API usage.
 
-use fugrip::test_utils::TestFixture;
-use fugrip::simd_sweep::SimdBitvector;
 use fugrip::fugc_coordinator::FugcPhase;
+use fugrip::simd_sweep::SimdBitvector;
+use fugrip::test_utils::TestFixture;
 use mmtk::util::Address;
 use std::sync::Arc;
-use std::time::Duration;
 use std::thread;
+use std::time::Duration;
 
 #[test]
 fn test_coordinator_hybrid_sweep_integration() {
@@ -39,9 +39,19 @@ fn test_coordinator_hybrid_sweep_integration() {
 
     // Verify stats are reasonable
     // With 128KB heap / 16 bytes = 8192 slots, 2010 marked means 6182 swept (unmarked)
-    assert_eq!(sweep_stats.objects_swept, 8192 - 2010, "Should sweep all unmarked objects");
-    assert!(sweep_stats.simd_operations > 0, "Should use SIMD for dense region");
-    assert!(sweep_stats.sparse_chunks_processed > 0, "Should use sparse for sparse region");
+    assert_eq!(
+        sweep_stats.objects_swept,
+        8192 - 2010,
+        "Should sweep all unmarked objects"
+    );
+    assert!(
+        sweep_stats.simd_operations > 0,
+        "Should use SIMD for dense region"
+    );
+    assert!(
+        sweep_stats.sparse_chunks_processed > 0,
+        "Should use sparse for sparse region"
+    );
 
     // Verify coordinator can be triggered through the cycle
     coordinator.trigger_gc();
@@ -85,7 +95,10 @@ fn test_coordinator_stats_propagation() {
 
     // After sweep, marks should be cleared
     let post_sweep_stats = bitvector.get_stats();
-    assert_eq!(post_sweep_stats.objects_marked, 0, "Marks should be cleared after sweep");
+    assert_eq!(
+        post_sweep_stats.objects_marked, 0,
+        "Marks should be cleared after sweep"
+    );
 
     // After sweep, all chunk populations should be reset (implicitly verified by stats)
     let _coordinator = coordinator; // Acknowledge coordinator is available for future use
@@ -109,7 +122,8 @@ fn test_coordinator_direct_barrier_activation() {
 
     // Spawn a monitoring thread that will signal when barrier gets activated
     let monitor_handle = thread::spawn(move || {
-        for _ in 0..1000 {  // Poll for a reasonable number of iterations
+        for _ in 0..1000 {
+            // Poll for a reasonable number of iterations
             if coordinator_clone.write_barrier().is_active() {
                 let _ = barrier_activated_tx.send(true);
                 break;
@@ -154,17 +168,27 @@ fn test_chunk_capacity_edge_cases() {
 
     // Mark object at very end of heap
     if last_valid_offset > 16 {
-        let last_obj = unsafe { Address::from_usize(heap_base.as_usize() + last_valid_offset - 16) };
-        assert!(bitvector.mark_live(last_obj), "Should mark last valid object");
+        let last_obj =
+            unsafe { Address::from_usize(heap_base.as_usize() + last_valid_offset - 16) };
+        assert!(
+            bitvector.mark_live(last_obj),
+            "Should mark last valid object"
+        );
     }
 
     // Try to mark beyond heap boundary (should fail)
     let beyond_heap = unsafe { Address::from_usize(heap_base.as_usize() + 10000 + 16) };
-    assert!(!bitvector.mark_live(beyond_heap), "Should not mark beyond heap");
+    assert!(
+        !bitvector.mark_live(beyond_heap),
+        "Should not mark beyond heap"
+    );
 
     // Sweep and verify only valid objects are processed
     let stats = bitvector.hybrid_sweep();
-    assert!(stats.objects_swept <= (10000 / 16), "Should not sweep invalid objects");
+    assert!(
+        stats.objects_swept <= (10000 / 16),
+        "Should not sweep invalid objects"
+    );
 }
 
 #[test]

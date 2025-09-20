@@ -30,7 +30,10 @@ fn test_dense_pattern_generation() {
         "Dense pattern should have >75% density, got {:.2}%",
         density * 100.0
     );
-    assert_eq!(marked_count, target_marked, "Should mark exact target count");
+    assert_eq!(
+        marked_count, target_marked,
+        "Should mark exact target count"
+    );
 }
 
 #[test]
@@ -60,7 +63,10 @@ fn test_sparse_pattern_generation() {
         "Sparse pattern should have <10% density, got {:.2}%",
         density * 100.0
     );
-    assert_eq!(marked_count, target_marked, "Should mark exact target count");
+    assert_eq!(
+        marked_count, target_marked,
+        "Should mark exact target count"
+    );
 }
 
 #[test]
@@ -103,9 +109,21 @@ fn test_mixed_density_pattern() {
     let chunk2_density = bitvector.get_chunk_population(2) as f64 / objects_per_chunk as f64;
     let chunk3_density = bitvector.get_chunk_population(3) as f64 / objects_per_chunk as f64;
 
-    assert!(chunk0_density >= 0.85, "Chunk 0 should be dense: {:.2}%", chunk0_density * 100.0);
-    assert!((0.40..=0.60).contains(&chunk1_density), "Chunk 1 should be medium: {:.2}%", chunk1_density * 100.0);
-    assert!(chunk2_density <= 0.10, "Chunk 2 should be sparse: {:.2}%", chunk2_density * 100.0);
+    assert!(
+        chunk0_density >= 0.85,
+        "Chunk 0 should be dense: {:.2}%",
+        chunk0_density * 100.0
+    );
+    assert!(
+        (0.40..=0.60).contains(&chunk1_density),
+        "Chunk 1 should be medium: {:.2}%",
+        chunk1_density * 100.0
+    );
+    assert!(
+        chunk2_density <= 0.10,
+        "Chunk 2 should be sparse: {:.2}%",
+        chunk2_density * 100.0
+    );
     assert_eq!(chunk3_density, 0.0, "Chunk 3 should be empty");
 }
 
@@ -135,18 +153,33 @@ fn test_hybrid_strategy_selection() {
     let stats = bitvector.hybrid_sweep();
 
     // Verify both strategies were used
-    assert!(stats.simd_chunks_processed > 0, "Should use SIMD for dense chunk");
-    assert!(stats.sparse_chunks_processed > 0, "Should use sparse for sparse chunk");
+    assert!(
+        stats.simd_chunks_processed > 0,
+        "Should use SIMD for dense chunk"
+    );
+    assert!(
+        stats.sparse_chunks_processed > 0,
+        "Should use sparse for sparse chunk"
+    );
 
     // Calculate expected dead objects: total capacity minus marked objects
     let total_capacity = 2 * objects_per_chunk; // 2 chunks
     let total_marked = dense_count + sparse_count;
     let expected_dead = total_capacity - total_marked;
-    assert_eq!(stats.objects_swept, expected_dead, "Should sweep all unmarked (dead) objects");
+    assert_eq!(
+        stats.objects_swept, expected_dead,
+        "Should sweep all unmarked (dead) objects"
+    );
 
     // Verify strategy selection was optimal
-    assert_eq!(stats.simd_chunks_processed, 1, "Should process exactly 1 chunk with SIMD");
-    assert_eq!(stats.sparse_chunks_processed, 1, "Should process exactly 1 chunk with sparse");
+    assert_eq!(
+        stats.simd_chunks_processed, 1,
+        "Should process exactly 1 chunk with SIMD"
+    );
+    assert_eq!(
+        stats.sparse_chunks_processed, 1,
+        "Should process exactly 1 chunk with sparse"
+    );
 }
 
 #[test]
@@ -181,7 +214,10 @@ fn test_benchmark_pattern_consistency() {
 
     assert_eq!(sweep1.objects_swept, sweep2.objects_swept);
     assert_eq!(sweep1.simd_chunks_processed, sweep2.simd_chunks_processed);
-    assert_eq!(sweep1.sparse_chunks_processed, sweep2.sparse_chunks_processed);
+    assert_eq!(
+        sweep1.sparse_chunks_processed,
+        sweep2.sparse_chunks_processed
+    );
 }
 
 #[test]
@@ -237,14 +273,17 @@ fn test_performance_measurement_validity() {
     let mut sweep_times = Vec::new();
     let mut objects_swept = Vec::new();
 
-    for _ in 0..5 {
-        // Re-mark objects for each sweep
-        for i in 0..marked_count {
-            let obj = unsafe { Address::from_usize(heap_base.as_usize() + i * 16) };
-            bitvector.mark_live(obj);
+    for _i in 0..5 {
+        // Create a fresh bitvector for each sweep to ensure consistent test conditions
+        let fresh_bitvector = SimdBitvector::new(heap_base, 64 * 1024, 16);
+
+        // Mark the same pattern of objects
+        for j in 0..marked_count {
+            let obj = unsafe { Address::from_usize(heap_base.as_usize() + j * 16) };
+            fresh_bitvector.mark_live(obj);
         }
 
-        let stats = bitvector.hybrid_sweep();
+        let stats = fresh_bitvector.hybrid_sweep();
         sweep_times.push(stats.sweep_time_ns);
         objects_swept.push(stats.objects_swept);
     }
@@ -252,26 +291,40 @@ fn test_performance_measurement_validity() {
     // All sweeps should process dead objects consistently
     // Since we mark the same objects each time, the number of dead objects should be consistent
     let first_sweep_count = objects_swept[0];
-    assert!(objects_swept.iter().all(|&count| count == first_sweep_count),
-        "All sweeps should process the same number of dead objects consistently");
+    assert!(
+        objects_swept
+            .iter()
+            .all(|&count| count == first_sweep_count),
+        "All sweeps should process the same number of dead objects consistently"
+    );
 
     // Performance should be reasonable (not zero, not extremely high)
-    assert!(sweep_times.iter().all(|&time| time > 0),
-        "Sweep times should be greater than zero");
+    assert!(
+        sweep_times.iter().all(|&time| time > 0),
+        "Sweep times should be greater than zero"
+    );
 
-    assert!(sweep_times.iter().all(|&time| time < 1_000_000_000), // < 1 second
-        "Sweep times should be reasonable (< 1s)");
+    assert!(
+        sweep_times.iter().all(|&time| time < 1_000_000_000), // < 1 second
+        "Sweep times should be reasonable (< 1s)"
+    );
 
     // Calculate coefficient of variation to check consistency
     let mean_time = sweep_times.iter().sum::<u64>() as f64 / sweep_times.len() as f64;
-    let variance = sweep_times.iter()
+    let variance = sweep_times
+        .iter()
         .map(|&time| {
             let diff = time as f64 - mean_time;
             diff * diff
         })
-        .sum::<f64>() / sweep_times.len() as f64;
+        .sum::<f64>()
+        / sweep_times.len() as f64;
     let std_dev = variance.sqrt();
     let cv = std_dev / mean_time;
 
-    assert!(cv < 1.0, "Performance measurements should be reasonably consistent (CV < 100%), got {:.2}%", cv * 100.0);
+    assert!(
+        cv < 1.0,
+        "Performance measurements should be reasonably consistent (CV < 100%), got {:.2}%",
+        cv * 100.0
+    );
 }

@@ -721,10 +721,10 @@ mod tests {
     fn test_fugc_allocation_helpers() {
         // Test fugc_alloc_info with various inputs
         let test_cases = [
-            (0, 1),     // Minimum size
-            (8, 8),     // Typical small object
-            (64, 16),   // Medium object
-            (1024, 32), // Large object
+            (0, 1),            // Minimum size
+            (8, 8),            // Typical small object
+            (64, 16),          // Medium object
+            (1024, 32),        // Large object
             (1024 * 1024, 32), // Large but safe size - 1MB
         ];
 
@@ -878,8 +878,12 @@ mod tests {
     #[test]
     fn test_vm_thread_key_functions() {
         // Test thread key generation functions
-        let thread1 = VMThread(OpaquePointer::from_address(unsafe { Address::from_usize(0x1000) }));
-        let thread2 = VMThread(OpaquePointer::from_address(unsafe { Address::from_usize(0x2000) }));
+        let thread1 = VMThread(OpaquePointer::from_address(unsafe {
+            Address::from_usize(0x1000)
+        }));
+        let thread2 = VMThread(OpaquePointer::from_address(unsafe {
+            Address::from_usize(0x2000)
+        }));
 
         let key1 = vm_thread_key(thread1);
         let key2 = vm_thread_key(thread2);
@@ -905,7 +909,9 @@ mod tests {
         let thread = MutatorThread::new(42);
         // Use a placeholder address for testing - we won't dereference it
         let dummy_mutator_ptr = 0x1000 as *mut mmtk::Mutator<RustVM>;
-        let tls = VMMutatorThread(VMThread(OpaquePointer::from_address(unsafe { Address::from_usize(42) })));
+        let tls = VMMutatorThread(VMThread(OpaquePointer::from_address(unsafe {
+            Address::from_usize(42)
+        })));
 
         // Register mutator (using unsafe but valid for testing)
         register_mutator_context(tls, unsafe { &mut *dummy_mutator_ptr }, thread.clone());
@@ -940,8 +946,12 @@ mod tests {
         // Use placeholder addresses - visitors don't actually dereference the pointers in tests
         let dummy_mutator1_ptr = 0x2000 as *mut mmtk::Mutator<RustVM>;
         let dummy_mutator2_ptr = 0x3000 as *mut mmtk::Mutator<RustVM>;
-        let tls1 = VMMutatorThread(VMThread(OpaquePointer::from_address(unsafe { Address::from_usize(100) })));
-        let tls2 = VMMutatorThread(VMThread(OpaquePointer::from_address(unsafe { Address::from_usize(101) })));
+        let tls1 = VMMutatorThread(VMThread(OpaquePointer::from_address(unsafe {
+            Address::from_usize(100)
+        })));
+        let tls2 = VMMutatorThread(VMThread(OpaquePointer::from_address(unsafe {
+            Address::from_usize(101)
+        })));
 
         // Register mutators
         register_mutator_context(tls1, unsafe { &mut *dummy_mutator1_ptr }, thread1.clone());
@@ -976,7 +986,9 @@ mod tests {
         // Test RustCollection implementation methods
         let _collection = RustCollection;
         let worker_tls = VMWorkerThread(VMThread::UNINITIALIZED);
-        let mutator_tls = VMMutatorThread(VMThread(OpaquePointer::from_address(unsafe { Address::from_usize(200) })));
+        let mutator_tls = VMMutatorThread(VMThread(OpaquePointer::from_address(unsafe {
+            Address::from_usize(200)
+        })));
 
         // Test stop_all_mutators - should not panic
         RustCollection::stop_all_mutators(worker_tls, |_mutator| {
@@ -998,9 +1010,12 @@ mod tests {
     fn test_rust_reference_glue_edge_cases() {
         // Test ReferenceGlue edge cases
         let _glue = RustReferenceGlue;
-        let obj1 = unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(0x3000)) };
-        let obj2 = unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(0x4000)) };
-        let obj3 = unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(0x5000)) };
+        let obj1 =
+            unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(0x3000)) };
+        let obj2 =
+            unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(0x4000)) };
+        let obj3 =
+            unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(0x5000)) };
 
         // Test get_referent on non-existent object
         assert_eq!(RustReferenceGlue::get_referent(obj1), None);
@@ -1040,7 +1055,9 @@ mod tests {
         // Register a mutator for basic testing
         let thread = MutatorThread::new(600);
         let dummy_mutator_ptr = 0x4000 as *mut mmtk::Mutator<RustVM>;
-        let tls = VMMutatorThread(VMThread(OpaquePointer::from_address(unsafe { Address::from_usize(600) })));
+        let tls = VMMutatorThread(VMThread(OpaquePointer::from_address(unsafe {
+            Address::from_usize(600)
+        })));
         register_mutator_context(tls, unsafe { &mut *dummy_mutator_ptr }, thread.clone());
 
         // Test that the mutator map contains our registration
@@ -1064,8 +1081,10 @@ mod tests {
         assert_eq!(empty_refs.len(), 0);
 
         // Add some references via RustReferenceGlue
-        let obj1 = unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(0x7000)) };
-        let obj2 = unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(0x8000)) };
+        let obj1 =
+            unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(0x7000)) };
+        let obj2 =
+            unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(0x8000)) };
 
         RustReferenceGlue::set_referent(obj1, obj2);
         let refs = &[obj1];
@@ -1105,8 +1124,7 @@ mod tests {
     #[test]
     fn test_write_barrier_sad_paths() {
         // Test write barrier component access without dangerous memory writes
-        let plan_manager = FUGC_PLAN_MANAGER
-            .get_or_init(|| Mutex::new(FugcPlanManager::new()));
+        let plan_manager = FUGC_PLAN_MANAGER.get_or_init(|| Mutex::new(FugcPlanManager::new()));
 
         let manager = plan_manager.lock();
         let write_barrier = manager.get_write_barrier();
@@ -1122,12 +1140,18 @@ mod tests {
         assert!(manager.is_concurrent_collection_enabled());
 
         // Test with problematic object reference patterns (without memory writes)
-        let src = unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(0x10000)) };
-        let target = unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(0x20000)) };
+        let src =
+            unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(0x10000)) };
+        let target =
+            unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(0x20000)) };
 
         // Test same src and target references
-        assert_eq!(src.to_raw_address(), unsafe { Address::from_usize(0x10000) });
-        assert_eq!(target.to_raw_address(), unsafe { Address::from_usize(0x20000) });
+        assert_eq!(src.to_raw_address(), unsafe {
+            Address::from_usize(0x10000)
+        });
+        assert_eq!(target.to_raw_address(), unsafe {
+            Address::from_usize(0x20000)
+        });
         assert_ne!(src, target);
 
         // Test address alignment checks
@@ -1190,7 +1214,11 @@ mod tests {
                         let _alloc_info = fugc_alloc_info(64 + i, 8);
 
                         // Test post alloc
-                        let obj = unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(0x10000 + i * 8)) };
+                        let obj = unsafe {
+                            ObjectReference::from_raw_address_unchecked(Address::from_usize(
+                                0x10000 + i * 8,
+                            ))
+                        };
                         fugc_post_alloc(obj, 64);
 
                         operations += 1;

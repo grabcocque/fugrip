@@ -178,7 +178,7 @@ mod edge_case_tests {
         use fugrip::thread::MutatorThread;
         use std::sync::Arc;
         use std::sync::atomic::Ordering;
-        
+
         use std::time::Duration;
 
         #[test]
@@ -319,7 +319,6 @@ mod edge_case_tests {
         use fugrip::test_utils::TestFixture;
         use std::sync::Arc;
         use std::thread;
-        
 
         #[test]
         fn test_worker_thread_start_stop() {
@@ -677,7 +676,7 @@ mod edge_case_tests {
         use fugrip::FugcPhase;
         use fugrip::test_utils::TestFixture;
         use std::sync::Arc;
-        
+
         use std::time::Duration;
 
         #[test]

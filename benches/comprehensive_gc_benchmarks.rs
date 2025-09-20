@@ -11,12 +11,10 @@
 //! Consolidates and replaces multiple smaller benchmark files to reduce overlap
 //! and provide a comprehensive performance view.
 
-use criterion::{
-    BenchmarkId, Criterion, Throughput, criterion_group, criterion_main
-};
-use fugrip::test_utils::TestFixture;
-use fugrip::simd_sweep::SimdBitvector;
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use fugrip::concurrent::ObjectColor;
+use fugrip::simd_sweep::SimdBitvector;
+use fugrip::test_utils::TestFixture;
 use fugrip::thread::MutatorThread;
 use mmtk::util::{Address, ObjectReference};
 use std::hint::black_box;
@@ -54,13 +52,11 @@ fn write_barrier_benchmarks(c: &mut Criterion) {
         }
 
         group.bench_function(format!("fast_path_{}", name), |b| {
-            b.iter(|| {
-                unsafe {
-                    write_barrier.write_barrier_fast(
-                        std::hint::black_box(&mut slot as *mut _),
-                        std::hint::black_box(new_obj),
-                    );
-                }
+            b.iter(|| unsafe {
+                write_barrier.write_barrier_fast(
+                    std::hint::black_box(&mut slot as *mut _),
+                    std::hint::black_box(new_obj),
+                );
             });
         });
 
@@ -105,7 +101,10 @@ fn simd_sweep_benchmarks(c: &mut Criterion) {
 
             group.throughput(Throughput::Bytes(heap_size as u64));
             group.bench_with_input(
-                BenchmarkId::new("hybrid_sweep", format!("{}KB_{}%", heap_size / 1024, density)),
+                BenchmarkId::new(
+                    "hybrid_sweep",
+                    format!("{}KB_{}%", heap_size / 1024, density),
+                ),
                 &bitvector,
                 |b, bv| {
                     b.iter(|| {
@@ -133,9 +132,9 @@ fn cache_locality_benchmarks(c: &mut Criterion) {
     for &stride in &[64, 256, 1024, 4096] {
         let objects = (0..1000)
             .map(|i| unsafe {
-                ObjectReference::from_raw_address_unchecked(
-                    Address::from_usize(TEST_HEAP_BASE + i * stride)
-                )
+                ObjectReference::from_raw_address_unchecked(Address::from_usize(
+                    TEST_HEAP_BASE + i * stride,
+                ))
             })
             .collect::<Vec<_>>();
 
@@ -317,7 +316,11 @@ fn concurrent_marking_benchmarks(c: &mut Criterion) {
                     let handles: Vec<_> = (0..num_threads)
                         .map(|t| {
                             let start = t * chunk_size;
-                            let end = if t == num_threads - 1 { objs.len() } else { start + chunk_size };
+                            let end = if t == num_threads - 1 {
+                                objs.len()
+                            } else {
+                                start + chunk_size
+                            };
                             let chunk: Vec<ObjectReference> = objs[start..end].to_vec();
                             let tc = tricolor.clone();
 

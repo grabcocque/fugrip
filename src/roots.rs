@@ -516,11 +516,7 @@ mod tests {
         let mut global_roots = GlobalRoots::default();
 
         // Test that pointers can be safely stored and retrieved
-        let test_addrs = [
-            0x1000 as *mut u8,
-            0x10000 as *mut u8,
-            0x100000 as *mut u8,
-        ];
+        let test_addrs = [0x1000 as *mut u8, 0x10000 as *mut u8, 0x100000 as *mut u8];
 
         for addr in test_addrs {
             global_roots.register(addr);

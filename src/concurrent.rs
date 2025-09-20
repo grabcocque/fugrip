@@ -299,7 +299,7 @@ impl Clone for ParallelMarkingCoordinator {
     fn clone(&self) -> Self {
         Self {
             global_injector: Injector::new(), // Create new injector for clone
-            worker_stealers: Vec::new(), // Stealers can't be cloned, create empty
+            worker_stealers: Vec::new(),      // Stealers can't be cloned, create empty
             active_workers: AtomicUsize::new(self.active_workers.load(Ordering::Relaxed)),
             total_workers: self.total_workers,
             work_stolen_count: AtomicUsize::new(self.work_stolen_count.load(Ordering::Relaxed)),
@@ -349,8 +349,6 @@ impl ParallelMarkingCoordinator {
         optimized_fetch_add(&self.work_shared_count, 1);
     }
 
-    
-    
     /// Check if there's any work available in the global injector
     pub fn has_global_work(&self) -> bool {
         !matches!(self.global_injector.steal(), crossbeam_deque::Steal::Empty)
@@ -387,7 +385,10 @@ impl ParallelMarkingCoordinator {
 
 impl ParallelMarkingCoordinator {
     /// Register a new worker and return its stealer
-    pub fn register_worker(&mut self, worker: &Worker<ObjectReference>) -> Stealer<ObjectReference> {
+    pub fn register_worker(
+        &mut self,
+        worker: &Worker<ObjectReference>,
+    ) -> Stealer<ObjectReference> {
         let stealer = worker.stealer();
         self.worker_stealers.push(stealer.clone());
         stealer
@@ -454,7 +455,9 @@ impl MarkingWorker {
     ) -> Self {
         let worker = Worker::new_fifo();
         // Register this worker with the coordinator to get a stealer
-        let _stealer = Arc::get_mut(&mut coordinator).unwrap().register_worker(&worker);
+        let _stealer = Arc::get_mut(&mut coordinator)
+            .unwrap()
+            .register_worker(&worker);
 
         Self {
             worker,
@@ -2262,9 +2265,9 @@ mod tests {
     #[test]
     fn test_exponential_backoff() {
         // Test exponential backoff function - should not panic
-        exponential_backoff(0);  // No delay on first attempt
-        exponential_backoff(1);  // Small delay
-        exponential_backoff(2);  // Larger delay
+        exponential_backoff(0); // No delay on first attempt
+        exponential_backoff(1); // Small delay
+        exponential_backoff(2); // Larger delay
         exponential_backoff(100); // Should not panic on high attempt numbers
     }
 
@@ -2286,8 +2289,10 @@ mod tests {
         // Test grey stack work sharing functionality
         let mut stack = GreyStack::new(0, 1); // Low threshold to trigger sharing
 
-        let obj1 = unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(0x1000)) };
-        let obj2 = unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(0x2000)) };
+        let obj1 =
+            unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(0x1000)) };
+        let obj2 =
+            unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(0x2000)) };
 
         stack.push(obj1);
         stack.push(obj2);
@@ -2390,8 +2395,10 @@ mod tests {
         let coordinator = Arc::new(ParallelMarkingCoordinator::new(1));
         let barrier = WriteBarrier::new(&marking, &coordinator, heap_base, 0x10000);
 
-        let src_obj = unsafe { ObjectReference::from_raw_address_unchecked(heap_base + 0x100usize) };
-        let dst_obj = unsafe { ObjectReference::from_raw_address_unchecked(heap_base + 0x200usize) };
+        let src_obj =
+            unsafe { ObjectReference::from_raw_address_unchecked(heap_base + 0x100usize) };
+        let dst_obj =
+            unsafe { ObjectReference::from_raw_address_unchecked(heap_base + 0x200usize) };
 
         // Test barrier when inactive (should be no-op)
         barrier.deactivate();
@@ -2454,7 +2461,7 @@ mod tests {
             Arc::clone(&thread_registry),
             Arc::clone(&global_roots),
             Arc::clone(&marking),
-            1  // num_workers
+            1, // num_workers
         );
 
         // Should not panic
@@ -2481,8 +2488,10 @@ mod tests {
         classifier.promote_young_objects();
 
         // Test cross-generational reference recording
-        let src_obj = unsafe { ObjectReference::from_raw_address_unchecked(heap_base + 0x200usize) };
-        let dst_obj = unsafe { ObjectReference::from_raw_address_unchecked(heap_base + 0x300usize) };
+        let src_obj =
+            unsafe { ObjectReference::from_raw_address_unchecked(heap_base + 0x200usize) };
+        let dst_obj =
+            unsafe { ObjectReference::from_raw_address_unchecked(heap_base + 0x300usize) };
 
         classifier.record_cross_generational_reference(src_obj, dst_obj);
 
@@ -2547,9 +2556,11 @@ mod tests {
         let coordinator = ParallelMarkingCoordinator::new(3);
 
         // Create work
-        let work = [unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(0x1000)) },
+        let work = [
+            unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(0x1000)) },
             unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(0x2000)) },
-            unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(0x3000)) }];
+            unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(0x3000)) },
+        ];
 
         // Create workers
         let heap_base = unsafe { Address::from_usize(0x10000) };
@@ -2579,10 +2590,14 @@ mod tests {
         // Test grey stack behavior at capacity boundaries
         let mut stack = GreyStack::new(0, 2); // Low threshold to trigger sharing
 
-        let obj1 = unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(0x1000)) };
-        let obj2 = unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(0x2000)) };
-        let obj3 = unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(0x3000)) };
-        let _obj4 = unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(0x4000)) };
+        let obj1 =
+            unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(0x1000)) };
+        let obj2 =
+            unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(0x2000)) };
+        let obj3 =
+            unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(0x3000)) };
+        let _obj4 =
+            unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(0x4000)) };
 
         // Fill above capacity
         stack.push(obj1);
@@ -2650,10 +2665,17 @@ mod tests {
         let heap_base = unsafe { Address::from_usize(0x10000) };
         let marking = Arc::new(TricolorMarking::new(heap_base, 0x10000));
         let coordinator = Arc::new(ParallelMarkingCoordinator::new(1));
-        let barrier = Arc::new(WriteBarrier::new(&marking, &coordinator, heap_base, 0x10000));
+        let barrier = Arc::new(WriteBarrier::new(
+            &marking,
+            &coordinator,
+            heap_base,
+            0x10000,
+        ));
 
-        let src_obj = unsafe { ObjectReference::from_raw_address_unchecked(heap_base + 0x100usize) };
-        let dst_obj = unsafe { ObjectReference::from_raw_address_unchecked(heap_base + 0x200usize) };
+        let src_obj =
+            unsafe { ObjectReference::from_raw_address_unchecked(heap_base + 0x100usize) };
+        let dst_obj =
+            unsafe { ObjectReference::from_raw_address_unchecked(heap_base + 0x200usize) };
 
         barrier.activate();
 

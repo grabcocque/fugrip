@@ -244,7 +244,10 @@ mod tests {
             (0, MIN_OBJECT_SIZE),
             (1, std::mem::size_of::<ObjectHeader>() + 1),
             (MIN_OBJECT_SIZE, MIN_OBJECT_SIZE),
-            (MIN_OBJECT_SIZE * 2, std::mem::size_of::<ObjectHeader>() + MIN_OBJECT_SIZE * 2),
+            (
+                MIN_OBJECT_SIZE * 2,
+                std::mem::size_of::<ObjectHeader>() + MIN_OBJECT_SIZE * 2,
+            ),
         ];
 
         for (body_bytes, expected_min_total) in test_cases {

@@ -1289,10 +1289,15 @@ fn stress_enhanced_simd_sweep_capacity_aware() {
                     let chunk_base = heap_base.as_usize() + chunk_index * 64 * 1024;
 
                     // Mark objects with thread-specific spacing
-                    let spacing = if objects_to_mark > 0 { chunk_capacity / objects_to_mark } else { 1 };
+                    let spacing = if objects_to_mark > 0 {
+                        chunk_capacity / objects_to_mark
+                    } else {
+                        1
+                    };
                     for i in 0..objects_to_mark {
                         let offset = (i * spacing) * 16;
-                        if offset < 64 * 1024 { // Stay within chunk bounds
+                        if offset < 64 * 1024 {
+                            // Stay within chunk bounds
                             let obj = unsafe { Address::from_usize(chunk_base + offset) };
                             if bitvector.mark_live(obj) {
                                 local_marked += 1;
@@ -1313,8 +1318,8 @@ fn stress_enhanced_simd_sweep_capacity_aware() {
 
                         // Verify strategy selection occurred
                         assert!(
-                            sweep_stats.simd_chunks_processed > 0 ||
-                            sweep_stats.sparse_chunks_processed > 0,
+                            sweep_stats.simd_chunks_processed > 0
+                                || sweep_stats.sparse_chunks_processed > 0,
                             "At least one sweep strategy should be used"
                         );
                     }
@@ -1355,7 +1360,9 @@ fn stress_enhanced_simd_sweep_capacity_aware() {
 
     // Wait for all threads to complete
     for handle in handles {
-        handle.join().expect("Worker thread should complete successfully");
+        handle
+            .join()
+            .expect("Worker thread should complete successfully");
     }
 
     // Final verification
@@ -1379,7 +1386,8 @@ fn stress_enhanced_simd_sweep_capacity_aware() {
 
     // Final sweep to verify everything still works
     let final_stats = bitvector.hybrid_sweep();
-    println!("  Final sweep: {} objects, {} SIMD chunks, {} sparse chunks",
+    println!(
+        "  Final sweep: {} objects, {} SIMD chunks, {} sparse chunks",
         final_stats.objects_swept,
         final_stats.simd_chunks_processed,
         final_stats.sparse_chunks_processed

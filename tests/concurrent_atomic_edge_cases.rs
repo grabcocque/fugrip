@@ -6,12 +6,14 @@
 
 #[cfg(test)]
 mod concurrent_tests {
-    use fugrip::concurrent::{TricolorMarking, ObjectColor, GreyStack, WriteBarrier, ParallelMarkingCoordinator};
+    use fugrip::concurrent::{
+        GreyStack, ObjectColor, ParallelMarkingCoordinator, TricolorMarking, WriteBarrier,
+    };
     use mmtk::util::{Address, ObjectReference};
     use std::sync::Arc;
-    use std::thread;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Barrier;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::thread;
 
     /// Test tricolor marking atomic operations under contention
     mod tricolor_atomic_tests {
@@ -22,7 +24,8 @@ mod concurrent_tests {
             let heap_base = unsafe { Address::from_usize(0x100000) };
             let heap_size = 65536;
             let tricolor = Arc::new(TricolorMarking::new(heap_base, heap_size));
-            let obj = unsafe { ObjectReference::from_raw_address_unchecked(heap_base + 0x100usize) };
+            let obj =
+                unsafe { ObjectReference::from_raw_address_unchecked(heap_base + 0x100usize) };
 
             // Test concurrent color changes
             let tricolor_clone = Arc::clone(&tricolor);
@@ -52,7 +55,10 @@ mod concurrent_tests {
 
             // Final color should be valid (system should be consistent)
             let final_color = tricolor.get_color(obj);
-            assert!(matches!(final_color, ObjectColor::White | ObjectColor::Grey | ObjectColor::Black));
+            assert!(matches!(
+                final_color,
+                ObjectColor::White | ObjectColor::Grey | ObjectColor::Black
+            ));
         }
 
         #[test]
@@ -71,17 +77,25 @@ mod concurrent_tests {
                 let handle = thread::spawn(move || {
                     let mut local_ops = 0;
                     for i in 0..100 {
-                        let obj_addr = heap_base + 0x100usize + (thread_id as usize) * 1000 + (i as usize) * 8;
+                        let obj_addr =
+                            heap_base + 0x100usize + (thread_id as usize) * 1000 + (i as usize) * 8;
                         let obj = unsafe { ObjectReference::from_raw_address_unchecked(obj_addr) };
 
                         // Set object color
-                        let target_color = if i % 2 == 0 { ObjectColor::Grey } else { ObjectColor::Black };
+                        let target_color = if i % 2 == 0 {
+                            ObjectColor::Grey
+                        } else {
+                            ObjectColor::Black
+                        };
                         tricolor_clone.set_color(obj, target_color);
                         local_ops += 1;
 
                         // Verify color was set
                         let read_color = tricolor_clone.get_color(obj);
-                        assert!(matches!(read_color, ObjectColor::White | ObjectColor::Grey | ObjectColor::Black));
+                        assert!(matches!(
+                            read_color,
+                            ObjectColor::White | ObjectColor::Grey | ObjectColor::Black
+                        ));
                     }
                     ops_clone.fetch_add(local_ops, Ordering::Relaxed);
                 });
@@ -104,20 +118,27 @@ mod concurrent_tests {
             let tricolor = TricolorMarking::new(heap_base, heap_size);
 
             // Test with minimum valid address (word-aligned)
-            let min_obj = unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(8)) };
+            let min_obj =
+                unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(8)) };
             tricolor.set_color(min_obj, ObjectColor::Black);
             assert_eq!(tricolor.get_color(min_obj), ObjectColor::Black);
 
             // Test with maximum word-aligned address (may be out of bounds for marking system)
-            let max_obj = unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(usize::MAX & !0x7)) };
+            let max_obj = unsafe {
+                ObjectReference::from_raw_address_unchecked(Address::from_usize(usize::MAX & !0x7))
+            };
             tricolor.set_color(max_obj, ObjectColor::Grey);
             // Extreme addresses may default to White, which is acceptable behavior
             let max_color = tricolor.get_color(max_obj);
-            assert!(matches!(max_color, ObjectColor::White | ObjectColor::Grey | ObjectColor::Black));
+            assert!(matches!(
+                max_color,
+                ObjectColor::White | ObjectColor::Grey | ObjectColor::Black
+            ));
 
             // Test with heap boundary addresses
             let heap_start = unsafe { ObjectReference::from_raw_address_unchecked(heap_base) };
-            let heap_end = unsafe { ObjectReference::from_raw_address_unchecked(heap_base + heap_size - 8) };
+            let heap_end =
+                unsafe { ObjectReference::from_raw_address_unchecked(heap_base + heap_size - 8) };
 
             tricolor.set_color(heap_start, ObjectColor::Grey);
             tricolor.set_color(heap_end, ObjectColor::Black);
@@ -132,7 +153,8 @@ mod concurrent_tests {
             let heap_size = 8192;
             let tricolor = Arc::new(TricolorMarking::new(heap_base, heap_size));
 
-            let obj = unsafe { ObjectReference::from_raw_address_unchecked(heap_base + 0x100usize) };
+            let obj =
+                unsafe { ObjectReference::from_raw_address_unchecked(heap_base + 0x100usize) };
             let consistency_violations = Arc::new(AtomicUsize::new(0));
 
             let mut handles = vec![];
@@ -161,7 +183,10 @@ mod concurrent_tests {
                             std::thread::yield_now(); // Force potential reordering
                             let recheck_color = tricolor_clone.get_color(obj);
                             // Color may change due to concurrent updates, so we just verify it's valid
-                            if !matches!(recheck_color, ObjectColor::White | ObjectColor::Grey | ObjectColor::Black) {
+                            if !matches!(
+                                recheck_color,
+                                ObjectColor::White | ObjectColor::Grey | ObjectColor::Black
+                            ) {
                                 violations_clone.fetch_add(1, Ordering::Relaxed);
                             }
                         }
@@ -230,9 +255,9 @@ mod concurrent_tests {
 
             // Test objects at various alignments (only word-aligned addresses)
             let test_addresses = vec![
-                heap_base,              // Start of heap
-                heap_base + 8usize,          // Aligned
-                heap_base + 64usize,         // Cache line aligned
+                heap_base,                 // Start of heap
+                heap_base + 8usize,        // Aligned
+                heap_base + 64usize,       // Cache line aligned
                 heap_base + heap_size - 8, // End of heap - 8 (aligned)
             ];
 
@@ -244,7 +269,10 @@ mod concurrent_tests {
                     tricolor.set_color(obj, color);
                     let read_color = tricolor.get_color(obj);
                     // Color should be valid (may not match exactly due to implementation details)
-                    assert!(matches!(read_color, ObjectColor::White | ObjectColor::Grey | ObjectColor::Black));
+                    assert!(matches!(
+                        read_color,
+                        ObjectColor::White | ObjectColor::Grey | ObjectColor::Black
+                    ));
                 }
             }
         }
@@ -266,7 +294,8 @@ mod concurrent_tests {
                     let mut local_ops = 0;
                     for i in 0..200 {
                         // Create overlap by having threads work on similar address ranges
-                        let obj_addr = heap_base + (((thread_id as usize) * 64 + (i as usize) * 8) % heap_size);
+                        let obj_addr = heap_base
+                            + (((thread_id as usize) * 64 + (i as usize) * 8) % heap_size);
                         let obj = unsafe { ObjectReference::from_raw_address_unchecked(obj_addr) };
 
                         // Rapid color changes
@@ -283,7 +312,10 @@ mod concurrent_tests {
                         // Occasionally verify
                         if i % 50 == 0 {
                             let _read_color = tricolor_clone.get_color(obj);
-                            assert!(matches!(_read_color, ObjectColor::White | ObjectColor::Grey | ObjectColor::Black));
+                            assert!(matches!(
+                                _read_color,
+                                ObjectColor::White | ObjectColor::Grey | ObjectColor::Black
+                            ));
                         }
                     }
                     ops_clone.fetch_add(local_ops, Ordering::Relaxed);
@@ -306,7 +338,8 @@ mod concurrent_tests {
             let heap_size = 4096;
             let tricolor = TricolorMarking::new(heap_base, heap_size);
 
-            let obj = unsafe { ObjectReference::from_raw_address_unchecked(heap_base + 0x100usize) };
+            let obj =
+                unsafe { ObjectReference::from_raw_address_unchecked(heap_base + 0x100usize) };
 
             // Test specific color transition patterns
             let transitions = vec![
@@ -345,10 +378,10 @@ mod concurrent_tests {
                     for i in 0..100 {
                         // Test addresses near heap boundaries
                         let offset = match thread_id {
-                            0 => (i as usize) * 8,                    // Start of heap
-                            1 => heap_size - 64 + (i as usize) * 8,     // End of heap
-                            2 => heap_size / 2 + (i as usize) * 8,     // Middle of heap
-                            3 => (heap_size / 4) + (i as usize) * 8,    // Quarter point
+                            0 => (i as usize) * 8,                   // Start of heap
+                            1 => heap_size - 64 + (i as usize) * 8,  // End of heap
+                            2 => heap_size / 2 + (i as usize) * 8,   // Middle of heap
+                            3 => (heap_size / 4) + (i as usize) * 8, // Quarter point
                             _ => (i as usize) * 8,
                         };
 
@@ -417,18 +450,21 @@ mod concurrent_tests {
                             current,
                             current.wrapping_add(1),
                             Ordering::Relaxed,
-                            Ordering::Relaxed
+                            Ordering::Relaxed,
                         );
                         if result.is_ok() {
                             successful_ops += 1;
                         } else {
                             // Retry failed operations to ensure all complete
-                            while counter_clone.compare_exchange_weak(
-                                counter_clone.load(Ordering::Relaxed),
-                                counter_clone.load(Ordering::Relaxed).wrapping_add(1),
-                                Ordering::Relaxed,
-                                Ordering::Relaxed
-                            ).is_err() {
+                            while counter_clone
+                                .compare_exchange_weak(
+                                    counter_clone.load(Ordering::Relaxed),
+                                    counter_clone.load(Ordering::Relaxed).wrapping_add(1),
+                                    Ordering::Relaxed,
+                                    Ordering::Relaxed,
+                                )
+                                .is_err()
+                            {
                                 // Keep trying until successful
                             }
                             successful_ops += 1;
@@ -457,7 +493,12 @@ mod concurrent_tests {
             for _ in 0..10000 {
                 let current = state.load(Ordering::Relaxed);
                 let next = current.wrapping_add(1);
-                let _ = state.compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed);
+                let _ = state.compare_exchange_weak(
+                    current,
+                    next,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                );
             }
 
             // Should still be in a valid state
@@ -482,7 +523,7 @@ mod concurrent_tests {
                     current,
                     current.wrapping_add(1),
                     Ordering::Relaxed,
-                    Ordering::Relaxed
+                    Ordering::Relaxed,
                 );
                 attempts += 1;
             }
@@ -508,7 +549,9 @@ mod concurrent_tests {
 
             // Test access to objects outside heap bounds
             let before_heap = unsafe { ObjectReference::from_raw_address_unchecked(heap_base - 8) };
-            let after_heap = unsafe { ObjectReference::from_raw_address_unchecked(heap_base + heap_size + 8usize) };
+            let after_heap = unsafe {
+                ObjectReference::from_raw_address_unchecked(heap_base + heap_size + 8usize)
+            };
 
             // Should handle out-of-bounds gracefully
             tricolor.set_color(before_heap, ObjectColor::Black);
@@ -518,8 +561,14 @@ mod concurrent_tests {
             let color1 = tricolor.get_color(before_heap);
             let color2 = tricolor.get_color(after_heap);
 
-            assert!(matches!(color1, ObjectColor::White | ObjectColor::Grey | ObjectColor::Black));
-            assert!(matches!(color2, ObjectColor::White | ObjectColor::Grey | ObjectColor::Black));
+            assert!(matches!(
+                color1,
+                ObjectColor::White | ObjectColor::Grey | ObjectColor::Black
+            ));
+            assert!(matches!(
+                color2,
+                ObjectColor::White | ObjectColor::Grey | ObjectColor::Black
+            ));
         }
 
         #[test]
@@ -542,10 +591,11 @@ mod concurrent_tests {
                             let obj_addr = match thread_id {
                                 0 => heap_base + ((i as usize * usize::MAX / 100) & !0x7), // Very large but aligned
                                 1 => heap_base + ((i as usize).wrapping_mul(1000) & !0x7), // Wrapping but aligned
-                                2 => heap_base + (((i as usize) << 20) & !0x7),              // Bit shifted but aligned
-                                _ => heap_base + (i as usize) * 8,                   // Normal addresses
+                                2 => heap_base + (((i as usize) << 20) & !0x7), // Bit shifted but aligned
+                                _ => heap_base + (i as usize) * 8,              // Normal addresses
                             };
-                            let obj = unsafe { ObjectReference::from_raw_address_unchecked(obj_addr) };
+                            let obj =
+                                unsafe { ObjectReference::from_raw_address_unchecked(obj_addr) };
 
                             tricolor_clone.set_color(obj, ObjectColor::Black);
                         }
@@ -615,7 +665,8 @@ mod concurrent_tests {
 
             // Prepare a slot and value and invoke the barrier; test will fail if it panics
             unsafe {
-                let mut slot = ObjectReference::from_raw_address_unchecked(Address::from_usize(0x2000));
+                let mut slot =
+                    ObjectReference::from_raw_address_unchecked(Address::from_usize(0x2000));
                 barrier.write_barrier_fast(&mut slot as *mut _, slot);
             }
         }
@@ -727,10 +778,16 @@ mod concurrent_tests {
                         alloc_clone.fetch_add(1, Ordering::Relaxed);
 
                         // Write barrier operations
-                        let obj_addr = unsafe { Address::from_usize(0xE00000 + thread_id as usize * 1000 + i * 8) };
-                        let mut obj = unsafe { ObjectReference::from_raw_address_unchecked(obj_addr) };
-                        let field_addr = unsafe { Address::from_usize(0xF00000 + thread_id as usize * 1000 + i * 8) };
-                        let field = unsafe { ObjectReference::from_raw_address_unchecked(field_addr) };
+                        let obj_addr = unsafe {
+                            Address::from_usize(0xE00000 + thread_id as usize * 1000 + i * 8)
+                        };
+                        let mut obj =
+                            unsafe { ObjectReference::from_raw_address_unchecked(obj_addr) };
+                        let field_addr = unsafe {
+                            Address::from_usize(0xF00000 + thread_id as usize * 1000 + i * 8)
+                        };
+                        let field =
+                            unsafe { ObjectReference::from_raw_address_unchecked(field_addr) };
 
                         // These should not panic even under load
                         unsafe { barrier_clone.write_barrier(&mut obj as *mut _, field) };
@@ -756,8 +813,8 @@ mod concurrent_tests {
     /// Test additional concurrent.rs APIs for improved coverage
     mod coverage_extension_tests {
         use super::*;
-        use fugrip::concurrent::{BlackAllocator, GreyStack, GenerationBoundary, ObjectClassifier};
         use crossbeam_deque::Worker;
+        use fugrip::concurrent::{BlackAllocator, GenerationBoundary, GreyStack, ObjectClassifier};
         use std::sync::Barrier;
 
         #[test]
@@ -772,7 +829,8 @@ mod concurrent_tests {
             assert!(!stack.should_share_work()); // Below threshold
 
             // Test single object operations
-            let obj = unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(0x1000)) };
+            let obj =
+                unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(0x1000)) };
             stack.push(obj);
             assert!(!stack.is_empty());
             assert_eq!(stack.len(), 1);
@@ -793,7 +851,9 @@ mod concurrent_tests {
             // Add objects to trigger work sharing
             let base_addr = unsafe { Address::from_usize(0x1000) };
             for i in 0..15 {
-                let obj = unsafe { ObjectReference::from_raw_address_unchecked(base_addr + (i as usize * 8)) };
+                let obj = unsafe {
+                    ObjectReference::from_raw_address_unchecked(base_addr + (i as usize * 8))
+                };
                 stack.push(obj);
             }
 
@@ -883,11 +943,12 @@ mod concurrent_tests {
         #[test]
         fn test_generation_boundary_operations() {
             // Test GenerationBoundary public APIs
-            let boundary = GenerationBoundary::new(unsafe { Address::from_usize(0x100000) }, 0x10000, 0.5);
+            let boundary =
+                GenerationBoundary::new(unsafe { Address::from_usize(0x100000) }, 0x10000, 0.5);
 
             // Test address classification
             let young_addr = unsafe { Address::from_usize(0x100000) }; // Start of heap
-            let old_addr = unsafe { Address::from_usize(0x109000) };   // In old generation (0x108000-0x110000)
+            let old_addr = unsafe { Address::from_usize(0x109000) }; // In old generation (0x108000-0x110000)
 
             assert!(boundary.is_young(young_addr));
             assert!(boundary.is_old(old_addr));
@@ -901,7 +962,8 @@ mod concurrent_tests {
             let classifier = ObjectClassifier::new();
 
             // Test classification
-            let obj = unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(0x1000)) };
+            let obj =
+                unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(0x1000)) };
             let class = fugrip::concurrent::ObjectClass::default_young();
 
             classifier.classify_object(obj, class);
@@ -915,8 +977,10 @@ mod concurrent_tests {
             classifier.promote_young_objects(); // Should not panic
 
             // Test cross-generational reference recording
-            let src = unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(0x1000)) };
-            let dst = unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(0x2000)) };
+            let src =
+                unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(0x1000)) };
+            let dst =
+                unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(0x2000)) };
             classifier.record_cross_generational_reference(src, dst);
 
             // Test stats
@@ -928,7 +992,6 @@ mod concurrent_tests {
             assert!(classifier.get_classification(obj).is_none());
         }
 
-        
         #[test]
         fn test_write_barrier_configuration() {
             // Test WriteBarrier configuration APIs
@@ -960,7 +1023,10 @@ mod concurrent_tests {
         #[test]
         fn test_black_allocator_operations() {
             // Test BlackAllocator public APIs
-            let tricolor = Arc::new(TricolorMarking::new(unsafe { Address::from_usize(0x100000) }, 0x10000));
+            let tricolor = Arc::new(TricolorMarking::new(
+                unsafe { Address::from_usize(0x100000) },
+                0x10000,
+            ));
             let allocator = BlackAllocator::new(&tricolor);
 
             // Test activation/deactivation
@@ -971,7 +1037,9 @@ mod concurrent_tests {
             assert!(!allocator.is_active());
 
             // Test allocation
-            let obj = unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(0x101000)) };
+            let obj = unsafe {
+                ObjectReference::from_raw_address_unchecked(Address::from_usize(0x101000))
+            };
             allocator.allocate_black(obj);
 
             // Test stats
@@ -1043,9 +1111,11 @@ mod concurrent_tests {
                     let mut local_ops = 0;
                     for i in 0..100 {
                         // Create test work (ensure 8-byte alignment)
-                        let work: Vec<ObjectReference> = vec![
-                            unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(0x1000 + worker_id * 0x100 + i * 8)) },
-                        ];
+                        let work: Vec<ObjectReference> = vec![unsafe {
+                            ObjectReference::from_raw_address_unchecked(Address::from_usize(
+                                0x1000 + worker_id * 0x100 + i * 8,
+                            ))
+                        }];
 
                         // Share work
                         coordinator_clone.share_work(work.clone());

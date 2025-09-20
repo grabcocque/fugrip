@@ -1491,10 +1491,10 @@ mod tests {
     #[test]
     fn test_concurrent_safepoint_access() {
         // Test concurrent access to safepoint manager API
+        use crossbeam::channel::unbounded;
         use std::sync::Arc;
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::thread;
-        use crossbeam::channel::unbounded;
 
         let container = Arc::new(crate::di::DIContainer::new_for_testing());
         let _scope = crate::di::DIScope::new(Arc::clone(&container));
@@ -1530,13 +1530,17 @@ mod tests {
 
         // Verify that the callback was set up correctly and the manager handled concurrent access
         // The callback should not have been executed yet since we didn't call execute_safepoint_callback
-        assert!(!callback_executed.load(Ordering::Acquire),
-               "Callback should not have been executed before explicit execution");
+        assert!(
+            !callback_executed.load(Ordering::Acquire),
+            "Callback should not have been executed before explicit execution"
+        );
 
         // Now execute the callback to verify it works
         manager.execute_safepoint_callback();
-        assert!(callback_executed.load(Ordering::Acquire),
-               "Callback should have been executed when explicitly called");
+        assert!(
+            callback_executed.load(Ordering::Acquire),
+            "Callback should have been executed when explicitly called"
+        );
     }
 
     #[test]

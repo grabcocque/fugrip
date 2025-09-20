@@ -1600,8 +1600,8 @@ mod tests {
 
     #[test]
     fn test_coordinator_resilience_to_rapid_triggering() {
-        use std::sync::Arc;
         use std::hint::black_box;
+        use std::sync::Arc;
 
         let fixture =
             crate::test_utils::TestFixture::new_with_config(0x24000000, 32 * 1024 * 1024, 2);
@@ -1661,9 +1661,9 @@ mod tests {
         for page in [0, 1, 10, 100, 1000] {
             let color = coordinator.page_allocation_color(page);
             // Should return a valid color without panicking
-            assert!(matches!(color,
-                AllocationColor::White |
-                AllocationColor::Black
+            assert!(matches!(
+                color,
+                AllocationColor::White | AllocationColor::Black
             ));
         }
     }
@@ -1726,10 +1726,16 @@ mod tests {
                     }
 
                     // Verify all operations completed without panicking
-                    assert!(matches!(phase,
-                        FugcPhase::Idle | FugcPhase::ActivateBarriers |
-                        FugcPhase::ActivateBlackAllocation | FugcPhase::MarkGlobalRoots |
-                        FugcPhase::StackScanHandshake | FugcPhase::Tracing | FugcPhase::Sweeping));
+                    assert!(matches!(
+                        phase,
+                        FugcPhase::Idle
+                            | FugcPhase::ActivateBarriers
+                            | FugcPhase::ActivateBlackAllocation
+                            | FugcPhase::MarkGlobalRoots
+                            | FugcPhase::StackScanHandshake
+                            | FugcPhase::Tracing
+                            | FugcPhase::Sweeping
+                    ));
                     // Note: collecting status might change due to concurrent GC triggers
                     let _current_collecting = coord.is_collecting();
                     // Allow collecting status to change (due to GC triggers)
@@ -1777,10 +1783,8 @@ mod tests {
         let coordinator = &fixture.coordinator;
 
         // Test waiting for transition when not collecting
-        let result = coordinator.wait_for_phase_transition(
-            FugcPhase::Idle,
-            FugcPhase::ActivateBarriers
-        );
+        let result =
+            coordinator.wait_for_phase_transition(FugcPhase::Idle, FugcPhase::ActivateBarriers);
         // Should return false when not collecting
         assert!(!result);
 
@@ -1788,10 +1792,8 @@ mod tests {
         coordinator.trigger_gc();
 
         // Wait for Idle -> ActivateBarriers transition
-        let result = coordinator.wait_for_phase_transition(
-            FugcPhase::Idle,
-            FugcPhase::ActivateBarriers
-        );
+        let result =
+            coordinator.wait_for_phase_transition(FugcPhase::Idle, FugcPhase::ActivateBarriers);
         // Result depends on timing, but should not panic
         let _ = result;
 
@@ -1810,21 +1812,35 @@ mod tests {
 
         // Object at heap base should be in page 0
         let base_obj = unsafe { ObjectReference::from_raw_address_unchecked(heap_base) };
-        assert_eq!(FugcCoordinator::page_index_for_object(heap_base, heap_size, base_obj), Some(0));
+        assert_eq!(
+            FugcCoordinator::page_index_for_object(heap_base, heap_size, base_obj),
+            Some(0)
+        );
 
         // Object at end of heap should be in last page
         let end_offset = heap_size - 16;
-        let end_obj = unsafe { ObjectReference::from_raw_address_unchecked(heap_base + end_offset) };
+        let end_obj =
+            unsafe { ObjectReference::from_raw_address_unchecked(heap_base + end_offset) };
         let last_page = (heap_size / PAGE_SIZE) - 1;
-        assert_eq!(FugcCoordinator::page_index_for_object(heap_base, heap_size, end_obj), Some(last_page));
+        assert_eq!(
+            FugcCoordinator::page_index_for_object(heap_base, heap_size, end_obj),
+            Some(last_page)
+        );
 
         // Object beyond heap bounds should return None
-        let beyond_obj = unsafe { ObjectReference::from_raw_address_unchecked(heap_base + heap_size) };
-        assert_eq!(FugcCoordinator::page_index_for_object(heap_base, heap_size, beyond_obj), None);
+        let beyond_obj =
+            unsafe { ObjectReference::from_raw_address_unchecked(heap_base + heap_size) };
+        assert_eq!(
+            FugcCoordinator::page_index_for_object(heap_base, heap_size, beyond_obj),
+            None
+        );
 
         // Object before heap base should return None
         let before_obj = unsafe { ObjectReference::from_raw_address_unchecked(heap_base - 16) };
-        assert_eq!(FugcCoordinator::page_index_for_object(heap_base, heap_size, before_obj), None);
+        assert_eq!(
+            FugcCoordinator::page_index_for_object(heap_base, heap_size, before_obj),
+            None
+        );
     }
 
     #[test]
@@ -1895,10 +1911,12 @@ mod tests {
 
         let handle = thread::spawn(move || {
             // Try to receive with a short timeout - should not block indefinitely
-            
+
             // It's ok if we don't receive a signal during the test
             // We just want to verify the receiver works
-            coord_clone.collection_finished_receiver.recv_timeout(Duration::from_millis(100))
+            coord_clone
+                .collection_finished_receiver
+                .recv_timeout(Duration::from_millis(100))
         });
 
         // Trigger GC
@@ -1922,15 +1940,25 @@ mod tests {
         let coordinator = &fixture.coordinator;
 
         // Verify initial handshake metrics are zero
-        assert_eq!(coordinator.handshake_completion_time_ms.load(Ordering::SeqCst), 0);
-        assert_eq!(coordinator.threads_processed_count.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            coordinator
+                .handshake_completion_time_ms
+                .load(Ordering::SeqCst),
+            0
+        );
+        assert_eq!(
+            coordinator.threads_processed_count.load(Ordering::SeqCst),
+            0
+        );
 
         // Trigger GC which should update handshake metrics
         coordinator.trigger_gc();
         assert!(coordinator.wait_until_idle(std::time::Duration::from_millis(2000)));
 
         // Metrics should be updated (though exact values depend on timing)
-        let completion_time = coordinator.handshake_completion_time_ms.load(Ordering::SeqCst);
+        let completion_time = coordinator
+            .handshake_completion_time_ms
+            .load(Ordering::SeqCst);
         let threads_processed = coordinator.threads_processed_count.load(Ordering::SeqCst);
 
         // Should have processed at least some threads or taken some time
@@ -1981,8 +2009,10 @@ mod tests {
                 // Verify page state structure is valid
                 // Index is always non-negative
                 // Live objects count is always non-negative
-                assert!(matches!(state.allocation_color,
-                    AllocationColor::White | AllocationColor::Black));
+                assert!(matches!(
+                    state.allocation_color,
+                    AllocationColor::White | AllocationColor::Black
+                ));
             }
         }
     }
@@ -2021,7 +2051,9 @@ mod tests {
         assert!(result.is_ok());
 
         // Should be able to receive the sent phase
-        let received = coordinator.phase_change_receiver.recv_timeout(std::time::Duration::from_millis(100));
+        let received = coordinator
+            .phase_change_receiver
+            .recv_timeout(std::time::Duration::from_millis(100));
         assert!(received.is_ok());
         assert_eq!(received.unwrap(), FugcPhase::Tracing);
     }
@@ -2065,7 +2097,9 @@ mod tests {
         let coordinator = &fixture.coordinator;
 
         // Test heap properties are accessible
-        assert_eq!(coordinator.heap_base, unsafe { Address::from_usize(0x10000000) });
+        assert_eq!(coordinator.heap_base, unsafe {
+            Address::from_usize(0x10000000)
+        });
         assert_eq!(coordinator.heap_size, 64 * 1024);
     }
 
@@ -2141,10 +2175,17 @@ mod tests {
         // Verify coordinator can handle errors gracefully
         let phase = coordinator.current_phase();
         // Should be in a valid phase, not crashed
-        assert!(matches!(phase, FugcPhase::Idle | FugcPhase::ActivateBarriers |
-                        FugcPhase::ActivateBlackAllocation | FugcPhase::MarkGlobalRoots |
-                        FugcPhase::StackScanHandshake | FugcPhase::Tracing |
-                        FugcPhase::PrepareForSweep | FugcPhase::Sweeping));
+        assert!(matches!(
+            phase,
+            FugcPhase::Idle
+                | FugcPhase::ActivateBarriers
+                | FugcPhase::ActivateBlackAllocation
+                | FugcPhase::MarkGlobalRoots
+                | FugcPhase::StackScanHandshake
+                | FugcPhase::Tracing
+                | FugcPhase::PrepareForSweep
+                | FugcPhase::Sweeping
+        ));
     }
 
     #[test]
@@ -2256,10 +2297,17 @@ mod tests {
         // Should handle pressure without panics
         let pressure_phase = coordinator.current_phase();
         // Should be in a valid phase, not crashed
-        assert!(matches!(pressure_phase, FugcPhase::Idle | FugcPhase::ActivateBarriers |
-                        FugcPhase::ActivateBlackAllocation | FugcPhase::MarkGlobalRoots |
-                        FugcPhase::StackScanHandshake | FugcPhase::Tracing |
-                        FugcPhase::PrepareForSweep | FugcPhase::Sweeping));
+        assert!(matches!(
+            pressure_phase,
+            FugcPhase::Idle
+                | FugcPhase::ActivateBarriers
+                | FugcPhase::ActivateBlackAllocation
+                | FugcPhase::MarkGlobalRoots
+                | FugcPhase::StackScanHandshake
+                | FugcPhase::Tracing
+                | FugcPhase::PrepareForSweep
+                | FugcPhase::Sweeping
+        ));
 
         // Should return to idle after handling
         assert!(coordinator.wait_until_idle(std::time::Duration::from_millis(1000)));
@@ -2279,10 +2327,17 @@ mod tests {
         // Verify coordinator can handle channel operations
         let phase = coordinator.current_phase();
         // Should be in a valid phase, not crashed
-        assert!(matches!(phase, FugcPhase::Idle | FugcPhase::ActivateBarriers |
-                        FugcPhase::ActivateBlackAllocation | FugcPhase::MarkGlobalRoots |
-                        FugcPhase::StackScanHandshake | FugcPhase::Tracing |
-                        FugcPhase::PrepareForSweep | FugcPhase::Sweeping));
+        assert!(matches!(
+            phase,
+            FugcPhase::Idle
+                | FugcPhase::ActivateBarriers
+                | FugcPhase::ActivateBlackAllocation
+                | FugcPhase::MarkGlobalRoots
+                | FugcPhase::StackScanHandshake
+                | FugcPhase::Tracing
+                | FugcPhase::PrepareForSweep
+                | FugcPhase::Sweeping
+        ));
 
         // Complete gracefully
         assert!(coordinator.wait_until_idle(std::time::Duration::from_millis(1000)));
@@ -2305,10 +2360,17 @@ mod tests {
 
         // Should be in a valid state
         let phase = coordinator.current_phase();
-        assert!(matches!(phase, FugcPhase::Idle | FugcPhase::ActivateBarriers |
-                        FugcPhase::ActivateBlackAllocation | FugcPhase::MarkGlobalRoots |
-                        FugcPhase::StackScanHandshake | FugcPhase::Tracing |
-                        FugcPhase::PrepareForSweep | FugcPhase::Sweeping));
+        assert!(matches!(
+            phase,
+            FugcPhase::Idle
+                | FugcPhase::ActivateBarriers
+                | FugcPhase::ActivateBlackAllocation
+                | FugcPhase::MarkGlobalRoots
+                | FugcPhase::StackScanHandshake
+                | FugcPhase::Tracing
+                | FugcPhase::PrepareForSweep
+                | FugcPhase::Sweeping
+        ));
 
         // Wait for completion
         assert!(coordinator.wait_until_idle(std::time::Duration::from_millis(1000)));
@@ -2335,10 +2397,17 @@ mod tests {
         // We can't directly test the private soft_handshake method,
         // but we can ensure the coordinator doesn't panic when it would be called
         let phase = coordinator.current_phase();
-        assert!(matches!(phase, FugcPhase::Idle | FugcPhase::ActivateBarriers |
-                        FugcPhase::ActivateBlackAllocation | FugcPhase::MarkGlobalRoots |
-                        FugcPhase::StackScanHandshake | FugcPhase::Tracing |
-                        FugcPhase::PrepareForSweep | FugcPhase::Sweeping));
+        assert!(matches!(
+            phase,
+            FugcPhase::Idle
+                | FugcPhase::ActivateBarriers
+                | FugcPhase::ActivateBlackAllocation
+                | FugcPhase::MarkGlobalRoots
+                | FugcPhase::StackScanHandshake
+                | FugcPhase::Tracing
+                | FugcPhase::PrepareForSweep
+                | FugcPhase::Sweeping
+        ));
 
         // Wait for completion
         assert!(coordinator.wait_until_idle(std::time::Duration::from_millis(1000)));

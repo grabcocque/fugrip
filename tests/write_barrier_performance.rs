@@ -1,18 +1,18 @@
 //! Performance tests for write barrier fast path optimizations
 
 use std::sync::Arc;
-use std::time::Instant;
 
 use fugrip::concurrent::{ObjectColor, ParallelMarkingCoordinator, TricolorMarking, WriteBarrier};
 use mmtk::util::{Address, ObjectReference};
 
-/// Benchmark configuration
-const BENCHMARK_ITERATIONS: usize = 1_000_000;
-const WARMUP_ITERATIONS: usize = 100_000;
-
+/// Benchmark configuration - constants defined locally in each benchmark function
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Benchmark configuration constants
+    const BENCHMARK_ITERATIONS: usize = 1_000_000;
+    const WARMUP_ITERATIONS: usize = 100_000;
 
     /// Create test setup for write barrier benchmarks
     fn setup_write_barrier() -> (WriteBarrier, Vec<ObjectReference>) {
@@ -51,6 +51,7 @@ mod tests {
         }
 
         // Benchmark fast path
+        use std::time::Instant;
         let start = Instant::now();
         for slot in slots.iter_mut().take(BENCHMARK_ITERATIONS) {
             let slot_ptr = slot as *mut ObjectReference;
@@ -115,6 +116,7 @@ mod tests {
         }
 
         // Benchmark fast path (which delegates to slow path when active)
+        use std::time::Instant;
         let start = Instant::now();
         for slot in slots.iter_mut().take(BENCHMARK_ITERATIONS) {
             let slot_ptr = slot as *mut ObjectReference;
@@ -158,6 +160,7 @@ mod tests {
             }
 
             // Benchmark
+            use std::time::Instant;
             let start = Instant::now();
             for _ in 0..iterations {
                 unsafe { barrier.write_barrier_bulk_fast(&updates) };
@@ -197,6 +200,7 @@ mod tests {
         }
 
         // Benchmark array barrier
+        use std::time::Instant;
         let start = Instant::now();
         for i in 0..BENCHMARK_ITERATIONS {
             let index = i % array.len();
@@ -283,6 +287,7 @@ mod tests {
         const STRESS_ITERATIONS: usize = 10_000_000;
         let mut slots: Vec<ObjectReference> = vec![objects[0]; 1000];
 
+        use std::time::Instant;
         let start = Instant::now();
         for i in 0..STRESS_ITERATIONS {
             let slot_index = i % slots.len();

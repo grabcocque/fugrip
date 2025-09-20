@@ -1,7 +1,8 @@
 //! Integration tests for the binding module utilities.
 
 use fugrip::binding::{
-    fugc_alloc_info, fugc_gc, fugc_get_cycle_stats, fugc_get_phase, fugc_get_stats, take_enqueued_references,
+    fugc_alloc_info, fugc_gc, fugc_get_cycle_stats, fugc_get_phase, fugc_get_stats,
+    take_enqueued_references,
 };
 use fugrip::test_utils::TestFixture;
 
@@ -27,7 +28,10 @@ fn fugc_stats_and_phase_accessors_provide_defaults() {
     // and return consistent values
     assert_eq!(is_collecting, fixture.coordinator.is_collecting()); // Consistent with itself
     assert_eq!(phase, fixture.coordinator.current_phase()); // Consistent with itself
-    assert_eq!(stats.cycles_completed, fixture.coordinator.get_cycle_stats().cycles_completed); // Consistent with itself
+    assert_eq!(
+        stats.cycles_completed,
+        fixture.coordinator.get_cycle_stats().cycles_completed
+    ); // Consistent with itself
 
     // Test that the values are of the expected types (not panicking is sufficient)
     let _ = format!("{:?}", phase);
@@ -79,11 +83,11 @@ fn take_enqueued_references_handles_mock_entries() {
 fn fugc_alloc_info_edge_cases() {
     // Test edge cases in allocation info calculation
     let test_cases = vec![
-        (0, 1),           // Zero size
-        (1, 1),           // Minimum size
-        (1, 2),           // Size smaller than alignment
-        (15, 16),         // Size not aligned
-        (16, 16),         // Size already aligned
+        (0, 1),              // Zero size
+        (1, 1),              // Minimum size
+        (1, 2),              // Size smaller than alignment
+        (15, 16),            // Size not aligned
+        (16, 16),            // Size already aligned
         (usize::MAX / 2, 8), // Large size
     ];
 
@@ -91,13 +95,21 @@ fn fugc_alloc_info_edge_cases() {
         let (result_size, result_align) = fugc_alloc_info(size, align);
 
         // Verify constraints
-        assert!(result_size >= size, "Result size {} should be >= input size {}", result_size, size);
+        assert!(
+            result_size >= size,
+            "Result size {} should be >= input size {}",
+            result_size,
+            size
+        );
         assert_eq!(result_align, align, "Alignment should be preserved");
         if result_align > 0 {
             assert_eq!(result_size % result_align, 0, "Size should be aligned");
         }
         if result_align > 1 {
-            assert!(result_align.is_power_of_two(), "Alignment should be power of two");
+            assert!(
+                result_align.is_power_of_two(),
+                "Alignment should be power of two"
+            );
         }
     }
 }
@@ -146,7 +158,10 @@ fn fugc_get_stats_consistency() {
     let stats2 = fugc_get_stats();
 
     // Both calls should return identical stats initially
-    assert_eq!(stats1.concurrent_collection_enabled, stats2.concurrent_collection_enabled);
+    assert_eq!(
+        stats1.concurrent_collection_enabled,
+        stats2.concurrent_collection_enabled
+    );
 }
 
 #[test]
@@ -174,18 +189,24 @@ fn fugc_phase_functions() {
 
     // Test that the relationship between phase and collecting state is logical
     // Either: collecting=true and phase!=Idle, OR collecting=false and phase=Idle
-    let logical_relationship = is_collecting == (phase != fugrip::fugc_coordinator::FugcPhase::Idle);
-    assert!(logical_relationship, "is_collecting ({}) should match phase != Idle ({})", is_collecting, phase != fugrip::fugc_coordinator::FugcPhase::Idle);
+    let logical_relationship =
+        is_collecting == (phase != fugrip::fugc_coordinator::FugcPhase::Idle);
+    assert!(
+        logical_relationship,
+        "is_collecting ({}) should match phase != Idle ({})",
+        is_collecting,
+        phase != fugrip::fugc_coordinator::FugcPhase::Idle
+    );
 
     // Test that we can get a valid phase (it should be one of the known phases)
     match phase {
-        fugrip::fugc_coordinator::FugcPhase::Idle |
-        fugrip::fugc_coordinator::FugcPhase::ActivateBarriers |
-        fugrip::fugc_coordinator::FugcPhase::ActivateBlackAllocation |
-        fugrip::fugc_coordinator::FugcPhase::MarkGlobalRoots |
-        fugrip::fugc_coordinator::FugcPhase::StackScanHandshake |
-        fugrip::fugc_coordinator::FugcPhase::Tracing |
-        fugrip::fugc_coordinator::FugcPhase::Sweeping => {
+        fugrip::fugc_coordinator::FugcPhase::Idle
+        | fugrip::fugc_coordinator::FugcPhase::ActivateBarriers
+        | fugrip::fugc_coordinator::FugcPhase::ActivateBlackAllocation
+        | fugrip::fugc_coordinator::FugcPhase::MarkGlobalRoots
+        | fugrip::fugc_coordinator::FugcPhase::StackScanHandshake
+        | fugrip::fugc_coordinator::FugcPhase::Tracing
+        | fugrip::fugc_coordinator::FugcPhase::Sweeping => {
             // Valid phase
         }
         _ => panic!("Invalid phase returned: {:?}", phase),
@@ -234,14 +255,15 @@ fn fugc_gc_function() {
     // Verify state consistency after GC call
     let phase = fugc_get_phase();
     // Phase should be valid (exact phase depends on timing)
-    assert!(matches!(phase,
-        fugrip::fugc_coordinator::FugcPhase::Idle |
-        fugrip::fugc_coordinator::FugcPhase::ActivateBarriers |
-        fugrip::fugc_coordinator::FugcPhase::ActivateBlackAllocation |
-        fugrip::fugc_coordinator::FugcPhase::MarkGlobalRoots |
-        fugrip::fugc_coordinator::FugcPhase::StackScanHandshake |
-        fugrip::fugc_coordinator::FugcPhase::Tracing |
-        fugrip::fugc_coordinator::FugcPhase::PrepareForSweep |
-        fugrip::fugc_coordinator::FugcPhase::Sweeping
+    assert!(matches!(
+        phase,
+        fugrip::fugc_coordinator::FugcPhase::Idle
+            | fugrip::fugc_coordinator::FugcPhase::ActivateBarriers
+            | fugrip::fugc_coordinator::FugcPhase::ActivateBlackAllocation
+            | fugrip::fugc_coordinator::FugcPhase::MarkGlobalRoots
+            | fugrip::fugc_coordinator::FugcPhase::StackScanHandshake
+            | fugrip::fugc_coordinator::FugcPhase::Tracing
+            | fugrip::fugc_coordinator::FugcPhase::PrepareForSweep
+            | fugrip::fugc_coordinator::FugcPhase::Sweeping
     ));
 }

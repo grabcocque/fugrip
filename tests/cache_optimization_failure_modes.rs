@@ -7,15 +7,14 @@
 #[cfg(test)]
 mod failure_mode_tests {
     use fugrip::cache_optimization::{
-        CacheAwareAllocator, CacheOptimizedMarking, LocalityAwareWorkStealer,
-        MemoryLayoutOptimizer, MetadataColocation, CacheStats,
-        CACHE_LINE_SIZE, OBJECTS_PER_CACHE_LINE
+        CACHE_LINE_SIZE, CacheAwareAllocator, CacheOptimizedMarking, CacheStats,
+        LocalityAwareWorkStealer, MemoryLayoutOptimizer, MetadataColocation,
+        OBJECTS_PER_CACHE_LINE,
     };
     use fugrip::concurrent::TricolorMarking;
     use mmtk::util::{Address, ObjectReference};
     use std::sync::{Arc, Mutex};
     use std::thread;
-    
 
     /// Test failure modes and edge cases in CacheAwareAllocator
     mod cache_aware_allocator_tests {
@@ -111,11 +110,11 @@ mod failure_mode_tests {
             let allocator = CacheAwareAllocator::new(base, 4096);
 
             let test_sizes = vec![
-                1,                    // Minimum
-                CACHE_LINE_SIZE - 1,  // Just under cache line
-                CACHE_LINE_SIZE,      // Exactly cache line
-                CACHE_LINE_SIZE + 1,  // Just over cache line
-                CACHE_LINE_SIZE * 2,  // Multiple cache lines
+                1,                   // Minimum
+                CACHE_LINE_SIZE - 1, // Just under cache line
+                CACHE_LINE_SIZE,     // Exactly cache line
+                CACHE_LINE_SIZE + 1, // Just over cache line
+                CACHE_LINE_SIZE * 2, // Multiple cache lines
             ];
 
             for size in test_sizes {
@@ -196,7 +195,9 @@ mod failure_mode_tests {
             let marking = CacheOptimizedMarking::new(4);
 
             // Should handle marking without tricolor backend
-            let obj = unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(0xa0000)) };
+            let obj = unsafe {
+                ObjectReference::from_raw_address_unchecked(Address::from_usize(0xa0000))
+            };
 
             marking.mark_object(obj);
             assert!(!marking.is_complete()); // Should have work in queue
@@ -217,7 +218,11 @@ mod failure_mode_tests {
             // Test marking with very large object batch
             let marking = CacheOptimizedMarking::new(4);
             let large_batch: Vec<ObjectReference> = (0..10000)
-                .map(|i| unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(0xb0000 + i * 8)) })
+                .map(|i| unsafe {
+                    ObjectReference::from_raw_address_unchecked(Address::from_usize(
+                        0xb0000 + i * 8,
+                    ))
+                })
                 .collect();
 
             marking.mark_objects_batch(&large_batch);
@@ -234,7 +239,11 @@ mod failure_mode_tests {
                 let marking_clone = Arc::clone(&marking);
                 let handle = thread::spawn(move || {
                     for i in 0..100 {
-                        let obj = unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(0xc0000 + thread_id * 1000 + i * 8)) };
+                        let obj = unsafe {
+                            ObjectReference::from_raw_address_unchecked(Address::from_usize(
+                                0xc0000 + thread_id * 1000 + i * 8,
+                            ))
+                        };
                         marking_clone.mark_object(obj);
                     }
                 });
@@ -257,7 +266,9 @@ mod failure_mode_tests {
             let tricolor = Arc::new(TricolorMarking::new(heap_base, heap_size));
             let marking = CacheOptimizedMarking::with_tricolor(&tricolor);
 
-            let obj = unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(0xd0100)) };
+            let obj = unsafe {
+                ObjectReference::from_raw_address_unchecked(Address::from_usize(0xd0100))
+            };
 
             marking.mark_object(obj);
 
@@ -276,7 +287,11 @@ mod failure_mode_tests {
 
             // Mark some objects
             for i in 0..10 {
-                let obj = unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(0xe0100 + i * 8)) };
+                let obj = unsafe {
+                    ObjectReference::from_raw_address_unchecked(Address::from_usize(
+                        0xe0100 + i * 8,
+                    ))
+                };
                 marking.mark_object(obj);
             }
 
@@ -296,7 +311,9 @@ mod failure_mode_tests {
             // Test marking with zero prefetch distance
             let marking = CacheOptimizedMarking::new(0);
 
-            let obj = unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(0xf0000)) };
+            let obj = unsafe {
+                ObjectReference::from_raw_address_unchecked(Address::from_usize(0xf0000))
+            };
 
             marking.mark_object(obj);
             // Should handle zero prefetch distance gracefully
@@ -307,7 +324,9 @@ mod failure_mode_tests {
             // Test marking with very large prefetch distance
             let marking = CacheOptimizedMarking::new(usize::MAX);
 
-            let obj = unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(0x100000)) };
+            let obj = unsafe {
+                ObjectReference::from_raw_address_unchecked(Address::from_usize(0x100000))
+            };
 
             marking.mark_object(obj);
             // Should handle extreme prefetch distance gracefully
@@ -345,9 +364,7 @@ mod failure_mode_tests {
             // Test size class determination at power-of-two boundaries
             let optimizer = MemoryLayoutOptimizer::new();
 
-            let test_sizes = vec![
-                1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096
-            ];
+            let test_sizes = vec![1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096];
 
             for size in test_sizes {
                 let size_class = optimizer.get_size_class(size);
@@ -411,8 +428,17 @@ mod failure_mode_tests {
                 let size_class1 = optimizer.get_size_class(size);
                 let size_class2 = optimizer.get_size_class(size);
 
-                assert_eq!(size_class1, size_class2, "Size class should be consistent for size {}", size);
-                assert!(size_class1 >= size, "Size class {} should be >= size {}", size_class1, size);
+                assert_eq!(
+                    size_class1, size_class2,
+                    "Size class should be consistent for size {}",
+                    size
+                );
+                assert!(
+                    size_class1 >= size,
+                    "Size class {} should be >= size {}",
+                    size_class1,
+                    size
+                );
             }
         }
     }
@@ -440,7 +466,11 @@ mod failure_mode_tests {
 
             // Add some work
             let objects: Vec<ObjectReference> = (0..10)
-                .map(|i| unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(0x110000 + i * 8)) })
+                .map(|i| unsafe {
+                    ObjectReference::from_raw_address_unchecked(Address::from_usize(
+                        0x110000 + i * 8,
+                    ))
+                })
                 .collect();
             stealer.add_objects(objects);
 
@@ -456,7 +486,11 @@ mod failure_mode_tests {
 
             // Add small amount of work
             let objects: Vec<ObjectReference> = (0..5)
-                .map(|i| unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(0x120000 + i * 8)) })
+                .map(|i| unsafe {
+                    ObjectReference::from_raw_address_unchecked(Address::from_usize(
+                        0x120000 + i * 8,
+                    ))
+                })
                 .collect();
             stealer.add_objects(objects);
 
@@ -476,7 +510,11 @@ mod failure_mode_tests {
                 let stealer_clone = Arc::clone(&stealer);
                 let handle = thread::spawn(move || {
                     let objects: Vec<ObjectReference> = (0..100)
-                        .map(|i| unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(0x130000 + thread_id * 1000 + i * 8)) })
+                        .map(|i| unsafe {
+                            ObjectReference::from_raw_address_unchecked(Address::from_usize(
+                                0x130000 + thread_id * 1000 + i * 8,
+                            ))
+                        })
                         .collect();
                     let mut stealer_lock = stealer_clone.lock().unwrap();
                     stealer_lock.add_objects(objects);
@@ -517,7 +555,11 @@ mod failure_mode_tests {
 
                 // Add work up to threshold
                 let objects: Vec<ObjectReference> = (0..threshold + 10)
-                    .map(|i| unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(0x140000 + i * 8)) })
+                    .map(|i| unsafe {
+                        ObjectReference::from_raw_address_unchecked(Address::from_usize(
+                            0x140000 + i * 8,
+                        ))
+                    })
                     .collect();
                 stealer.add_objects(objects);
 
@@ -567,7 +609,8 @@ mod failure_mode_tests {
                 let handle = thread::spawn(move || {
                     for i in 0..15 {
                         let index = thread_id * 15 + i;
-                        if index < 100 { // Ensure we don't go out of bounds
+                        if index < 100 {
+                            // Ensure we don't go out of bounds
                             let value_to_set = thread_id * 100 + i;
                             {
                                 let meta = metadata_clone.lock().unwrap();
@@ -636,11 +679,14 @@ mod failure_mode_tests {
             let marking = CacheOptimizedMarking::new(4);
 
             // Test with minimum valid address (word-aligned)
-            let min_obj = unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(8)) };
+            let min_obj =
+                unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(8)) };
             marking.mark_object(min_obj); // Should not panic
 
             // Test with extreme addresses (but word-aligned)
-            let max_obj = unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(usize::MAX & !0x7)) };
+            let max_obj = unsafe {
+                ObjectReference::from_raw_address_unchecked(Address::from_usize(usize::MAX & !0x7))
+            };
             marking.mark_object(max_obj); // Should not panic
 
             let stats = marking.get_stats();
@@ -652,13 +698,16 @@ mod failure_mode_tests {
             let marking = CacheOptimizedMarking::new(4);
 
             // Test with word-aligned addresses
-            let valid_obj = unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(8)) };
+            let valid_obj =
+                unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(8)) };
             marking.mark_object(valid_obj); // Prefetch should handle gracefully
 
             // Test with addresses that might cause prefetch issues
             for i in 0..10 {
                 let addr = 0x1000 + i * 4096; // Page-aligned addresses
-                let obj = unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(addr)) };
+                let obj = unsafe {
+                    ObjectReference::from_raw_address_unchecked(Address::from_usize(addr))
+                };
                 marking.mark_object(obj);
             }
 
@@ -718,7 +767,11 @@ mod failure_mode_tests {
 
             // Add work up to threshold
             for i in 0..6 {
-                let obj = unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(0x1000 + i * 64)) };
+                let obj = unsafe {
+                    ObjectReference::from_raw_address_unchecked(Address::from_usize(
+                        0x1000 + i * 64,
+                    ))
+                };
                 stealer.push_local(obj);
             }
 
@@ -850,7 +903,8 @@ mod failure_mode_tests {
             assert!(marking_stats.objects_marked > 0);
 
             let optimizer_stats = optimizer.get_statistics();
-            let total_optimizer_allocs: usize = optimizer_stats.iter().map(|(_, count)| *count).sum();
+            let total_optimizer_allocs: usize =
+                optimizer_stats.iter().map(|(_, count)| *count).sum();
             assert!(total_optimizer_allocs > 0);
 
             let stealer_lock = stealer.lock().unwrap();
@@ -881,7 +935,9 @@ mod failure_mode_tests {
             for &distance in &distances {
                 let marking = CacheOptimizedMarking::new(distance);
 
-                let obj = unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(0x1000)) };
+                let obj = unsafe {
+                    ObjectReference::from_raw_address_unchecked(Address::from_usize(0x1000))
+                };
                 marking.mark_object(obj);
 
                 let stats = marking.get_stats();
@@ -899,7 +955,11 @@ mod failure_mode_tests {
 
                 // Add work
                 for i in 0..5 {
-                    let obj = unsafe { ObjectReference::from_raw_address_unchecked(Address::from_usize(0x1000 + i * 64)) };
+                    let obj = unsafe {
+                        ObjectReference::from_raw_address_unchecked(Address::from_usize(
+                            0x1000 + i * 64,
+                        ))
+                    };
                     stealer.push_local(obj);
                 }
 

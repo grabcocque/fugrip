@@ -1557,7 +1557,8 @@ mod tests {
         let manager = FreeObjectManager::new();
 
         // Test double-free (should be idempotent)
-        let obj = ObjectReference::from_raw_address(unsafe { Address::from_usize(0x4000) }).unwrap();
+        let obj =
+            ObjectReference::from_raw_address(unsafe { Address::from_usize(0x4000) }).unwrap();
 
         manager.free_object(obj);
         assert!(manager.is_freed(obj));
@@ -1572,7 +1573,8 @@ mod tests {
         assert_eq!(redirected1, redirected2); // Should redirect to same singleton
 
         // Test sweep with multiple freed objects
-        let obj2 = ObjectReference::from_raw_address(unsafe { Address::from_usize(0x5000) }).unwrap();
+        let obj2 =
+            ObjectReference::from_raw_address(unsafe { Address::from_usize(0x5000) }).unwrap();
         manager.free_object(obj2);
 
         let stats_before = manager.get_stats();
@@ -1587,13 +1589,17 @@ mod tests {
         let mut queue = FinalizerQueue::new("edge_test");
 
         // Test finalizer with object that might be collected
-        let obj = ObjectReference::from_raw_address(unsafe { Address::from_usize(0x6000) }).unwrap();
+        let obj =
+            ObjectReference::from_raw_address(unsafe { Address::from_usize(0x6000) }).unwrap();
 
         // Register finalizer that might panic (should be caught)
-        queue.register_for_finalization(obj, Box::new(|| {
-            // This finalizer might panic in edge cases
-            // The system should handle this gracefully
-        }));
+        queue.register_for_finalization(
+            obj,
+            Box::new(|| {
+                // This finalizer might panic in edge cases
+                // The system should handle this gracefully
+            }),
+        );
 
         // Process finalizations (should not panic even if finalizer panics)
         let processed = queue.process_pending_finalizations();
@@ -1617,9 +1623,9 @@ mod tests {
 
         // Test multiple register/process cycles
         for i in 0..100 {
-            let test_obj = ObjectReference::from_raw_address(
-                unsafe { Address::from_usize(0x7000 + i * 8) }
-            ).unwrap();
+            let test_obj =
+                ObjectReference::from_raw_address(unsafe { Address::from_usize(0x7000 + i * 8) })
+                    .unwrap();
             queue.register_for_finalization(test_obj, Box::new(|| {}));
         }
 
@@ -1632,9 +1638,8 @@ mod tests {
         let map: WeakMap<String, i32> = WeakMap::new();
 
         // Test with invalid object references (use word-aligned addresses)
-        let invalid_key_ref = ObjectReference::from_raw_address(
-            unsafe { Address::from_usize(0x8000) }
-        ).unwrap();
+        let invalid_key_ref =
+            ObjectReference::from_raw_address(unsafe { Address::from_usize(0x8000) }).unwrap();
 
         // Operations on non-existent keys should be safe
         assert!(!map.has(&invalid_key_ref));
@@ -1646,9 +1651,9 @@ mod tests {
             let key = Arc::new(format!("key_{}", i));
             // Ensure word alignment (8-byte alignment for 64-bit systems)
             let aligned_addr = 0x9000 + (i * 8);
-            let key_ref = ObjectReference::from_raw_address(
-                unsafe { Address::from_usize(aligned_addr) }
-            ).unwrap();
+            let key_ref =
+                ObjectReference::from_raw_address(unsafe { Address::from_usize(aligned_addr) })
+                    .unwrap();
 
             map.set(key, key_ref, i as i32);
 
@@ -1696,9 +1701,10 @@ mod tests {
                     for i in 0..operations_per_thread {
                         // Create test objects with word-aligned addresses
                         let aligned_addr = 0x10000 + thread_id * 1000 * 8 + i * 8;
-                        let obj = ObjectReference::from_raw_address(
-                            unsafe { Address::from_usize(aligned_addr) }
-                        ).unwrap();
+                        let obj = ObjectReference::from_raw_address(unsafe {
+                            Address::from_usize(aligned_addr)
+                        })
+                        .unwrap();
 
                         // Test free object operations
                         if i % 3 == 0 {
@@ -1738,7 +1744,9 @@ mod tests {
         let final_stats = manager.get_stats();
         // Check that stats are reasonable (non-negative values are guaranteed by unsigned types)
         assert!(final_stats.free_object_stats.total_freed <= operations_per_thread * num_threads);
-        assert!(final_stats.weak_ref_stats.total_registered <= operations_per_thread * num_threads / 3);
+        assert!(
+            final_stats.weak_ref_stats.total_registered <= operations_per_thread * num_threads / 3
+        );
         assert!(final_stats.weak_map_count <= operations_per_thread * num_threads / 3);
     }
 
@@ -1747,9 +1755,8 @@ mod tests {
         let mut manager = MemoryManager::new();
 
         // Test operations with minimal resources
-        let small_obj = ObjectReference::from_raw_address(
-            unsafe { Address::from_usize(0x1000) }
-        ).unwrap();
+        let small_obj =
+            ObjectReference::from_raw_address(unsafe { Address::from_usize(0x1000) }).unwrap();
 
         // Multiple rapid operations that might stress the system
         for _ in 0..1000 {
@@ -1768,15 +1775,13 @@ mod tests {
         manager.gc_sweep_hook();
 
         // Set and unset coordinator
-        let coordinator_weak = Arc::downgrade(&Arc::new(
-            FugcCoordinator::new(
-                unsafe { Address::from_usize(0x50000000) },
-                1024 * 1024,
-                4,
-                &Arc::new(crate::thread::ThreadRegistry::new()),
-                &Arc::new(parking_lot::Mutex::new(crate::roots::GlobalRoots::default())),
-            )
-        ));
+        let coordinator_weak = Arc::downgrade(&Arc::new(FugcCoordinator::new(
+            unsafe { Address::from_usize(0x50000000) },
+            1024 * 1024,
+            4,
+            &Arc::new(crate::thread::ThreadRegistry::new()),
+            &Arc::new(parking_lot::Mutex::new(crate::roots::GlobalRoots::default())),
+        )));
 
         manager.set_fugc_coordinator(coordinator_weak);
         manager.gc_sweep_hook(); // Should work with coordinator set
