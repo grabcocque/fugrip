@@ -8,6 +8,7 @@ use crate::fugc_coordinator::FugcCoordinator;
 use crate::roots::GlobalRoots;
 use crate::safepoint::SafepointManager;
 use crate::thread::ThreadRegistry;
+use crate::types::Address;
 use arc_swap::ArcSwap;
 use std::sync::{Arc, OnceLock};
 
@@ -84,7 +85,7 @@ impl DIContainer {
     /// Create a FUGC coordinator with the dependencies from this container
     pub fn create_fugc_coordinator(
         &self,
-        heap_base: mmtk::util::Address,
+        heap_base: Address,
         heap_size: usize,
         num_workers: usize,
     ) -> Arc<FugcCoordinator> {
@@ -227,7 +228,7 @@ mod tests {
     #[test]
     fn test_fugc_coordinator_creation() {
         let container = Arc::new(DIContainer::new_for_testing());
-        let heap_base = unsafe { Address::from_usize(0x10000000) };
+        let heap_base = Address::from_usize(0x10000000);
         let coordinator = container.create_fugc_coordinator(heap_base, 64 * 1024 * 1024, 4);
 
         assert!(Arc::ptr_eq(&coordinator, container.fugc_coordinator()));

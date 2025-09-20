@@ -3,14 +3,14 @@
 //! This module provides shared test fixtures and utilities to ensure
 //! consistent dependency injection setup across all tests.
 
-use crate::allocator::AllocatorInterface;
 use crate::alloc_facade::MutatorHandle;
-use crate::types::{Address, ObjectReference};
+use crate::allocator::AllocatorInterface;
 use crate::core::ObjectHeader;
 use crate::di::{DIContainer, DIScope};
 use crate::error::GcResult;
 use crate::fugc_coordinator::FugcCoordinator;
 use crate::thread::MutatorThread;
+use crate::types::{Address, ObjectReference};
 use std::sync::Arc;
 
 use crossbeam::queue::SegQueue;
