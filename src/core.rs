@@ -25,13 +25,9 @@ use std::{marker::PhantomData, mem::size_of};
 
 use bitflags::bitflags;
 
-use crate::compat::{
-    ObjectReference,
-    ObjectModel as MMTkObjectModel, VMGlobalLogBitSpec, VMLocalForwardingBitsSpec,
-    VMLocalForwardingPointerSpec, VMLocalLOSMarkNurserySpec, VMLocalMarkBitSpec,
-};
+use crate::frontend::types::{Address, ObjectReference};
 
-use crate::binding::RustVM;
+// RustVM should be defined in backend modules, not here
 
 /// Basic header shared by every managed object.  The layout intentionally keeps
 /// frequently accessed metadata in the first word to simplify barrier
@@ -144,7 +140,7 @@ pub struct LayoutId(pub u16);
 ///
 /// ```
 /// use fugrip::core::Gc;
-/// use crate::types::Address;
+/// use crate::frontend::types::Address;
 ///
 /// // Create a null Gc pointer
 /// let null_ptr: Gc<i32> = Gc::new();
@@ -160,7 +156,7 @@ pub struct LayoutId(pub u16);
 /// // Convert to ObjectReference (with proper alignment)
 /// let obj_ref = gc_ptr.to_object_reference();
 /// // ObjectReference created from aligned pointer
-/// assert_eq!(obj_ref.to_raw_address(), crate::types::Address::from_usize(aligned_addr));
+/// assert_eq!(obj_ref.to_raw_address(), crate::frontend::types::Address::from_usize(aligned_addr));
 /// ```
 pub struct Gc<T> {
     ptr: *mut u8,
@@ -208,11 +204,7 @@ impl<T> Gc<T> {
     }
 
     pub fn to_object_reference(&self) -> ObjectReference {
-        unsafe {
-            ObjectReference::from_raw_address_unchecked(crate::types::Address::from_mut_ptr(
-                self.ptr,
-            ))
-        }
+        unsafe { ObjectReference::from_raw_address_unchecked(Address::from_mut_ptr(self.ptr)) }
     }
 }
 
@@ -289,9 +281,7 @@ impl RustObjectModel {
 
         // Use the existing MMTkObjectModel implementation to get object size
         // This leverages the production-ready size calculation already implemented
-        match ObjectReference::from_raw_address(
-            crate::types::Address::from_mut_ptr(object_ptr)
-        ) {
+        match ObjectReference::from_raw_address(Address::from_mut_ptr(object_ptr)) {
             Some(obj_ref) => {
                 // Use the existing get_current_size method from MMTkObjectModel
                 Some(Self::get_current_size(obj_ref))
@@ -301,105 +291,7 @@ impl RustObjectModel {
     }
 }
 
-impl MMTkObjectModel<RustVM> for RustObjectModel {
-    const GLOBAL_LOG_BIT_SPEC: VMGlobalLogBitSpec = VMGlobalLogBitSpec::side_first();
-
-    const LOCAL_FORWARDING_POINTER_SPEC: VMLocalForwardingPointerSpec =
-        VMLocalForwardingPointerSpec::in_header(0);
-
-    const LOCAL_FORWARDING_BITS_SPEC: VMLocalForwardingBitsSpec =
-        VMLocalForwardingBitsSpec::in_header(0);
-
-    const LOCAL_MARK_BIT_SPEC: VMLocalMarkBitSpec = VMLocalMarkBitSpec::in_header(0);
-
-    const LOCAL_LOS_MARK_NURSERY_SPEC: VMLocalLOSMarkNurserySpec =
-        VMLocalLOSMarkNurserySpec::in_header(0);
-
-    const OBJECT_REF_OFFSET_LOWER_BOUND: isize = 0;
-
-    fn copy(
-        from: ObjectReference,
-        semantics: crate::types::CopySemantics,
-        copy_context: &mut crate::types::GCWorkerCopyContext<RustVM>,
-    ) -> ObjectReference {
-        let object_size = Self::get_current_size(from);
-        let align = Self::get_align_when_copied(from);
-        let align_offset = Self::get_align_offset_when_copied(from);
-
-        let to_address = copy_context.alloc_copy(from, object_size, align, align_offset, semantics);
-        let new_object = Self::get_reference_when_copied_to(from, to_address);
-
-        // Copy the object contents
-        unsafe {
-            std::ptr::copy_nonoverlapping(
-                from.to_raw_address().to_mut_ptr::<u8>(),
-                to_address.to_mut_ptr::<u8>(),
-                object_size,
-            );
-        }
-
-        new_object
-    }
-
-    fn copy_to(
-        from: ObjectReference,
-        to: ObjectReference,
-        _region: crate::types::Address,
-    ) -> crate::types::Address {
-        let object_size = Self::get_current_size(from);
-
-        // Copy the object contents to the specified location
-        unsafe {
-            std::ptr::copy_nonoverlapping(
-                from.to_raw_address().to_mut_ptr::<u8>(),
-                to.to_raw_address().to_mut_ptr::<u8>(),
-                object_size,
-            );
-        }
-
-        // Return the address after the copied object
-        to.to_raw_address().add(object_size)
-    }
-
-    fn get_current_size(object: ObjectReference) -> usize {
-        Self::size(object.to_raw_address().to_mut_ptr())
-    }
-
-    fn get_size_when_copied(object: ObjectReference) -> usize {
-        Self::get_current_size(object)
-    }
-
-    fn get_align_when_copied(_object: ObjectReference) -> usize {
-        8
-    }
-
-    fn get_align_offset_when_copied(_object: ObjectReference) -> usize {
-        0
-    }
-
-    fn get_reference_when_copied_to(
-        _from: ObjectReference,
-        to: crate::types::Address,
-    ) -> ObjectReference {
-        unsafe { ObjectReference::from_raw_address_unchecked(to) }
-    }
-
-    fn get_type_descriptor(_reference: ObjectReference) -> &'static [i8] {
-        unsafe { std::mem::transmute(b"RustVMObject\0" as &[u8]) }
-    }
-
-    fn ref_to_object_start(object: ObjectReference) -> crate::types::Address {
-        object.to_raw_address()
-    }
-
-    fn ref_to_header(object: ObjectReference) -> crate::types::Address {
-        object.to_raw_address()
-    }
-
-    fn dump_object(_object: ObjectReference) {
-        // Debug object dumping
-    }
-}
+// MMTk trait implementations have been moved to src/backends/mmtk/object_model.rs
 
 #[cfg(test)]
 mod tests {
@@ -545,9 +437,7 @@ mod tests {
         }
 
         let obj_ref1 = unsafe {
-            ObjectReference::from_raw_address_unchecked(crate::types::Address::from_mut_ptr(
-                buffer1.as_mut_ptr(),
-            ))
+            ObjectReference::from_raw_address_unchecked(Address::from_mut_ptr(buffer1.as_mut_ptr()))
         };
 
         assert!(model.get_weak_ref_header(obj_ref1).is_none());
@@ -569,44 +459,57 @@ mod tests {
         }
 
         let obj_ref2 = unsafe {
-            ObjectReference::from_raw_address_unchecked(crate::types::Address::from_mut_ptr(
-                buffer2.as_mut_ptr(),
-            ))
+            ObjectReference::from_raw_address_unchecked(Address::from_mut_ptr(buffer2.as_mut_ptr()))
         };
 
         assert!(model.get_weak_ref_header(obj_ref2).is_some());
     }
 
     #[test]
-    fn test_mmtk_object_model_functions() {
-        let obj_ref = unsafe {
-            ObjectReference::from_raw_address_unchecked(crate::types::Address::from_usize(0x4000))
+    fn test_rust_object_model_get_current_size() {
+        let header = ObjectHeader {
+            flags: ObjectFlags::empty(),
+            layout_id: LayoutId(0),
+            body_size: 128,
+            vtable: std::ptr::null(),
         };
 
-        // Test alignment functions
-        assert_eq!(RustObjectModel::get_align_when_copied(obj_ref), 8);
-        assert_eq!(RustObjectModel::get_align_offset_when_copied(obj_ref), 0);
+        let mut buffer = [0u8; 256];
+        let ptr = buffer.as_mut_ptr();
 
-        // Test reference functions
-        let new_addr = crate::types::Address::from_usize(0x5000);
-        let new_ref = RustObjectModel::get_reference_when_copied_to(obj_ref, new_addr);
-        assert_eq!(new_ref.to_raw_address(), new_addr);
+        unsafe {
+            ptr.cast::<ObjectHeader>().write(header);
+        }
 
-        // Test type descriptor
-        let type_desc = RustObjectModel::get_type_descriptor(obj_ref);
-        assert!(!type_desc.is_empty());
+        let obj_ref =
+            unsafe { ObjectReference::from_raw_address_unchecked(Address::from_mut_ptr(ptr)) };
 
-        // Test address functions
-        assert_eq!(
-            RustObjectModel::ref_to_object_start(obj_ref),
-            obj_ref.to_raw_address()
-        );
-        assert_eq!(
-            RustObjectModel::ref_to_header(obj_ref),
-            obj_ref.to_raw_address()
-        );
+        let size = RustObjectModel::get_current_size(obj_ref);
+        assert_eq!(size, std::mem::size_of::<ObjectHeader>() + 128);
+    }
 
-        // Test dump (should not panic)
-        RustObjectModel::dump_object(obj_ref);
+    #[test]
+    fn test_rust_object_model_get_object_size() {
+        let header = ObjectHeader {
+            flags: ObjectFlags::empty(),
+            layout_id: LayoutId(0),
+            body_size: 256,
+            vtable: std::ptr::null(),
+        };
+
+        let mut buffer = [0u8; 512];
+        let ptr = buffer.as_mut_ptr();
+
+        unsafe {
+            ptr.cast::<ObjectHeader>().write(header);
+        }
+
+        let size = RustObjectModel::get_object_size(ptr);
+        assert!(size.is_some());
+        assert_eq!(size.unwrap(), std::mem::size_of::<ObjectHeader>() + 256);
+
+        // Test with null pointer
+        let null_size = RustObjectModel::get_object_size(std::ptr::null_mut());
+        assert!(null_size.is_none());
     }
 }

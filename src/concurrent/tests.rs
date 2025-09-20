@@ -3,8 +3,8 @@
 #[cfg(test)]
 mod tests {
     use super::super::*;
-    use crate::compat::Address;
-    use crate::compat::ObjectReference;
+    use crate::frontend::types::Address;
+    use crate::frontend::types::ObjectReference;
     use crossbeam_deque::Worker;
     use std::sync::Arc;
 

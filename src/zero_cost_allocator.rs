@@ -7,9 +7,9 @@
 //! - Complete MMTk isolation (no types leak through)
 
 use crate::{
-    alloc_facade::{self, MutatorHandle, PlanHandle},
     core::ObjectHeader,
-    error::{GcError, GcResult},
+    error::GcResult,
+    frontend::alloc_facade::{self, MutatorHandle, PlanHandle},
 };
 
 /// Zero-cost allocator that uses opaque handles exclusively
@@ -87,51 +87,41 @@ impl ZeroCostAllocator {
             total_size,
             align,
             0,
-            crate::compat::AllocationSemantics::Default,
+            alloc_facade::AllocationSemantics::Default,
         )?;
 
         // Write header
         unsafe {
-            let header_ptr = addr.to_mut_ptr::<ObjectHeader>();
+            let header_ptr = addr as *mut ObjectHeader;
             std::ptr::write(header_ptr, header);
 
             if size > 0 {
-                let body_ptr = addr.add(std::mem::size_of::<ObjectHeader>());
-                std::ptr::write_bytes(body_ptr.to_mut_ptr::<u8>(), 0, size);
+                let body_ptr = addr.add(std::mem::size_of::<ObjectHeader>()) as *mut u8;
+                std::ptr::write_bytes(body_ptr, 0, size);
             }
         }
 
         // Post-allocation hook - also monomorphized
-        let obj_ref = unsafe { crate::compat::ObjectReference::from_raw_address_unchecked(addr) };
+        let _obj_ref = unsafe {
+            crate::frontend::types::ObjectReference::from_raw_address_unchecked(
+                crate::frontend::types::Address::from_mut_ptr(addr),
+            )
+        };
 
         alloc_facade::post_alloc(
             self.mutator,
-            obj_ref,
+            addr,
             total_size,
-            crate::compat::AllocationSemantics::Default,
+            alloc_facade::AllocationSemantics::Default,
         );
 
-        Ok(addr.to_mut_ptr::<u8>())
+        Ok(addr)
     }
 
     /// Write barrier - zero-cost dispatch
     pub fn write_barrier(&self, src: *mut u8, slot: *mut *mut u8, target: Option<*mut u8>) {
-        let src_ref = unsafe {
-            crate::compat::ObjectReference::from_raw_address_unchecked(
-                crate::compat::Address::from_ptr(src),
-            )
-        };
-
-        let slot_addr = unsafe { crate::compat::Address::from_ptr(slot as *const u8) };
-
-        let target_ref = target.map(|ptr| unsafe {
-            crate::compat::ObjectReference::from_raw_address_unchecked(
-                crate::compat::Address::from_ptr(ptr),
-            )
-        });
-
-        // This call is monomorphized - no runtime dispatch
-        alloc_facade::write_barrier(self.mutator, src_ref, slot_addr, target_ref);
+        // Call facade write barrier with raw pointers (no Address conversion needed)
+        alloc_facade::write_barrier(self.mutator, src, slot, target);
     }
 
     /// Trigger GC - zero-cost dispatch
@@ -297,7 +287,7 @@ mod api_isolation_test {
     // NOTE: This module intentionally has NO MMTk imports
     // If any MMTk types leak through, this won't compile
 
-    use crate::{core::ObjectHeader, error::GcResult, zero_cost_allocator::ZeroCostAllocator};
+    use crate::{core::ObjectHeader, zero_cost_allocator::ZeroCostAllocator};
 
     #[test]
     fn test_api_isolation() {

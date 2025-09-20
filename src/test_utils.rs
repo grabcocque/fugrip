@@ -3,66 +3,17 @@
 //! This module provides shared test fixtures and utilities to ensure
 //! consistent dependency injection setup across all tests.
 
-use crate::alloc_facade::MutatorHandle;
-use crate::allocator::AllocatorInterface;
-use crate::core::ObjectHeader;
 use crate::di::{DIContainer, DIScope};
-use crate::error::GcResult;
 use crate::fugc_coordinator::FugcCoordinator;
-use crate::thread::MutatorThread;
-use crate::types::{Address, ObjectReference};
+use crate::frontend::types::{Address, ObjectReference};
 use std::sync::Arc;
 
 use crossbeam::queue::SegQueue;
 use rayon::prelude::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// Dummy allocator implementation for testing and fallback.
-///
-/// This allocator always returns OutOfMemory errors and is intended
-/// solely for testing scenarios where allocation should fail or be stubbed out.
-///
-/// # Examples
-///
-/// ```
-/// use fugrip::test_utils::StubAllocator;
-/// use fugrip::thread::MutatorThread;
-///
-/// // Create a stub allocator for testing
-/// let allocator = StubAllocator::new();
-///
-/// // Use for safepoint polling in tests
-/// let mutator = MutatorThread::new(1);
-/// allocator.poll_safepoint(&mutator);
-/// ```
-pub struct StubAllocator;
-
-impl StubAllocator {
-    pub const fn new() -> Self {
-        Self
-    }
-}
-
-impl Default for StubAllocator {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl AllocatorInterface for StubAllocator {
-    fn allocate(
-        &self,
-        _mutator: MutatorHandle,
-        _header: ObjectHeader,
-        _bytes: usize,
-    ) -> GcResult<*mut u8> {
-        Err(crate::error::GcError::OutOfMemory)
-    }
-
-    fn poll_safepoint(&self, _mutator: &MutatorThread) {
-        // No-op for stub implementation
-    }
-}
+/// Note: StubAllocator is now a compatibility shim that delegates to the facade.
+/// The facade automatically uses the stub backend when `feature = "use_stub"` is enabled.
 
 /// Default heap configuration for tests
 pub const TEST_HEAP_BASE: usize = 0x10000000;
@@ -341,7 +292,7 @@ mod tests {
         let allocator = StubAllocator::new();
         let default_allocator = StubAllocator;
 
-        // Both should be valid instances
+        // Both should be valid instances - StubAllocator now delegates to facade
         let mutator = MutatorThread::new(2);
         allocator.poll_safepoint(&mutator);
         default_allocator.poll_safepoint(&mutator);
@@ -351,10 +302,9 @@ mod tests {
     fn test_stub_allocator_always_fails() {
         let allocator = StubAllocator::new();
 
-        // StubAllocator should always return OutOfMemory when allocate is called
-        // Note: Testing allocate() requires a valid MMTk Mutator, which is complex to create
-        // The StubAllocator always returns OutOfMemory error as designed
-        // This test verifies the stub behavior through the trait interface
+        // StubAllocator delegates to facade - when use_stub feature is enabled,
+        // facade returns OutOfMemory; otherwise it uses jemalloc backend
+        // This test verifies the compatibility shim works correctly
         let mutator = MutatorThread::new(3);
         allocator.poll_safepoint(&mutator); // This should not panic
     }

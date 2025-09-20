@@ -1,10 +1,11 @@
 //! Statistics and state APIs for FUGC monitoring
 
-use crate::{fugc_coordinator::FugcCycleStats, fugc_coordinator::FugcPhase, plan::FugcPlanManager};
+use crate::{fugc_coordinator::FugcCycleStats, fugc_coordinator::FugcPhase, backends::mmtk::FugcPlanManager};
+use crate::backends::mmtk::plan;
 use arc_swap::ArcSwap;
 use std::sync::Arc;
 
-use super::FUGC_PLAN_MANAGER;
+use crate::binding::FUGC_PLAN_MANAGER;
 
 /// Trigger garbage collection with FUGC optimizations using MMTk's GC trigger API.
 /// This integrates with MMTk's allocation failure handling and FUGC's 8-step protocol.
@@ -48,7 +49,7 @@ pub fn fugc_gc() {
 /// // View concurrent allocation statistics
 /// println!("Objects allocated black: {}", stats.objects_allocated_black);
 /// ```
-pub fn fugc_get_stats() -> crate::plan::FugcStats {
+pub fn fugc_get_stats() -> plan::FugcStats {
     FUGC_PLAN_MANAGER
         .get_or_init(|| ArcSwap::new(Arc::new(FugcPlanManager::new())))
         .load()

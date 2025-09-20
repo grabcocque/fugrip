@@ -368,3 +368,40 @@ impl<VM> GCWorkerCopyContext<VM> {
         Address::from_usize(ptr as usize)
     }
 }
+
+// VM opaque pointer types for compatibility
+pub mod vm {
+    pub mod opaque_pointer {
+        use super::super::Address;
+
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        pub struct OpaquePointer(Address);
+
+        impl OpaquePointer {
+            pub fn from_address(addr: Address) -> Self {
+                OpaquePointer(addr)
+            }
+
+            pub fn to_address(&self) -> Address {
+                self.0
+            }
+        }
+
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        pub struct VMThread(pub OpaquePointer);
+
+        impl VMThread {
+            pub const UNINITIALIZED: Self = VMThread(OpaquePointer(Address::ZERO));
+
+            pub fn from_usize(value: usize) -> Self {
+                VMThread(OpaquePointer(Address::from_usize(value)))
+            }
+        }
+
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        pub struct VMMutatorThread(pub VMThread);
+
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        pub struct VMWorkerThread(pub VMThread);
+    }
+}

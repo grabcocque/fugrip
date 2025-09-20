@@ -8,15 +8,15 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 // MMTk types are accessed through facade only
-use crate::alloc_facade::{
-    PlanHandle, get_plan_reserved_pages, get_plan_total_pages, handle_user_collection_request,
+use crate::frontend::alloc_facade::{
+    PlanHandle, get_plan_reserved_pages, get_plan_total_pages,
     register_plan,
 };
-use crate::compat::ObjectReference;
+use crate::frontend::types::ObjectReference;
 
-use crate::binding::RustVM;
 use crate::concurrent::WriteBarrier;
 use crate::fugc_coordinator::FugcCoordinator;
+use crate::backends::mmtk::binding::vm_impl::RustVM;
 
 /// Global instance of the FUGC plan manager
 static GLOBAL_PLAN_MANAGER: OnceLock<FugcPlanManager> = OnceLock::new();
@@ -89,9 +89,9 @@ impl FugcPlanManager {
 
             // Initialize with proper DI container
             let coordinator = container.create_fugc_coordinator(
-                unsafe { crate::compat::Address::from_usize(0x10000000) }, // 256MB base
-                128 * 1024 * 1024,                                         // 128MB heap
-                4,                                                         // 4 GC workers
+                unsafe { crate::frontend::types::Address::from_usize(0x10000000) }, // 256MB base
+                128 * 1024 * 1024,                                                  // 128MB heap
+                4,                                                                  // 4 GC workers
             );
             manager.fugc_coordinator = coordinator;
 
@@ -117,7 +117,7 @@ impl FugcPlanManager {
         let container = crate::di::DIContainer::new();
 
         // Use reasonable defaults for heap configuration
-        let heap_base = unsafe { crate::compat::Address::from_usize(0x10000000) }; // 256MB base
+        let heap_base = unsafe { crate::frontend::types::Address::from_usize(0x10000000) }; // 256MB base
         let heap_size = 128 * 1024 * 1024; // 128MB heap
         let num_workers = 4; // 4 GC workers
 
@@ -134,7 +134,7 @@ impl FugcPlanManager {
     /// Initialize the FUGC plan manager with a plan handle.
     /// This should be called once during VM initialization.
     #[cfg(feature = "use_mmtk")]
-    pub fn initialize(&self, mmtk: &'static mmtk::MMTK<crate::binding::RustVM>) {
+    pub fn initialize(&self, mmtk: &'static mmtk::MMTK<RustVM>) {
         let handle = register_plan(mmtk);
         let _ = self.plan.set(handle);
     }
@@ -290,7 +290,7 @@ impl FugcPlanManager {
     pub fn handle_write_barrier(
         &self,
         _src: ObjectReference,
-        slot: crate::compat::Address,
+        slot: crate::frontend::types::Address,
         target: ObjectReference,
     ) {
         unsafe {
@@ -330,7 +330,7 @@ impl FugcPlanManager {
             // Calculate actual memory usage from plan
             let total_pages = get_plan_total_pages(plan_handle);
             let reserved_pages = get_plan_reserved_pages(plan_handle);
-            let page_size = crate::compat::constants::BYTES_IN_PAGE;
+            let page_size = crate::frontend::types::constants::BYTES_IN_PAGE;
             (total_pages * page_size, reserved_pages * page_size)
         } else {
             // Use allocation statistics when MMTk is not available
@@ -414,7 +414,7 @@ impl FugcPlanManager {
                 // Now MMTk can begin its collection knowing FUGC barriers are active
                 // This handles allocation failure and coordinates with FUGC marking
                 // We get the first available mutator thread to trigger the collection
-                use crate::binding::MUTATOR_MAP;
+                use crate::backends::mmtk::binding::MUTATOR_MAP;
                 if let Some(entry) = MUTATOR_MAP.get_or_init(DashMap::new).iter().next() {
                     // Trigger GC through the plan manager
                     // This delegates to FUGC coordinator for collection
@@ -693,10 +693,14 @@ mod tests {
 
         // Track some allocations using post_alloc
         let obj1 = unsafe {
-            ObjectReference::from_raw_address_unchecked(crate::compat::Address::from_usize(0x1000))
+            ObjectReference::from_raw_address_unchecked(
+                crate::frontend::types::Address::from_usize(0x1000),
+            )
         };
         let obj2 = unsafe {
-            ObjectReference::from_raw_address_unchecked(crate::compat::Address::from_usize(0x2000))
+            ObjectReference::from_raw_address_unchecked(
+                crate::frontend::types::Address::from_usize(0x2000),
+            )
         };
         plan_manager.post_alloc(obj1, 1024);
         plan_manager.post_alloc(obj2, 2048);
@@ -801,7 +805,9 @@ mod tests {
 
         // Test zero allocation
         let obj = unsafe {
-            ObjectReference::from_raw_address_unchecked(crate::compat::Address::from_usize(0x3000))
+            ObjectReference::from_raw_address_unchecked(
+                crate::frontend::types::Address::from_usize(0x3000),
+            )
         };
         plan_manager.post_alloc(obj, 0);
         let count = plan_manager
@@ -812,7 +818,9 @@ mod tests {
 
         // Test large allocation
         let obj2 = unsafe {
-            ObjectReference::from_raw_address_unchecked(crate::compat::Address::from_usize(0x4000))
+            ObjectReference::from_raw_address_unchecked(
+                crate::frontend::types::Address::from_usize(0x4000),
+            )
         };
         plan_manager.post_alloc(obj2, usize::MAX - 1000);
         let total = plan_manager
@@ -829,10 +837,14 @@ mod tests {
 
         // Create valid object references for testing
         let _src = unsafe {
-            ObjectReference::from_raw_address_unchecked(crate::compat::Address::from_usize(0x1000))
+            ObjectReference::from_raw_address_unchecked(
+                crate::frontend::types::Address::from_usize(0x1000),
+            )
         };
         let _target = unsafe {
-            ObjectReference::from_raw_address_unchecked(crate::compat::Address::from_usize(0x2000))
+            ObjectReference::from_raw_address_unchecked(
+                crate::frontend::types::Address::from_usize(0x2000),
+            )
         };
 
         // Test write barrier components without dangerous memory access

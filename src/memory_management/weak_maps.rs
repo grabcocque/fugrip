@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use dashmap::DashMap;
 
 use super::weak_refs::WeakReference;
-use crate::compat::{Address, ObjectReference};
+use crate::frontend::types::ObjectReference;
 
 /// JavaScript-style weak map implementation
 ///
@@ -69,7 +69,7 @@ impl<K: Send + Sync + Clone + 'static, V: Send + Sync + Clone + 'static> WeakMap
     /// ```ignore
     /// use fugrip::memory_management::weak_maps::WeakMap;
     /// use std::sync::Arc;
-    /// use crate::compat::{Address, ObjectReference};
+    /// use crate::frontend::types::{Address, ObjectReference};
     ///
     /// let mut weak_map = WeakMap::new();
     /// let key = Arc::new("key".to_string());
@@ -96,7 +96,7 @@ impl<K: Send + Sync + Clone + 'static, V: Send + Sync + Clone + 'static> WeakMap
     /// ```ignore
     /// use fugrip::memory_management::weak_maps::WeakMap;
     /// use std::sync::Arc;
-    /// use crate::compat::{Address, ObjectReference};
+    /// use crate::frontend::types::{Address, ObjectReference};
     ///
     /// let weak_map = WeakMap::new();
     /// let key = Arc::new("key".to_string());
@@ -121,7 +121,7 @@ impl<K: Send + Sync + Clone + 'static, V: Send + Sync + Clone + 'static> WeakMap
     /// ```ignore
     /// use fugrip::memory_management::weak_maps::WeakMap;
     /// use std::sync::Arc;
-    /// use crate::compat::{Address, ObjectReference};
+    /// use crate::frontend::types::{Address, ObjectReference};
     ///
     /// let weak_map = WeakMap::new();
     /// let key = Arc::new("key".to_string());
@@ -142,7 +142,7 @@ impl<K: Send + Sync + Clone + 'static, V: Send + Sync + Clone + 'static> WeakMap
     /// ```ignore
     /// use fugrip::memory_management::weak_maps::WeakMap;
     /// use std::sync::Arc;
-    /// use crate::compat::{Address, ObjectReference};
+    /// use crate::frontend::types::{Address, ObjectReference};
     ///
     /// let weak_map = WeakMap::new();
     /// let key = Arc::new("key".to_string());
@@ -173,7 +173,7 @@ impl<K: Send + Sync + Clone + 'static, V: Send + Sync + Clone + 'static> WeakMap
     /// ```ignore
     /// use fugrip::memory_management::weak_maps::WeakMap;
     /// use std::sync::Arc;
-    /// use crate::compat::{Address, ObjectReference};
+    /// use crate::frontend::types::{Address, ObjectReference};
     ///
     /// let weak_map = WeakMap::new();
     /// assert_eq!(weak_map.size(), 0);
@@ -210,7 +210,7 @@ impl<K: Send + Sync + Clone + 'static, V: Send + Sync + Clone + 'static> WeakMap
     /// ```ignore
     /// use fugrip::memory_management::weak_maps::WeakMap;
     /// use std::sync::Arc;
-    /// use crate::compat::{Address, ObjectReference};
+    /// use crate::frontend::types::{Address, ObjectReference};
     ///
     /// let weak_map = WeakMap::new();
     /// let key1 = Arc::new("key1".to_string());
@@ -242,7 +242,7 @@ impl<K: Send + Sync + Clone + 'static, V: Send + Sync + Clone + 'static> WeakMap
     /// ```ignore
     /// use fugrip::memory_management::weak_maps::WeakMap;
     /// use std::sync::Arc;
-    /// use crate::compat::{Address, ObjectReference};
+    /// use crate::frontend::types::{Address, ObjectReference};
     ///
     /// let weak_map = WeakMap::new();
     /// let key = Arc::new("key".to_string());

@@ -3,7 +3,7 @@
 #[cfg(test)]
 mod tests {
     use super::super::*;
-    use crate::compat::{Address, ObjectReference};
+    use crate::frontend::types::{Address, ObjectReference};
     use rayon::iter::{IntoParallelIterator, ParallelIterator};
     use std::sync::{
         Arc,

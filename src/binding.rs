@@ -19,30 +19,23 @@
 //! assert!(stats.concurrent_collection_enabled);
 //! ```
 
-use crate::plan::FugcPlanManager;
+#[cfg(feature = "use_mmtk")]
+use crate::backends::mmtk::FugcPlanManager;
 use arc_swap::ArcSwap;
 use std::sync::OnceLock;
 
-// Submodules
-pub mod allocation;
-pub mod initialization;
-pub mod mutator;
-pub mod stats;
-pub mod vm_impl;
+// Note: MMTk-specific binding implementations are in src/backends/mmtk/binding/
+// This module provides the global coordination point for MMTk integration
 
-#[cfg(test)]
-mod tests;
-
-// Re-exports from submodules
-pub use allocation::*;
-pub use initialization::*;
-pub use mutator::{
-    MUTATOR_MAP, MutatorHandle, MutatorRegistration, register_mutator_context,
-    unregister_mutator_context,
-};
-pub use stats::*;
-pub use vm_impl::{RustVM, take_enqueued_references};
-
+#[cfg(feature = "use_mmtk")]
 /// Global FUGC plan manager that coordinates MMTk with FUGC-specific features
 /// Lock-free access using ArcSwap for 15-25% performance improvement
 pub static FUGC_PLAN_MANAGER: OnceLock<ArcSwap<FugcPlanManager>> = OnceLock::new();
+
+#[cfg(feature = "use_mmtk")]
+/// Initialize the global FUGC plan manager
+pub fn initialize_fugc_plan_manager() -> &'static ArcSwap<FugcPlanManager> {
+    FUGC_PLAN_MANAGER.get_or_init(|| {
+        ArcSwap::new(std::sync::Arc::new(FugcPlanManager::new()))
+    })
+}

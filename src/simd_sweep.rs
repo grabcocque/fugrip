@@ -4,7 +4,7 @@
 //! for SIMD operations. The design focuses on simplicity and data-oriented functions
 //! that operate on slices rather than complex object hierarchies.
 
-use crate::compat::{Address, ObjectReference};
+use crate::frontend::types::{Address, ObjectReference};
 use std::cell::UnsafeCell;
 use wide::u64x4;
 

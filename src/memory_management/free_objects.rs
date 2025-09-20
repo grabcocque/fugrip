@@ -1,6 +1,6 @@
 //! Free object management and MMTk integration
 
-use crate::compat::{Address, ObjectReference};
+use crate::frontend::types::{Address, ObjectReference};
 use dashmap::DashMap;
 use mmtk::vm::ObjectModel;
 use std::sync::Mutex;
@@ -258,7 +258,7 @@ pub struct FreeObjectStats {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compat::Address;
+    use crate::frontend::types::Address;
 
     #[test]
     fn test_free_singleton() {

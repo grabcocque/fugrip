@@ -5,9 +5,9 @@ use mmtk::{
     vm::{RootsWorkFactory, Scanning, SlotVisitor, VMBinding},
 };
 
-use crate::binding::RustVM;
+#[cfg(feature = "use_mmtk")]
+use crate::backends::mmtk::binding::RustVM;
 use crate::thread::{MutatorThread, ThreadRegistry};
-use arc_swap::ArcSwap;
 use rayon::prelude::*;
 use std::sync::Arc;
 
@@ -163,6 +163,7 @@ impl RustScanning {
     }
 }
 
+#[cfg(feature = "use_mmtk")]
 impl Scanning<RustVM> for RustScanning {
     fn scan_object<SV: SlotVisitor<<RustVM as VMBinding>::VMSlot>>(
         _tls: VMWorkerThread,
@@ -244,12 +245,8 @@ impl Scanning<RustVM> for RustScanning {
     }
 
     fn notify_initial_thread_scan_complete(partial_scan: bool, _tls: VMWorkerThread) {
-        let coordinator = {
-            let manager = crate::binding::FUGC_PLAN_MANAGER
-                .get_or_init(|| ArcSwap::new(Arc::new(crate::plan::FugcPlanManager::new())))
-                .load();
-            Arc::clone(manager.get_fugc_coordinator())
-        };
+        // Access coordinator through global safepoint manager (maintains blackwall abstraction)
+        let coordinator = crate::safepoint::SafepointManager::global().get_fugc_coordinator();
 
         // Real MMTk integration: FUGC Step 4 - Global Root Marking
         // This is called by MMTk when initial thread scanning is complete
@@ -261,17 +258,16 @@ impl Scanning<RustVM> for RustScanning {
         } else {
             // Partial scan: just mark global roots grey for concurrent marking
             // This integrates with MMTk's incremental scanning approach
-            use crate::plan::FugcPlanManager;
-            if let Some(plan_manager) = FugcPlanManager::global() {
-                let tricolor = plan_manager.tricolor_marking();
+            let tricolor = coordinator.tricolor_marking();
 
-                // Get global roots and mark them grey for concurrent processing
-                let global_roots = Arc::new(GlobalRoots::default());
-                for root_ptr in global_roots.iter() {
-                    let addr = unsafe { crate::compat::Address::from_mut_ptr(root_ptr) };
-                    if let Some(obj_ref) = crate::compat::ObjectReference::from_raw_address(addr) {
-                        tricolor.mark_grey(obj_ref);
-                    }
+            // Get global roots and mark them grey for concurrent processing
+            let global_roots = Arc::new(GlobalRoots::default());
+            for root_ptr in global_roots.iter() {
+                let addr = unsafe { crate::frontend::types::Address::from_mut_ptr(root_ptr) };
+                if let Some(obj_ref) =
+                    crate::frontend::types::ObjectReference::from_raw_address(addr)
+                {
+                    tricolor.mark_grey(obj_ref);
                 }
             }
         }
@@ -282,22 +278,15 @@ impl Scanning<RustVM> for RustScanning {
     }
 
     fn prepare_for_roots_re_scanning() {
-        let coordinator = {
-            let manager = crate::binding::FUGC_PLAN_MANAGER
-                .get_or_init(|| ArcSwap::new(Arc::new(crate::plan::FugcPlanManager::new())))
-                .load();
-            Arc::clone(manager.get_fugc_coordinator())
-        };
+        // Access coordinator through global safepoint manager (maintains blackwall abstraction)
+        let coordinator = crate::safepoint::SafepointManager::global().get_fugc_coordinator();
+
         // Real MMTk integration: Prepare for FUGC Step 3 - Black Allocation
         // MMTk calls this before re-scanning roots to reset the marking state
         // This ensures the tricolor invariant is satisfied for the next collection cycle
 
         // Reset tricolor marking state for new collection cycle
-        use crate::plan::FugcPlanManager;
-        if let Some(plan_manager) = FugcPlanManager::global() {
-            let tricolor = plan_manager.tricolor_marking();
-            tricolor.reset_marking_state();
-        }
+        coordinator.tricolor_marking().reset_marking_state();
 
         // Notify FUGC coordinator that roots re-scanning is starting
         // This transitions the coordinator to prepare for black allocation activation
